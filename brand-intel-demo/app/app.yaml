@@ -1,0 +1,69 @@
+command:
+  - streamlit
+  - run
+  - app.py
+  - --server.port
+  - "8000"
+  - --server.address
+  - "0.0.0.0"
+  - --server.enableXsrfProtection
+  - "false"
+  - --server.enableCORS
+  - "false"
+
+# Template — fill in for your own workspace. Do NOT commit real values; set live
+# values on the deployed app. PGPASSWORD must come from a secret (valueFrom), never inline.
+env:
+  - name: LAKEBASE_HOST
+    value: "<YOUR_LAKEBASE_HOST>"          # e.g. ep-xxxx.database.<region>.cloud.databricks.com
+  - name: LAKEBASE_DB
+    value: "<YOUR_LAKEBASE_DB>"
+  - name: PGUSER
+    value: "<YOUR_LAKEBASE_USER>"          # e.g. app_principal
+  - name: PGPASSWORD
+    valueFrom: "lakebase-password"          # references the secret resource below — never inline a password
+  - name: DEMAND_GENIE_SPACE_ID
+    value: "<YOUR_DEMAND_GENIE_SPACE_ID>"
+  - name: INVENTORY_GENIE_SPACE_ID
+    value: "<YOUR_INVENTORY_GENIE_SPACE_ID>"
+  - name: WAREHOUSE_ID
+    value: "<YOUR_WAREHOUSE_ID>"
+  - name: CATALOG
+    value: "brand_intel_demo"
+  - name: APP_URL
+    value: "<YOUR_APP_URL>"
+
+resources:
+  - name: sql-warehouse
+    sql_warehouse:
+      id: "<YOUR_WAREHOUSE_ID>"
+      permission: CAN_USE
+  - name: lakebase-password
+    secret:
+      scope: "lakebase-scope"
+      key: "pgpassword"
+      permission: READ
+  - name: serving-endpoint
+    serving_endpoint:
+      name: "databricks-claude-sonnet-4"  # or any Foundation Model API endpoint
+      permission: CAN_QUERY
+  - name: smtp-secrets
+    secret:
+      scope: "smtp-scope"
+      key: "smtp-host"
+      permission: READ
+  - name: smtp-secrets-password
+    secret:
+      scope: "smtp-scope"
+      key: "smtp-password"
+      permission: READ
+  - name: smtp-secrets-user
+    secret:
+      scope: "smtp-scope"
+      key: "smtp-user"
+      permission: READ
+  - name: smtp-secrets-port
+    secret:
+      scope: "smtp-scope"
+      key: "smtp-port"
+      permission: READ
