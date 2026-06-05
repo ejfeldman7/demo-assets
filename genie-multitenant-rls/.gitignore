@@ -1,0 +1,21 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
+*.env
+.databrickscfg
+mlruns/
+*.egg-info/
+.DS_Store
+secrets.json
+config.local.json
+
+# Customer-specific / IP — never commit (kept only in the Google Doc + local diagram)
+*rightworks*
+*RightWorks*
+*.drawio
+*secure_architecture*
+# Branded / pre-rebrand screenshots (regenerate locally if needed)
+docs_screenshot_*.png
+*screenshot*.png

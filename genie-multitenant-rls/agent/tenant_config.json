@@ -1,0 +1,11 @@
+{
+  "warehouse_id": "<WAREHOUSE_ID>",
+  "genie_space_id": "<GENIE_SPACE_ID>",
+  "secret_scope": "genie_rls",
+  "_comment": "SCALABLE design: ONE shared Genie Space + ONE UC row filter (rls_firm_filter) keyed on current_user(); per-firm service principals mapped in demos.genie_rls.entitlements. The agent routes by the TRUSTED tenant_id (custom_inputs) -> reads that firm's OBO token (secret-backed env var FIRM_TOKEN_<firm>) -> calls Genie as that SP. Scales to N firms with N entitlements rows + N SPs, no per-tenant Spaces. SP tokens are provisioned/rotated by scripts/provision_sps.py.",
+  "tenants": {
+    "firm_001": {"firm_name": "Harbor & Vale CPA"},
+    "firm_002": {"firm_name": "Summit Ledger Partners"},
+    "firm_003": {"firm_name": "Cedar Creek Accounting"}
+  }
+}

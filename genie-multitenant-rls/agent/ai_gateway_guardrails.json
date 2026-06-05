@@ -1,0 +1,19 @@
+{
+  "_comment": "AI Gateway Safety + PII guardrails config. Apply to a guardrails-capable serving endpoint (external model — e.g. the customer's Azure OpenAI — or an FMAPI pay-per-token endpoint). NOT supported on Databricks-agent / custom-model endpoints (confirmed on <DATABRICKS_PROFILE>: 'AI Guardrails is not currently supported for this endpoint type'). Apply with: databricks serving-endpoints put-ai-gateway <ENDPOINT> --json @ai_gateway_guardrails.json",
+  "guardrails": {
+    "input": {
+      "safety": true,
+      "pii": { "behavior": "BLOCK" }
+    },
+    "output": {
+      "safety": true,
+      "pii": { "behavior": "BLOCK" }
+    }
+  },
+  "inference_table_config": {
+    "enabled": true,
+    "catalog_name": "demos",
+    "schema_name": "genie_rls",
+    "table_name_prefix": "llm_gateway"
+  }
+}

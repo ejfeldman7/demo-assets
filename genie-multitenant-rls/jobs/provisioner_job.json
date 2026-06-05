@@ -1,0 +1,27 @@
+{
+  "name": "firm-sp-provisioner",
+  "tasks": [
+    {
+      "task_key": "provision",
+      "spark_python_task": {
+        "python_file": "/Workspace/Users/<WORKSPACE_USERNAME>/genie-multitenant-rls/scripts/provision_sps.py"
+      },
+      "environment_key": "default"
+    }
+  ],
+  "environments": [
+    {
+      "environment_key": "default",
+      "spec": { "client": "4", "dependencies": ["databricks-sdk", "requests"] }
+    }
+  ],
+  "trigger": {
+    "table_update": {
+      "table_names": ["demos.genie_rls.firms"],
+      "condition": "ANY_UPDATED",
+      "min_time_between_triggers_seconds": 60
+    }
+  },
+  "queue": { "enabled": true },
+  "tags": { "project": "genie_rls" }
+}
