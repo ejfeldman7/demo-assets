@@ -1,0 +1,19 @@
+command: [
+  "streamlit", 
+  "run",
+  "app.py"
+]
+
+env:
+  - name: STREAMLIT_BROWSER_GATHER_USAGE_STATS
+    value: "false"
+  - name: STREAMLIT_SERVER_ENABLE_CORS
+    value: "false"
+  - name: STREAMLIT_SERVER_ENABLE_XSRF_PROTECTION
+    value: "false"
+  - name: "PGSSLMODE"
+    value: "require"
+  - name: "PGAPPNAME"
+    value: "uc-image-gallery"
+  # Note: PGHOST, PGDATABASE, PGUSER, PGPORT are automatically provided
+  # when you add the Lakebase database as a resource in Databricks Apps UI

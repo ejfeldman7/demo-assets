@@ -1,0 +1,8 @@
+resources:
+  apps:
+    uc_image_gallery_app:
+      name: "uc-image-gallery-${bundle.target}"
+      source_code_path: ../
+      description: "Unity Catalog Image Gallery - displays images from Unity Catalog volumes via Lakebase"
+      # Database resource added through Databricks Apps UI provides automatic environment variables
+      # This enables schema-flexible table discovery to find image_file_paths regardless of schema

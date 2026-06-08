@@ -1,0 +1,18 @@
+bundle:
+  name: uc-image-gallery
+
+include:
+  - resources/*.yml
+
+workspace:
+  root_path: "~/bundles/${bundle.name}/${bundle.target}"
+
+targets:
+  dev:
+    mode: development
+
+  demo:
+    mode: development
+
+  prod:
+    mode: production
