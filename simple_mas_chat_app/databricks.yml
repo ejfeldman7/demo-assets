@@ -1,0 +1,42 @@
+# Databricks Asset Bundle Configuration
+# Simple Chat Example
+
+bundle:
+  name: simple-chat-example
+
+resources:
+  apps:
+    simple_chat_app:
+      name: simple-chat-example
+      description: "Simple example of a chat application using Databricks Model Serving"
+
+      # Path to the app code
+      source_code_path: .
+
+      # User API scopes - Required for on-behalf-of user authorization
+      user_api_scopes:
+        - "sql"
+        - "serving.serving-endpoints"
+        - "dashboards.genie"
+
+      # Permissions: who can run this app
+      permissions:
+        - level: CAN_USE
+          group_name: users  # Grant all users permission to run the app
+
+      # App resources - Replace endpoint name with your own
+      resources:
+        - name: mas_endpoint
+          serving_endpoint:
+            name: your-endpoint-name  # Replace with your endpoint name
+            permission: CAN_QUERY
+
+# Define deployment targets
+targets:
+  dev:
+    mode: development
+    default: true
+    workspace:
+      host: https://your-workspace.cloud.databricks.com  # Replace with your workspace URL
+      profile: default  # Or your Databricks CLI profile name
+
