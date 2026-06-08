@@ -1,0 +1,48 @@
+# Jinja2 templated metric view - demonstrates environment-specific configuration
+# This file shows how to use templates for dynamic metric view generation
+version: "0.1"
+
+# Environment-specific deployment (optional)
+# Note: In CLI, environment is passed as parameter, in template testing it's inferred from config
+deployment:
+  catalog: "{{ catalog }}"
+  schema: "{{ schema }}"
+
+# Dynamic source table based on environment
+source: {{ data_sources.fact_orders }}
+
+# Apply environment-specific date filters
+filter: order_date > '{{ global.date_filters.min_date }}'
+
+dimensions:
+  - name: Order Month
+    expr: DATE_TRUNC('MONTH', order_date)
+  - name: Order Year  
+    expr: YEAR(order_date)
+  - name: Region
+    expr: customer_region
+  - name: Product Category
+    expr: product_category
+
+measures:
+  - name: Total Revenue
+    expr: SUM(order_amount)
+  - name: Order Count
+    expr: COUNT(*)
+  - name: Average Order Value
+    expr: AVG(order_amount)
+  - name: Unique Customers
+    expr: COUNT(DISTINCT customer_id)
+
+# Apply environment-specific tags
+tags:
+{% for key, value in tags.items() %}
+  {{ key }}: "{{ value }}"
+{% endfor %}
+
+# Environment-specific joins (example of conditional logic)
+# Production gets full joins, other environments get simpler structure
+joins:
+  - type: LEFT
+    source: {{ data_sources.dim_customers }}
+    condition: customer_id = customers.id

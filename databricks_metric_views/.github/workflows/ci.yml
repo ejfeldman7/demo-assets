@@ -1,0 +1,84 @@
+name: CI - Validate and Test
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  validate:
+    name: Validate DABs Bundle
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # - name: Setup Databricks CLI
+      #   uses: databricks/setup-cli@main
+
+      # - name: Validate bundle configuration
+      #   run: |
+      #     databricks bundle validate --target dev
+
+  enhanced-validation:
+    name: Enhanced YAML Validation
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install pyyaml jinja2
+
+      - name: Run YAML validation
+        run: |
+          python scripts/validate_yaml.py view_definitions/ --strict --format text
+
+      - name: Validate environment configurations
+        run: |
+          python scripts/environment_manager.py validate
+
+      - name: Test template rendering for all environments
+        run: |
+          echo "Checking for template files..."
+          if ls view_definitions/*.j2 1> /dev/null 2>&1; then
+            for env in dev staging prod; do
+              echo "Testing template rendering for $env environment..."
+              for template in view_definitions/*.j2; do
+                python scripts/environment_manager.py test "$template" $env
+              done
+            done
+          else
+            echo "✅ No template files found to test - using simple deployment mode"
+          fi
+
+  lint-and-format:
+    name: Lint and Format Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install ruff
+
+      - name: Run ruff format check
+        run: |
+          ruff format --check .
+
+      - name: Run ruff lint
+        run: |
+          ruff check .

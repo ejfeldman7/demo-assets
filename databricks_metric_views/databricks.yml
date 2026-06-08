@@ -1,0 +1,60 @@
+bundle:
+  name: metric_views_deployment
+  target: ${var.environment}
+
+variables:
+  environment:
+    description: "Environment name (dev, staging, prod)"
+    default: "dev"
+  
+  catalog:
+    description: "Unity Catalog catalog name"
+    default: "efeld_cuj"
+  
+  schema:
+    description: "Unity Catalog schema name" 
+    default: "exercises"
+    
+  sql_warehouse_id:
+    description: "SQL Warehouse ID for metric view operations"
+    default: "4b9b953939869799"
+
+include:
+  - resources/*.yml
+
+# Sync local files to workspace
+sync:
+  include:
+    - "simple_deploy_metric_views.py"
+    - "view_definitions/**"
+    - "scripts/**"
+    - "config/**"
+    - "tests/**"
+
+targets:
+  dev:
+    mode: development
+    workspace:
+      host: https://e2-demo-field-eng.cloud.databricks.com/
+      profile: e2-field-eng-west
+    variables:
+      catalog: "efeld_cuj"
+      schema: "exercises"
+      
+  staging:
+    mode: production
+    workspace:
+      host: https://e2-demo-field-eng.cloud.databricks.com/
+      profile: e2-field-eng-west
+    variables:
+      catalog: "efeld_cuj"
+      schema: "staging"
+      
+  prod:
+    mode: production
+    workspace:
+      host: https://e2-demo-field-eng.cloud.databricks.com/
+      profile: e2-field-eng-west
+    variables:
+      catalog: "efeld_cuj" 
+      schema: "prod"

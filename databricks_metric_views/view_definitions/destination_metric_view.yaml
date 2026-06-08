@@ -1,0 +1,22 @@
+version: "0.1"
+
+# Optional deployment override - if not specified, uses environment defaults
+deployment:
+  catalog: "efeld_cuj"  
+  schema: "default"
+
+source: efeld_cuj.exercises.turbine_current_status
+
+dimensions:
+  - name: turbine_id
+    expr: turbine_id
+
+  - name: location
+    expr: location
+
+measures:
+  - name: pct_ok
+    expr: round(sum(case when prediction = 'ok' then 1 else 0 end) / count(*), 2)
+
+  - name: pct_failing
+    expr: round(sum(case when prediction != 'ok' then 1 else 0 end) / count(*), 2)
