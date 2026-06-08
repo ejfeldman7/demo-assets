@@ -1,0 +1,18 @@
+bundle:
+  name: abac_helper_app
+
+resources:
+  apps:
+    abac_access_manager:
+      name: abac-helper
+      description: "Unity Catalog access management app"
+      source_code_path: app
+  sql_warehouses:
+    access_warehouse:
+      id: <ADD SQL WAREHOUSE ID HERE>
+
+targets:
+  dev:
+    mode: development
+    workspace:
+      host: https://<ADD HOST URL HERE>.cloud.databricks.com
