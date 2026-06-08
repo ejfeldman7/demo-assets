@@ -1,0 +1,75 @@
+{
+  "test_metadata": {
+    "view_name": "sample_metric_view",
+    "description": "Validation tests for sample metric view",
+    "created_date": "2024-01-01",
+    "test_count": 5
+  },
+  "expected_results": [
+    {
+      "test_name": "basic_functionality",
+      "description": "Ensure the view returns data", 
+      "query_index": 0,
+      "expected_conditions": [
+        {
+          "column": "row_count",
+          "operator": ">",
+          "value": 0,
+          "error_message": "View should return at least 1 row of data"
+        }
+      ]
+    },
+    {
+      "test_name": "valid_pct_ok_range",
+      "description": "Verify pct_ok is within valid range",
+      "query_index": 1,
+      "expected_conditions": [
+        {
+          "column": "invalid_pct_ok_count",
+          "operator": "=",
+          "value": 0,
+          "error_message": "All pct_ok values should be between 0 and 1"
+        }
+      ]
+    },
+    {
+      "test_name": "valid_pct_failing_range", 
+      "description": "Verify pct_failing is within valid range",
+      "query_index": 2,
+      "expected_conditions": [
+        {
+          "column": "invalid_pct_failing_count",
+          "operator": "=", 
+          "value": 0,
+          "error_message": "All pct_failing values should be between 0 and 1"
+        }
+      ]
+    },
+    {
+      "test_name": "percentage_sum_validation",
+      "description": "Verify percentages sum appropriately", 
+      "query_index": 3,
+      "expected_conditions": [
+        {
+          "column": "percentage_sum_violations",
+          "operator": "=",
+          "value": 0,
+          "error_message": "Sum of pct_ok and pct_failing should not exceed 1.01"
+        }
+      ]
+    },
+    {
+      "test_name": "data_completeness",
+      "description": "Ensure we have data for expected turbines",
+      "query_index": 4,
+      "expected_conditions": [
+        {
+          "column": "unique_turbines",
+          "operator": ">=", 
+          "value": 5,
+          "error_message": "Should have at least 5 unique turbine_ids in the data"
+        }
+      ]
+    }
+  ]
+}

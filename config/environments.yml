@@ -1,0 +1,74 @@
+# Environment-specific configuration for metric views deployment
+# This file defines the variables that will be substituted into metric view templates
+
+dev:
+  catalog: efeld_cuj
+  schema: exercises
+  warehouse_id: "4b9b953939869799"
+  # Tags applied to all views in this environment
+  tags:
+    Environment: dev
+    DataSource: dev_pipeline
+    Owner: data-engineering-team
+  # Environment-specific data sources
+  data_sources:
+    fact_orders: efeld_cuj.exercises.turbine_current_status
+    dim_customers: efeld_cuj.exercises.customer_data
+    dim_products: efeld_cuj.exercises.product_catalog
+
+staging:
+  catalog: efeld_cuj
+  schema: staging
+  warehouse_id: "4b9b953939869799" 
+  tags:
+    Environment: staging
+    DataSource: staging_pipeline
+    Owner: data-engineering-team
+  data_sources:
+    fact_orders: efeld_cuj.staging.turbine_current_status
+    dim_customers: efeld_cuj.staging.customer_data
+    dim_products: efeld_cuj.staging.product_catalog
+
+prod:
+  catalog: efeld_cuj
+  schema: metrics
+  warehouse_id: "4b9b953939869799"
+  tags:
+    Environment: prod
+    DataSource: prod_pipeline
+    Owner: analytics-team
+    Certified: "true"
+  data_sources:
+    fact_orders: efeld_cuj.prod.turbine_current_status
+    dim_customers: efeld_cuj.prod.customer_data
+    dim_products: efeld_cuj.prod.product_catalog
+
+# Global configuration applied to all environments
+global:
+  # Default view options
+  view_options:
+    security_level: "restricted"
+    refresh_policy: "on_demand"
+  
+  # Date filters for templated views
+  date_filters:
+    min_date: "1990-01-01"
+    max_date: "2030-12-31"
+  
+  # Common dimensions that can be referenced across metric views
+  common_dimensions:
+    date_dimensions:
+      - name: year
+        expr: YEAR({{ date_column }})
+      - name: month  
+        expr: MONTH({{ date_column }})
+      - name: quarter
+        expr: QUARTER({{ date_column }})
+    
+  # Common measures
+  common_measures:
+    count_measures:
+      - name: total_count
+        expr: COUNT(*)
+      - name: distinct_count
+        expr: COUNT(DISTINCT {{ id_column }})

@@ -1,0 +1,17 @@
+# DABs Metric Views - Code Ownership
+
+# Global owners for the entire repository
+* @ethan.feldman
+
+# Require approval for critical infrastructure and deployment code
+/.github/ @ethan.feldman
+/databricks.yml @ethan.feldman
+/resources/ @ethan.feldman
+/deploy_metric_views.py @ethan.feldman
+/scripts/ @ethan.feldman
+
+# Require approval for view definitions (can be extended to team)
+/view_definitions/ @ethan.feldman
+
+# Documentation files
+/README.md @ethan.feldman

@@ -1,0 +1,81 @@
+resources:
+  jobs:
+    metric_views_deployment:
+      name: "Metric Views Deployment - ${var.environment}"
+  
+      
+      tasks:
+        # Deploy metric views using uploaded Python file with serverless compute
+        - task_key: "deploy_metric_views"
+          spark_python_task:
+            python_file: "${workspace.file_path}/deploy_metric_views.py"
+            parameters:
+              - "--environment"
+              - "${var.environment}"
+              - "--catalog"
+              - "${var.catalog}"
+              - "--schema" 
+              - "${var.schema}"
+              - "--warehouse-id"
+              - "${var.sql_warehouse_id}"
+              - "--verbose"
+          
+          # The key that references an environment spec for serverless compute
+          environment_key: default
+          timeout_seconds: 3600
+
+        # Run automated tests to validate deployed metric views
+        - task_key: "test_metric_views"
+          depends_on:
+            - task_key: "deploy_metric_views"
+          spark_python_task:
+            python_file: "${workspace.file_path}/scripts/test_runner.py"
+            parameters:
+              - "--environment"
+              - "${var.environment}"
+              - "--catalog"
+              - "${var.catalog}"
+              - "--schema"
+              - "${var.schema}"
+              - "--warehouse-id"
+              - "${var.sql_warehouse_id}"
+              - "--verbose"
+          
+          environment_key: default
+          timeout_seconds: 1800
+      
+      # List of task execution environment specifications for serverless compute
+      environments:
+        - environment_key: default
+          spec:
+            environment_version: '2'
+            client: '1'
+            dependencies:
+              - databricks-sdk
+              - pyyaml
+              - jinja2
+              - databricks-sql-connector
+              - pandas
+          
+      # Job-level settings
+      tags:
+        Project: "MetricViews"
+        Environment: "${var.environment}"
+        ComputeType: "Serverless"
+      
+      # Email notifications
+      email_notifications:
+        on_failure:
+          - "your.email@company.com"
+        on_success:
+          - "your.email@company.com"
+          
+      # Trigger settings (optional - can be managed via GitHub Actions)
+      # trigger:
+      #   file_arrival:
+      #     url: "/Workspace/Repos/metric_views/view_definitions/"
+      #     min_time_between_triggers_seconds: 60
+        
+      # Timeout and retry settings  
+      timeout_seconds: 7200
+      max_concurrent_runs: 1
