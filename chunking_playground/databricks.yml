@@ -1,0 +1,23 @@
+# Databricks Apps Configuration
+# This file defines how to deploy the Chunking Playground as a Databricks App
+
+bundle:
+  name: chunking_playground
+
+resources:
+  apps:
+    chunking_playground:
+      name: chunking-playground
+      description: "Interactive playground for testing text chunking strategies for RAG applications"
+      
+      # Source code configuration
+      source_code_path: ./src
+
+targets:
+  dev:
+    mode: development
+    # Configure your workspace host in your Databricks CLI profile
+    # or uncomment and set below:
+    # workspace:
+    #   host: https://your-workspace.cloud.databricks.com
+
