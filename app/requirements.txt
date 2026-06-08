@@ -1,0 +1,5 @@
+streamlit>=1.30.0
+databricks-sql-connector>=3.0.0
+databricks-sdk>=0.49.0
+polars>=1.26.0
+plotly>=5.17.0
