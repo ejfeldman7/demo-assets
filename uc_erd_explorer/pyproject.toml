@@ -1,0 +1,11 @@
+[project]
+name = "erd-explorer"
+version = "0.1.0"
+description = "Interactive Unity Catalog ERD viewer (megacorp) — Databricks App"
+requires-python = ">=3.11"
+dependencies = [
+    "databricks-sdk>=0.88.0",
+    "fastapi>=0.129.0",
+    "pydantic>=2.12.5",
+    "uvicorn[standard]>=0.40.0",
+]

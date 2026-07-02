@@ -13,6 +13,7 @@ A collection of Databricks demo applications and reference implementations, orga
 | [`simple_mas_chat_app`](./simple_mas_chat_app) | Minimal Streamlit chat app wired to a Databricks Model Serving (MAS) endpoint, ~100 lines with OAuth auth |
 | [`uc_metadata_auditor`](./uc_metadata_auditor) | Flask app for AI-powered Unity Catalog metadata generation, PII detection, and governance workflows |
 | [`lakebase_image_serving`](./lakebase_image_serving) | Streamlit app that browses AI image predictions from Unity Catalog volumes, using Lakebase for fast metadata filtering |
+| [`uc_erd_explorer`](./uc_erd_explorer) | Interactive entity-relationship diagram viewer for Unity Catalog (FastAPI + React), with click-to-filter and a Genie chat hard-scoped to approved catalogs via dedicated metadata views rather than prompt instructions |
 
 ### Pipelines & Frameworks
 

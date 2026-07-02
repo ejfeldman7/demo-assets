@@ -1,0 +1,28 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+dist-ssr
+*.local
+
+# NOTE: dist/ is intentionally NOT ignored (unlike most Vite projects). This app supports
+# a notebook/Git-folder deploy route with no local npm/node available -- if dist/ isn't
+# committed, a fresh Git folder clone has no way to produce it. Run `npm run build` and
+# commit the updated frontend/dist/ after any change to frontend/src/.
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?

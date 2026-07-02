@@ -1,0 +1,25 @@
+command:
+  - "python"
+  - "-m"
+  - "uvicorn"
+  - "app:app"
+  - "--host"
+  - "0.0.0.0"
+  - "--port"
+  - "8000"
+# NOTE: if you deploy via `databricks bundle deploy` (the recommended/documented path,
+# see README.md), databricks.yml's config.env overrides these with your --var values --
+# this file is only used as a fallback for a direct `databricks apps deploy` bypassing
+# the bundle. Replace the placeholders below with your own values either way.
+env:
+  - name: "DATABRICKS_WAREHOUSE_ID"
+    value: "REPLACE_WITH_YOUR_WAREHOUSE_ID"
+  - name: "ERD_CATALOGS"
+    value: "megacorp"
+    # Comma-separated catalog allow-list for the ERD graph (e.g. "megacorp,other_catalog").
+  - name: "GENIE_SPACE_ID"
+    value: ""
+    # Set by setup/create_genie_space.py after you run it (see README.md) -- the Genie
+    # Space's actual data source/boundary is the scoped views from
+    # setup/create_scoped_views.py, not this app; this only tells the chat proxy which
+    # space to talk to. Leave blank until you've run the setup step at least once.
