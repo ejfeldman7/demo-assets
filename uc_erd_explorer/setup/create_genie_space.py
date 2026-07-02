@@ -81,13 +81,21 @@ Rules:
 def example_sql_for_views(catalogs: list, loc: str) -> list:
     """Catalog-agnostic example Q+SQL pairs against the 3 curated views -- teaches the
     query pattern without assuming any particular customer's table names."""
-    example_catalog = catalogs[0]
-    return [
-        (
+    examples = []
+    if catalogs:
+        example_catalog = catalogs[0]
+        examples.append((
             f"Show all tables in the {example_catalog} catalog.",
             f"SELECT table_schema, table_name, table_type FROM {loc}.table_summary "
             f"WHERE table_catalog = '{example_catalog}' ORDER BY table_schema, table_name;",
-        ),
+        ))
+    else:
+        examples.append((
+            "Show all tables and which catalog they're in.",
+            f"SELECT table_catalog, table_schema, table_name, table_type FROM {loc}.table_summary "
+            f"ORDER BY table_catalog, table_schema, table_name;",
+        ))
+    examples += [
         (
             "Which tables have no foreign key relationships?",
             f"SELECT table_catalog, table_schema, table_name FROM {loc}.table_summary "
@@ -115,17 +123,20 @@ def example_sql_for_views(catalogs: list, loc: str) -> list:
             f"FROM {loc}.fk_edges ORDER BY pk_catalog, pk_schema, pk_table;",
         ),
     ]
+    return examples
 
 
 def benchmarks_for_views(catalogs: list, loc: str) -> list:
     """(question, expected_answer_shape) pairs for the validation checklist / Genie
     benchmarks feature -- adjust expected content per-catalog after first deploy."""
-    example_catalog = catalogs[0]
-    return [
-        (
+    benchmarks = []
+    if catalogs:
+        example_catalog = catalogs[0]
+        benchmarks.append((
             f"How many tables are in the {example_catalog} catalog?",
             "A single number matching the row count of table_summary filtered to that catalog.",
-        ),
+        ))
+    benchmarks += [
         (
             "Which tables have no foreign keys?",
             "A list of tables from table_summary where outgoing_foreign_key_count = 0.",
@@ -135,6 +146,7 @@ def benchmarks_for_views(catalogs: list, loc: str) -> list:
             "A fk_table.fk_column -> pk_table.pk_column pair sourced from fk_edges, not invented.",
         ),
     ]
+    return benchmarks
 
 
 def find_managed_space_id(w) -> str | None:
@@ -154,23 +166,31 @@ def find_managed_space_id(w) -> str | None:
 
 
 def resolve_catalogs(arg_value: str) -> list:
+    """[] means unscoped mode (deliberate: no --catalogs / ERD_CATALOGS given) -- per
+    user decision, an unscoped ERD_CATALOGS means an unscoped Genie Space too, not a
+    silent fallback to a demo catalog."""
     if arg_value:
         return [c.strip() for c in arg_value.split(",") if c.strip()]
     env_value = os.environ.get("ERD_CATALOGS")
     if env_value:
         return [c.strip() for c in env_value.split(",") if c.strip()]
-    return ["megacorp"]
+    return []
 
 
 def resolve_metadata_location(arg_value: str, catalogs: list) -> str:
     raw = arg_value or os.environ.get("ERD_METADATA_LOCATION", "")
     if raw and "." in raw:
         return raw
-    return f"{catalogs[0]}.erd_meta"
+    if catalogs:
+        return f"{catalogs[0]}.erd_meta"
+    raise SystemExit(
+        "--metadata-location (or ERD_METADATA_LOCATION) is required when --catalogs is "
+        "empty (unscoped mode) -- there's no catalog to default the metadata views into."
+    )
 
 
 def build_serialized_space(catalogs: list, loc: str, warehouse_id: str) -> GenieSpaceBuilder:
-    catalog_list = ", ".join(catalogs)
+    catalog_list = ", ".join(catalogs) if catalogs else "ALL catalogs visible to this deployment"
     builder = GenieSpaceBuilder(
         title=f"ERD Schema Assistant ({catalog_list})",
         description=(
@@ -202,7 +222,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--profile", default=None, help="Omit to use ambient auth (job/app compute).")
     parser.add_argument("--warehouse-id", required=True)
-    parser.add_argument("--catalogs", default="", help="Comma-separated. Defaults to ERD_CATALOGS env var, then 'megacorp'.")
+    parser.add_argument("--catalogs", default="", help="Comma-separated. Defaults to ERD_CATALOGS env var, then unscoped (all catalogs visible to this deployment).")
     parser.add_argument("--metadata-location", default="", help='"catalog.schema" where the scoped views live (see create_scoped_views.py). Defaults to ERD_METADATA_LOCATION env var, then "<first catalog>.erd_meta".')
     parser.add_argument(
         "--grant-to-app",
@@ -216,7 +236,7 @@ def main():
 
     catalogs = resolve_catalogs(args.catalogs)
     loc = resolve_metadata_location(args.metadata_location, catalogs)
-    print(f"Scoping Genie Space to catalogs: {catalogs}")
+    print(f"Scoping Genie Space to catalogs: {catalogs or 'ALL (unscoped)'}")
     print(f"Reading curated views from: {loc}")
 
     w = WorkspaceClient(profile=args.profile) if args.profile else WorkspaceClient()

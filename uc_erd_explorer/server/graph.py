@@ -1,13 +1,18 @@
 """
 Build the ERD graph (nodes + edges) for the configured catalog allow-list
-(`config.get_catalogs()`, defaults to just `megacorp`) by querying
-`system.information_schema` via a SQL warehouse.
+(`config.get_catalogs()`) by querying `system.information_schema` via a SQL warehouse.
 
 system.information_schema aggregates PK/FK/table/column metadata across every catalog
 in the metastore in one query (privilege-filtered per caller, same as the per-catalog
-views -- verified empirically, no special enablement needed). We always filter every
-query to `table_catalog IN (<configured catalogs>)` so a deployment only ever sees the
-catalogs it was scoped to, regardless of what else the app's service principal can browse.
+views -- verified empirically, no special enablement needed). When ERD_CATALOGS is set,
+we filter every query to `table_catalog IN (<configured catalogs>)` so a deployment only
+ever sees the catalogs it was scoped to. When ERD_CATALOGS is unset (get_catalogs()
+returns None), this is deliberate "unscoped" mode: no catalog filter is applied at all,
+and the graph shows every catalog the app's own credentials can browse (still bounded by
+Unity Catalog's own privilege filtering -- "unscoped" means "whatever this deployment's
+grants allow," not literally every catalog that exists). Per user decision, Genie Space
+setup mirrors this: unscoped ERD_CATALOGS means an unscoped Genie Space too (see
+setup/create_scoped_views.py) -- this is a deliberate, documented choice, not a gap.
 
 Nodes  = tables (with their columns; each column flagged is_pk / is_fk).
 Edges  = FOREIGN KEY -> PRIMARY KEY relationships (direction: FK table -> PK table).
@@ -24,21 +29,40 @@ from databricks.sdk.service import sql
 
 from .config import get_catalogs, get_metadata_location, get_warehouse_id, get_workspace_client
 
-# In-memory cache: {(frozenset(catalogs), frozenset(schemas)): (timestamp, payload)}
+# In-memory cache: {(frozenset(catalogs), frozenset(pairs)): (timestamp, payload)}
 _CACHE: Dict[Tuple[frozenset, frozenset], Tuple[float, Dict[str, Any]]] = {}
 _CACHE_TTL_SECONDS = 300  # 5 minutes
 
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9_]+$")
 
 
-def validate_schema_names(schemas: List[str]) -> List[str]:
-    """Validate requested schema names, raising ValueError naming the bad one(s) rather
-    than silently dropping them -- a caller who mistypes a schema name should get a clear
-    400, not a graph silently widened back to every schema in scope."""
-    invalid = [s for s in schemas if not _IDENTIFIER_RE.match(s)]
-    if invalid:
-        raise ValueError(f"Invalid schema name(s): {invalid}")
-    return schemas
+def validate_pairs(pairs: List[Tuple[str, str]], allowed_catalogs: Optional[List[str]]) -> List[Tuple[str, str]]:
+    """Validate requested (catalog, schema) pairs -- from the frontend's catalog/schema
+    tree picker -- raising ValueError naming the bad one(s) rather than silently dropping
+    them (a caller who mistypes/requests something invalid should get a clear 400, not a
+    graph silently widened back to everything in scope). Also enforces that every
+    requested catalog is within the configured ERD_CATALOGS allow-list when one is set
+    (allowed_catalogs=None means unscoped -- any catalog name is fine, still subject to
+    the identifier check and to whatever UC privileges actually apply)."""
+    bad_format = [f"{c}.{s}" for c, s in pairs if not (_IDENTIFIER_RE.match(c) and _IDENTIFIER_RE.match(s))]
+    if bad_format:
+        raise ValueError(f"Invalid catalog.schema pair(s): {bad_format}")
+    if allowed_catalogs is not None:
+        allowed = set(allowed_catalogs)
+        out_of_scope = sorted({c for c, _ in pairs if c not in allowed})
+        if out_of_scope:
+            raise ValueError(f"Catalog(s) not in this deployment's allow-list: {out_of_scope}")
+    return pairs
+
+
+def _pair_in_clause(catalog_col: str, schema_col: str, pairs: List[Tuple[str, str]]) -> str:
+    """Build a safe SQL tuple-IN clause matching exact (catalog, schema) combinations --
+    the correct model for a catalog/schema tree picker, where the same schema name can be
+    selected under one catalog and not another (a flat schema-name filter can't express
+    that)."""
+    safe = [(c, s) for c, s in pairs if _IDENTIFIER_RE.match(c) and _IDENTIFIER_RE.match(s)]
+    tuples = ", ".join(f"('{c}', '{s}')" for c, s in safe)
+    return f"({catalog_col}, {schema_col}) IN ({tuples})" if tuples else "1=0"
 
 
 def _internal_schema_exclusion_sql(catalog_col: str, schema_col: str) -> str:
@@ -55,7 +79,11 @@ def _internal_schema_exclusion_sql(catalog_col: str, schema_col: str) -> str:
         meta_catalog, meta_schema = "", ""
     return (
         f"{schema_col} != 'information_schema' "
-        f"AND NOT ({catalog_col} = '{meta_catalog}' AND {schema_col} = '{meta_schema}')"
+        f"AND NOT ({catalog_col} = '{meta_catalog}' AND {schema_col} = '{meta_schema}') "
+        # Databricks-internal plumbing catalogs (e.g. __databricks_internal_catalog_...)
+        # -- only surfaces in unscoped mode, since a scoped ERD_CATALOGS would never
+        # deliberately name one of these, but worth excluding unconditionally either way.
+        f"AND substring({catalog_col}, 1, 2) != '__'"
     )
 
 
@@ -90,40 +118,43 @@ def _in_clause(values: List[str]) -> str:
 # --- queries ----------------------------------------------------------------
 
 
-def _query_columns(catalogs: List[str], schemas: Optional[List[str]]) -> List[List[Any]]:
-    """All columns for the in-scope catalogs (optionally filtered to given schemas)."""
-    catalog_clause = _in_clause(catalogs)
-    schema_filter = f"AND table_schema IN {_in_clause(schemas)}" if schemas else ""
+def _query_columns(catalogs: Optional[List[str]], pairs: Optional[List[Tuple[str, str]]]) -> List[List[Any]]:
+    """All columns for the in-scope catalogs (optionally narrowed to exact catalog.schema
+    pairs). catalogs=None means unscoped -- no catalog filter at all."""
+    catalog_filter = f"AND table_catalog IN {_in_clause(catalogs)}" if catalogs else ""
+    pair_filter = f"AND {_pair_in_clause('table_catalog', 'table_schema', pairs)}" if pairs else ""
     stmt = f"""
     SELECT table_catalog, table_schema, table_name, column_name, full_data_type, ordinal_position
     FROM system.information_schema.columns
-    WHERE table_catalog IN {catalog_clause}
-      AND {_internal_schema_exclusion_sql("table_catalog", "table_schema")}
-      {schema_filter}
+    WHERE {_internal_schema_exclusion_sql("table_catalog", "table_schema")}
+      {catalog_filter}
+      {pair_filter}
     ORDER BY table_catalog, table_schema, table_name, ordinal_position
     """
     return _rows(_execute(stmt))
 
 
-def _query_tables(catalogs: List[str], schemas: Optional[List[str]]) -> List[List[Any]]:
-    """Every table (incl. those with no FK) so isolated nodes still render."""
-    catalog_clause = _in_clause(catalogs)
-    schema_filter = f"AND table_schema IN {_in_clause(schemas)}" if schemas else ""
+def _query_tables(catalogs: Optional[List[str]], pairs: Optional[List[Tuple[str, str]]]) -> List[List[Any]]:
+    """Every table (incl. those with no FK) so isolated nodes still render.
+    catalogs=None means unscoped -- no catalog filter at all."""
+    catalog_filter = f"AND table_catalog IN {_in_clause(catalogs)}" if catalogs else ""
+    pair_filter = f"AND {_pair_in_clause('table_catalog', 'table_schema', pairs)}" if pairs else ""
     stmt = f"""
     SELECT table_catalog, table_schema, table_name
     FROM system.information_schema.tables
-    WHERE table_catalog IN {catalog_clause}
-      AND {_internal_schema_exclusion_sql("table_catalog", "table_schema")}
-      {schema_filter}
+    WHERE {_internal_schema_exclusion_sql("table_catalog", "table_schema")}
+      {catalog_filter}
+      {pair_filter}
     ORDER BY table_catalog, table_schema, table_name
     """
     return _rows(_execute(stmt))
 
 
-def _query_primary_keys(catalogs: List[str], schemas: Optional[List[str]]) -> List[List[Any]]:
-    """(catalog, schema, table, column) tuples that participate in a PRIMARY KEY."""
-    catalog_clause = _in_clause(catalogs)
-    schema_filter = f"AND kcu.table_schema IN {_in_clause(schemas)}" if schemas else ""
+def _query_primary_keys(catalogs: Optional[List[str]], pairs: Optional[List[Tuple[str, str]]]) -> List[List[Any]]:
+    """(catalog, schema, table, column) tuples that participate in a PRIMARY KEY.
+    catalogs=None means unscoped -- no catalog filter at all."""
+    catalog_filter = f"AND tc.constraint_catalog IN {_in_clause(catalogs)}" if catalogs else ""
+    pair_filter = f"AND {_pair_in_clause('kcu.table_catalog', 'kcu.table_schema', pairs)}" if pairs else ""
     stmt = f"""
     SELECT kcu.table_catalog, kcu.table_schema, kcu.table_name, kcu.column_name
     FROM system.information_schema.table_constraints tc
@@ -132,23 +163,24 @@ def _query_primary_keys(catalogs: List[str], schemas: Optional[List[str]]) -> Li
      AND tc.constraint_schema  = kcu.constraint_schema
      AND tc.constraint_name    = kcu.constraint_name
     WHERE tc.constraint_type = 'PRIMARY KEY'
-      AND tc.constraint_catalog IN {catalog_clause}
       AND {_internal_schema_exclusion_sql("kcu.table_catalog", "kcu.table_schema")}
-      {schema_filter}
+      {catalog_filter}
+      {pair_filter}
     """
     return _rows(_execute(stmt))
 
 
-def _query_foreign_keys(catalogs: List[str]) -> List[List[Any]]:
+def _query_foreign_keys(catalogs: Optional[List[str]]) -> List[List[Any]]:
     """
     FK -> PK relationships sourced from system.information_schema (aggregates all
     catalogs in one query; privilege-filtered per caller). We scope to the configured
-    catalog allow-list and then filter edge endpoints to the requested schemas/catalogs
-    in Python (via the `present` node-id set in build_graph) so cross-schema AND
-    cross-catalog edges are handled correctly, while anything pointing outside the
-    allow-list is dropped rather than leaking that catalog's existence.
+    catalog allow-list (or apply no filter at all when catalogs=None, i.e. unscoped mode)
+    and then filter edge endpoints to the requested pairs/catalogs in Python (via the
+    `present` node-id set in build_graph) so cross-schema AND cross-catalog edges are
+    handled correctly, while anything pointing outside the allow-list is dropped rather
+    than leaking that catalog's existence.
     """
-    catalog_clause = _in_clause(catalogs)
+    catalog_filter = f"AND ref.constraint_catalog IN {_in_clause(catalogs)}" if catalogs else ""
     stmt = f"""
     SELECT fk.table_catalog fk_catalog, fk.table_schema fk_schema, fk.table_name fk_table,
            fkc.column_name fk_column, fkc.ordinal_position,
@@ -167,10 +199,34 @@ def _query_foreign_keys(catalogs: List[str]) -> List[List[Any]]:
     JOIN system.information_schema.key_column_usage pkc
       ON pk.constraint_catalog=pkc.constraint_catalog AND pk.constraint_schema=pkc.constraint_schema
      AND pk.constraint_name=pkc.constraint_name AND fkc.position_in_unique_constraint=pkc.ordinal_position
-    WHERE ref.constraint_catalog IN {catalog_clause}
+    WHERE 1=1
+      {catalog_filter}
     ORDER BY ref.constraint_name, fkc.ordinal_position
     """
     return _rows(_execute(stmt))
+
+
+# --- catalog/schema tree (lightweight, for the frontend picker) -------------
+
+
+def list_catalog_schemas() -> List[Dict[str, Any]]:
+    """Enumerate catalog -> [schema, ...] for the frontend's catalog/schema tree picker,
+    without fetching the full graph. Respects the same scope as build_graph (the
+    ERD_CATALOGS allow-list, or every catalog visible if unset)."""
+    catalogs = get_catalogs()
+    catalog_filter = f"AND table_catalog IN {_in_clause(catalogs)}" if catalogs else ""
+    stmt = f"""
+    SELECT DISTINCT table_catalog, table_schema
+    FROM system.information_schema.tables
+    WHERE {_internal_schema_exclusion_sql("table_catalog", "table_schema")}
+      {catalog_filter}
+    ORDER BY table_catalog, table_schema
+    """
+    rows = _rows(_execute(stmt))
+    tree: Dict[str, List[str]] = {}
+    for catalog, schema in rows:
+        tree.setdefault(catalog, []).append(schema)
+    return [{"catalog": c, "schemas": sorted(s)} for c, s in sorted(tree.items())]
 
 
 # --- graph assembly ---------------------------------------------------------
@@ -180,22 +236,25 @@ def _node_id(catalog: str, schema: str, table: str) -> str:
     return f"{catalog}.{schema}.{table}"
 
 
-def build_graph(schemas: Optional[List[str]] = None) -> Dict[str, Any]:
-    """Build (or return cached) {nodes, edges} for the configured catalog allow-list,
-    optionally further filtered to specific schemas."""
-    catalogs = get_catalogs()
-    if schemas:
-        validate_schema_names(schemas)  # raises ValueError naming the bad entry, rather
-        # than silently dropping it and widening the result back to every schema in scope.
-    key = (frozenset(catalogs), frozenset(schemas or ()))
+def build_graph(pairs: Optional[List[Tuple[str, str]]] = None) -> Dict[str, Any]:
+    """Build (or return cached) {nodes, edges} for the configured catalog allow-list
+    (or every catalog visible to this deployment, if ERD_CATALOGS is unset -- see module
+    docstring), optionally further narrowed to exact (catalog, schema) pairs -- the model
+    the frontend's catalog/schema tree picker uses (a flat schema-name filter can't
+    express "schema X under catalog A but not under catalog B")."""
+    catalogs = get_catalogs()  # None means unscoped
+    if pairs:
+        validate_pairs(pairs, catalogs)  # raises ValueError naming the bad entry, rather
+        # than silently dropping it and widening the result back to everything in scope.
+    key = (frozenset(catalogs or ()), frozenset(pairs or ()))
 
     cached = _CACHE.get(key)
     if cached and (time.time() - cached[0]) < _CACHE_TTL_SECONDS:
         return cached[1]
 
-    tables = _query_tables(catalogs, schemas)
-    columns = _query_columns(catalogs, schemas)
-    pks = _query_primary_keys(catalogs, schemas)
+    tables = _query_tables(catalogs, pairs)
+    columns = _query_columns(catalogs, pairs)
+    pks = _query_primary_keys(catalogs, pairs)
     fks = _query_foreign_keys(catalogs)
 
     # Set of table node-ids present in this view (drives edge filtering).
@@ -266,8 +325,12 @@ def build_graph(schemas: Optional[List[str]] = None) -> Dict[str, Any]:
     nodes.sort(key=lambda n: (n["catalog"], n["schema"], n["table"]))
 
     payload = {
-        "catalogs": catalogs,
-        "schemas": schemas,
+        # Actual catalogs present in this result, not just the configured allow-list --
+        # correct in both scoped mode (subset of ERD_CATALOGS) and unscoped mode
+        # (catalogs=None), and always what the frontend needs to render its picker.
+        "catalogs": sorted({n["catalog"] for n in nodes}),
+        "unscoped": catalogs is None,
+        "pairs": [f"{c}.{s}" for c, s in pairs] if pairs else None,
         "nodes": nodes,
         "edges": edges,
     }

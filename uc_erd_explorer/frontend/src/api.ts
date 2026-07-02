@@ -1,10 +1,20 @@
-import type { GraphResponse, SchemaFilter } from './types'
+import type { GraphResponse, SchemaTreeResponse } from './types'
 
-export async function fetchGraph(schemas: SchemaFilter): Promise<GraphResponse> {
-  const qs = schemas === 'both' ? '' : `?schemas=${schemas}`
+export async function fetchSchemaTree(): Promise<SchemaTreeResponse> {
+  const res = await fetch('/api/schema-tree')
+  if (!res.ok) {
+    throw new Error(`Failed to load catalog/schema tree: ${res.status} ${res.statusText}`)
+  }
+  return res.json()
+}
+
+/** pairs = list of "catalog.schema" strings to narrow to. Omit/undefined for everything in scope. */
+export async function fetchGraph(pairs?: string[]): Promise<GraphResponse> {
+  const qs = pairs && pairs.length > 0 ? `?pairs=${encodeURIComponent(pairs.join(','))}` : ''
   const res = await fetch(`/api/graph${qs}`)
   if (!res.ok) {
-    throw new Error(`Failed to load graph: ${res.status} ${res.statusText}`)
+    const detail = await res.json().catch(() => null)
+    throw new Error(detail?.detail ?? `Failed to load graph: ${res.status} ${res.statusText}`)
   }
   return res.json()
 }

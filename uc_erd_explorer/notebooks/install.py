@@ -28,8 +28,8 @@
 dbutils.widgets.text("repo_root", "", "Workspace path to this repo's root (required -- e.g. /Workspace/Users/you@company.com/erd-explorer). Right-click the folder in the workspace browser and choose \"Copy path\" if unsure.")
 dbutils.widgets.text("app_name", "erd-explorer", "Databricks App name")
 dbutils.widgets.text("warehouse_id", "", "SQL warehouse id (required)")
-dbutils.widgets.text("erd_catalogs", "megacorp", "Catalogs to visualize (comma-separated)")
-dbutils.widgets.text("erd_metadata_location", "", "Genie metadata views location \"catalog.schema\" (blank = <first catalog>.erd_meta)")
+dbutils.widgets.text("erd_catalogs", "megacorp", "Catalogs to visualize (comma-separated; leave BLANK for unscoped -- every catalog visible to this deployment, including Genie)")
+dbutils.widgets.text("erd_metadata_location", "", "Genie metadata views location \"catalog.schema\" (blank = <first catalog>.erd_meta; REQUIRED if erd_catalogs is blank)")
 dbutils.widgets.dropdown("create_demo_catalog", "no", ["yes", "no"], "Create the synthetic megacorp demo catalog first?")
 
 repo_root_widget = dbutils.widgets.get("repo_root").strip()
@@ -40,10 +40,10 @@ erd_metadata_location_raw = dbutils.widgets.get("erd_metadata_location").strip()
 create_demo_catalog = dbutils.widgets.get("create_demo_catalog") == "yes"
 
 assert repo_root_widget, "repo_root widget is required -- the Workspace path to this repo's checkout"
-
 assert app_name, "app_name widget is required"
 assert warehouse_id, "warehouse_id widget is required -- pick any SQL warehouse id from your workspace"
-assert erd_catalogs_raw, "erd_catalogs widget is required"
+# erd_catalogs is intentionally NOT required -- leaving it blank is a deliberate "unscoped"
+# mode (every catalog visible to this deployment's credentials), matching server/config.py.
 
 catalogs = [c.strip() for c in erd_catalogs_raw.split(",") if c.strip()]
 # Same guard as the CLI route's resolve_metadata_location() -- only treat the widget
@@ -51,8 +51,13 @@ catalogs = [c.strip() for c in erd_catalogs_raw.split(",") if c.strip()]
 # the computed default instead of crashing on `.split(".", 1)` unpacking a 1-element list.
 if erd_metadata_location_raw and "." in erd_metadata_location_raw:
     metadata_location = erd_metadata_location_raw
-else:
+elif catalogs:
     metadata_location = f"{catalogs[0]}.erd_meta"
+else:
+    raise ValueError(
+        "erd_metadata_location is required when erd_catalogs is blank (unscoped mode) "
+        "-- there's no catalog to default the metadata views into."
+    )
 metadata_catalog, metadata_schema = metadata_location.split(".", 1)
 
 print(f"app_name={app_name}")

@@ -12,34 +12,46 @@ from databricks.sdk import WorkspaceClient
 # Detect environment: Databricks Apps sets DATABRICKS_APP_NAME.
 IS_DATABRICKS_APP = bool(os.environ.get("DATABRICKS_APP_NAME"))
 
-# Which catalogs the ERD graph is allowed to show. Comma-separated via env var so a
-# deployment can be scoped without a code change; defaults to just the demo catalog.
-# NOTE: this does NOT change what the Genie Space can see -- that stays hard-scoped to
-# its own dedicated views (see setup/create_scoped_views.py) regardless of this setting.
-DEFAULT_CATALOGS = ["megacorp"]
 
+def get_catalogs() -> Optional[List[str]]:
+    """Resolve the catalog allow-list for the ERD graph from ERD_CATALOGS env var.
 
-def get_catalogs() -> List[str]:
-    """Resolve the catalog allow-list for the ERD graph from ERD_CATALOGS env var."""
+    Returns None if ERD_CATALOGS is unset/empty -- an explicit, deliberate "unscoped"
+    mode (not a silent fallback to a demo catalog): the graph then shows every catalog
+    the app's own credentials can browse, and (per this same design) the Genie Space is
+    ALSO built unscoped in that case -- see setup/create_scoped_views.py. Unity Catalog's
+    own privilege filtering still applies either way; "unscoped" means "bounded by
+    whatever this deployment's grants allow," not literally every catalog that exists.
+    """
     raw = os.environ.get("ERD_CATALOGS")
     if not raw:
-        return list(DEFAULT_CATALOGS)
+        return None
     catalogs = [c.strip() for c in raw.split(",") if c.strip()]
-    return catalogs or list(DEFAULT_CATALOGS)
+    return catalogs or None
 
 
 def get_metadata_location() -> tuple[str, str]:
     """Resolve (catalog, schema) where the scoped ERD metadata views live, from
-    ERD_METADATA_LOCATION ("catalog.schema"). Defaults to "<first catalog>.erd_meta" so a
-    deployment only has to set ERD_CATALOGS to get a sensible default. These views (not
-    system.information_schema directly) are the Genie Space's actual data source --
-    see setup/create_scoped_views.py and setup/create_genie_space.py.
+    ERD_METADATA_LOCATION ("catalog.schema"). Defaults to "<first ERD_CATALOGS
+    entry>.erd_meta" so a scoped deployment only has to set ERD_CATALOGS. In unscoped mode
+    (ERD_CATALOGS unset) there is no "first catalog" to default to, so
+    ERD_METADATA_LOCATION becomes required -- raises rather than guessing a catalog to
+    create views in. These views (not system.information_schema directly) are the Genie
+    Space's actual data source -- see setup/create_scoped_views.py and
+    setup/create_genie_space.py.
     """
     raw = os.environ.get("ERD_METADATA_LOCATION")
     if raw and "." in raw:
         catalog, schema = raw.split(".", 1)
         return catalog.strip(), schema.strip()
-    return get_catalogs()[0], "erd_meta"
+    catalogs = get_catalogs()
+    if not catalogs:
+        raise RuntimeError(
+            "ERD_METADATA_LOCATION is required when ERD_CATALOGS is unset (unscoped "
+            "mode) -- there's no catalog to default the metadata views into. Set "
+            "ERD_METADATA_LOCATION=<catalog>.<schema>."
+        )
+    return catalogs[0], "erd_meta"
 
 
 def get_workspace_client() -> WorkspaceClient:

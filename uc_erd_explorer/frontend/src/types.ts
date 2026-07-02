@@ -23,14 +23,26 @@ export interface GraphEdge {
 }
 
 export interface GraphResponse {
-  // Backend returns the in-scope catalog allow-list (plural). `schemas` may be null
-  // when no schema filter was applied. The UI reads node-level catalog/schema, so
-  // these top-level fields are informational only.
-  catalogs?: string[]
-  schemas?: string[] | null
+  // Catalogs actually present in this result (not just the configured allow-list).
+  catalogs: string[]
+  // True when ERD_CATALOGS is unset -- every catalog visible to this deployment's
+  // credentials is in scope, not just an explicit allow-list.
+  unscoped: boolean
+  // The catalog.schema pairs this response was narrowed to, or null if unfiltered
+  // (everything in scope).
+  pairs: string[] | null
   nodes: TableNodeData[]
   edges: GraphEdge[]
 }
 
-export type SchemaFilter = 'factory' | 'erp' | 'both'
+export interface CatalogSchemas {
+  catalog: string
+  schemas: string[]
+}
+
+export interface SchemaTreeResponse {
+  catalogs: CatalogSchemas[]
+  unscoped: boolean
+}
+
 export type FilterMode = 'neighbors' | 'component'

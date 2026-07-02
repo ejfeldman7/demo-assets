@@ -13,29 +13,28 @@ import ReactFlow, {
 } from 'reactflow'
 import 'reactflow/dist/style.css'
 
-import { fetchGraph } from './api'
+import { fetchGraph, fetchSchemaTree } from './api'
 import { TableNode } from './TableNode'
 import { GeniePanel } from './GeniePanel'
+import { CatalogSchemaPicker } from './CatalogSchemaPicker'
 import { connectedComponent, directNeighbors, layoutGraph } from './graphUtils'
 import type {
+  CatalogSchemas,
   FilterMode,
   GraphResponse,
-  SchemaFilter,
   TableNodeData,
 } from './types'
 
 const nodeTypes = { table: TableNode }
 
-const SCHEMA_ACCENT: Record<string, string> = {
-  factory: 'var(--schema-factory)',
-  erp: 'var(--schema-erp)',
-}
-
 function ErdCanvas() {
   const [graph, setGraph] = useState<GraphResponse | null>(null)
+  const [tree, setTree] = useState<CatalogSchemas[]>([])
+  const [treeUnscoped, setTreeUnscoped] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
-  const [schemaFilter, setSchemaFilter] = useState<SchemaFilter>('both')
+  // null = "All" -- no filter, everything in scope.
+  const [selectedPairs, setSelectedPairs] = useState<Set<string> | null>(null)
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [filterMode, setFilterMode] = useState<FilterMode>('neighbors')
   const [search, setSearch] = useState('')
@@ -43,13 +42,34 @@ function ErdCanvas() {
   const { fitView, setCenter, getNode } = useReactFlow()
   const laidOutRef = useRef<Node<TableNodeData>[]>([])
 
-  // Load graph whenever schema filter changes.
+  // Load the catalog/schema tree once, to populate the picker.
+  useEffect(() => {
+    fetchSchemaTree()
+      .then((t) => {
+        setTree(t.catalogs)
+        setTreeUnscoped(t.unscoped)
+      })
+      .catch((e) => setError((e as Error).message))
+  }, [])
+
+  // Load graph whenever the catalog/schema selection changes.
   useEffect(() => {
     let cancelled = false
-    setLoading(true)
     setError(null)
     setSelectedId(null)
-    fetchGraph(schemaFilter)
+
+    // An explicit, empty selection (nothing checked) means "show nothing" -- not the
+    // same as null ("All"). The backend has no way to express "no pairs = empty" (a bare
+    // /api/graph means everything in scope), so short-circuit to an empty graph here
+    // instead of firing a request that would come back with the full catalog.
+    if (selectedPairs && selectedPairs.size === 0) {
+      setGraph({ catalogs: [], unscoped: treeUnscoped, pairs: [], nodes: [], edges: [] })
+      setLoading(false)
+      return
+    }
+
+    setLoading(true)
+    fetchGraph(selectedPairs ? Array.from(selectedPairs) : undefined)
       .then((g) => {
         if (!cancelled) setGraph(g)
       })
@@ -62,7 +82,7 @@ function ErdCanvas() {
     return () => {
       cancelled = true
     }
-  }, [schemaFilter])
+  }, [selectedPairs, treeUnscoped])
 
   // Base (laid-out) nodes + edges derived from the loaded graph.
   const { baseNodes, baseEdges } = useMemo(() => {
@@ -197,32 +217,21 @@ function ErdCanvas() {
           <SectionLabel>Catalog</SectionLabel>
           <div style={styles.catalogCard}>
             <div style={styles.catalogName}>
-              <span style={styles.catalogIcon}>▦</span> megacorp
+              <span style={styles.catalogIcon}>▦</span>
+              {tree.length === 1 ? tree[0].catalog : `${tree.length} catalogs`}
             </div>
-            <div style={styles.catalogMeta}>Unity Catalog · structure only</div>
+            <div style={styles.catalogMeta}>
+              Unity Catalog{treeUnscoped ? ' · unscoped (all visible)' : ''}
+            </div>
           </div>
 
-          <SectionLabel>Schemas</SectionLabel>
+          <SectionLabel>Catalogs &amp; Schemas</SectionLabel>
           <div style={styles.card}>
-            {(['both', 'factory', 'erp'] as SchemaFilter[]).map((s) => (
-              <button
-                key={s}
-                onClick={() => setSchemaFilter(s)}
-                style={sidebarRow(schemaFilter === s)}
-              >
-                <span
-                  style={{
-                    ...styles.schemaDot,
-                    background:
-                      s === 'both'
-                        ? 'linear-gradient(90deg,var(--schema-factory),var(--schema-erp))'
-                        : SCHEMA_ACCENT[s],
-                  }}
-                />
-                <span style={{ flex: 1, textTransform: 'capitalize' }}>{s}</span>
-                {schemaFilter === s && <span style={styles.check}>✓</span>}
-              </button>
-            ))}
+            <CatalogSchemaPicker
+              tree={tree}
+              selectedPairs={selectedPairs}
+              onChange={setSelectedPairs}
+            />
           </div>
 
           <SectionLabel>Search</SectionLabel>
@@ -291,7 +300,7 @@ function ErdCanvas() {
 
         {/* Canvas */}
         <main style={styles.canvasWrap}>
-          {loading && <div style={styles.centerMsg}>Loading megacorp schema…</div>}
+          {loading && <div style={styles.centerMsg}>Loading schema…</div>}
           {error && (
             <div style={{ ...styles.centerMsg, color: 'var(--db-red)' }}>
               Error: {error}
@@ -463,7 +472,6 @@ const styles: Record<string, CSSProperties> = {
   },
   catalogIcon: { color: 'var(--db-red)', fontSize: 14 },
   catalogMeta: { fontSize: 11.5, color: 'var(--text-muted)', marginTop: 4 },
-  schemaDot: { width: 10, height: 10, borderRadius: 3, flexShrink: 0 },
   check: { color: 'var(--db-blue)', fontSize: 12, fontWeight: 700 },
   searchInput: {
     flex: 1,

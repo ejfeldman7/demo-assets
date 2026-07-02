@@ -11,13 +11,18 @@ asking schema questions in plain English.
 - **Renders a live ERD** for one or more Unity Catalog catalogs: every table as a node
   (with its columns, and PK/FK columns badged), every declared foreign key as a labeled,
   directional edge from the referencing table to the table it points to.
+- **Catalog/schema tree picker**: an "All" toggle plus one row per catalog (tri-state
+  checkbox: unchecked / indeterminate / checked) that expands to show its individual
+  schemas, each independently selectable — built for a future with many catalogs each
+  containing many schemas, not just the shipped single-catalog demo.
 - **Click-to-filter**: click any table and the canvas highlights just its connected
   neighborhood — toggle between "direct neighbors" and "full connected component," with
   a one-click reset back to the whole graph.
 - **Ask Genie**: a slide-in chat panel backed by a Genie Space that can answer questions
   like *"which tables reference `orders`?"*, *"what's the primary key of `invoices`?"*,
   or *"which tables have no foreign keys?"* — scoped so it can **only** ever see the
-  catalogs you explicitly approved, never anything else in the workspace.
+  catalogs you explicitly approved, never anything else in the workspace (see "Unscoped
+  mode" below for the one deliberate exception).
 - **No source data required**: everything is read from `information_schema` /
   `system.information_schema`, so this works against any Unity Catalog catalog with
   declared PK/FK constraints — you don't need to grant it access to actual row data.
@@ -43,15 +48,17 @@ The boundary lives in the data model, not in the prompt.
 ```
 Databricks App (FastAPI backend + React/Vite frontend, Databricks-brand light theme)
 ├── Backend
-│   ├── GET  /api/graph     → nodes (tables+columns) + edges (FK→PK) for ERD_CATALOGS,
-│   │                          queried live from system.information_schema
-│   ├── GET  /api/config    → which catalogs this deployment is scoped to
-│   └── POST /api/genie/ask → starts/continues a Genie conversation, polls internally,
-│                              returns the final answer in one round-trip
+│   ├── GET  /api/graph        → nodes (tables+columns) + edges (FK→PK), optionally
+│   │                             narrowed via ?pairs=catalog.schema,..., queried live
+│   │                             from system.information_schema
+│   ├── GET  /api/schema-tree  → {catalog: [schema, ...]} enumeration for the picker
+│   ├── GET  /api/config       → which catalogs this deployment is scoped to
+│   └── POST /api/genie/ask    → starts/continues a Genie conversation, polls internally,
+│                                 returns the final answer in one round-trip
 ├── Frontend (React Flow + dagre auto-layout)
 │   ├── ERD canvas, PK/FK badges, labeled FK→PK edges
 │   ├── Click-to-filter (client-side BFS: neighbors / connected component + reset)
-│   ├── Schema toggle + table search
+│   ├── Catalog/schema tree picker + table search
 │   └── Genie side panel
 └── Setup (idempotent, chained as a single Databricks Job — see Deployment below)
     ├── create_scoped_views.py  → creates the hard-scoped metadata views that are
@@ -157,8 +164,8 @@ entirely from inside the workspace UI.
    | `repo_root` | yes | Workspace path to this repo's checkout, e.g. `/Workspace/Users/you@company.com/erd-explorer` (right-click the folder → "Copy path" if unsure) |
    | `warehouse_id` | yes | SQL warehouse id |
    | `app_name` | no (default `erd-explorer`) | Databricks App name |
-   | `erd_catalogs` | no (default `megacorp`) | Comma-separated catalog allow-list |
-   | `erd_metadata_location` | no (default `<first catalog>.erd_meta`) | Where the scoped Genie views live |
+   | `erd_catalogs` | no (default `megacorp`) | Comma-separated catalog allow-list. Clear it entirely for unscoped mode (every catalog visible to this deployment — see "Unscoped mode" below) |
+   | `erd_metadata_location` | no (default `<first catalog>.erd_meta`) | Where the scoped Genie views live. **Required** if you clear `erd_catalogs` |
    | `create_demo_catalog` | no (default `no`) | Set to `yes` to create the synthetic `megacorp` catalog first |
 
 4. Fill in the widgets, then **Run all** again. The notebook will, in order: optionally
@@ -178,9 +185,9 @@ front door onto the same automation, not a separate implementation to maintain.
 
 | Bundle variable | Env var (equivalent) | Default | What it controls |
 |---|---|---|---|
-| `warehouse_id` | `DATABRICKS_WAREHOUSE_ID` | (a demo warehouse id) | SQL warehouse used for all `information_schema` queries |
-| `erd_catalogs` | `ERD_CATALOGS` (comma-separated) | `megacorp` | The catalog allow-list — scopes **both** the ERD graph and the Genie Space |
-| `erd_metadata_location` | `ERD_METADATA_LOCATION` (`"catalog.schema"`) | `megacorp.erd_meta` | Where the scoped Genie metadata views live |
+| `warehouse_id` | `DATABRICKS_WAREHOUSE_ID` | **required, no default** | SQL warehouse used for all `information_schema` queries |
+| `erd_catalogs` | `ERD_CATALOGS` (comma-separated) | `megacorp` (packaged demo default) | The catalog allow-list — scopes **both** the ERD graph and the Genie Space. Set to an empty string for unscoped mode, see below |
+| `erd_metadata_location` | `ERD_METADATA_LOCATION` (`"catalog.schema"`) | `megacorp.erd_meta` | Where the scoped Genie metadata views live. **Required** if `erd_catalogs` is empty (no catalog to default from) |
 | `genie_space_id` | `GENIE_SPACE_ID` | (set after first setup run) | Which Genie Space the chat panel talks to |
 
 **One asymmetry worth knowing**: the ERD graph is queried live, so changing
@@ -191,24 +198,59 @@ That job is idempotent and finds/updates its own space automatically (via a stab
 marker in the space description, not its title, so a changed catalog list won't create a
 duplicate space).
 
+### Unscoped mode
+
+Leaving `erd_catalogs`/`ERD_CATALOGS` **empty** is a deliberate, explicit choice — not a
+silent fallback — that scopes both the graph and the Genie Space to *every catalog this
+deployment's own credentials can browse*, instead of an explicit allow-list. Unity
+Catalog's own privilege filtering still applies: "unscoped" means "whatever this
+deployment's grants allow," not literally every catalog that exists in the metastore.
+
+```bash
+databricks bundle deploy -t dev -p <your-profile> \
+    --var="erd_catalogs=" \
+    --var="erd_metadata_location=<some_catalog>.erd_meta" \
+    --var="warehouse_id=<your-warehouse-id>"
+```
+
+Per a deliberate design decision: Genie mirrors this choice exactly — an unscoped graph
+means an unscoped Genie Space too, not a Genie Space quietly kept narrow while the graph
+widens. If you want Genie to stay narrowly scoped, use an explicit `erd_catalogs` list
+instead of unscoped mode.
+
+`erd_metadata_location` becomes **required** in unscoped mode (there's no "first catalog"
+in the list to default the metadata views into) and can point at any catalog you like,
+including one not otherwise shown in the graph.
+
 ## Permissions
 
 Two *separate* things need granting, and both are workspace-specific enough that we
-don't auto-generate the grant statements — but everything downstream of them is scripted:
+don't auto-generate the grant statements — but everything downstream of them is scripted.
+
+Both need your app's **service principal client id**. Get it either way:
+- CLI: `databricks apps get erd-explorer-dev -p <profile>` (look for `service_principal_client_id`)
+- UI: open the app in the Databricks Apps UI and check its **Authorization** tab — see
+  [Databricks Apps authorization docs](https://docs.databricks.com/aws/en/dev-tools/databricks-apps/auth#app-authorization)
+  for exactly where to find it if the tab layout has moved.
 
 **1. Unity Catalog data access** (lets `/api/graph` and the scoped views actually return
-rows — without this, queries succeed but silently return zero rows, not an error):
+rows — without this, queries succeed but silently return zero rows, not an error). This
+is really **two grants, for two potentially different locations**:
 
 ```sql
+-- (a) your actual data catalog(s) -- repeat this block per catalog/schema in erd_catalogs
 GRANT USE CATALOG ON CATALOG <your_catalog> TO `<app-service-principal-client-id>`;
 GRANT USE SCHEMA ON SCHEMA <your_catalog>.<your_schema> TO `<app-service-principal-client-id>`;
 GRANT SELECT ON SCHEMA <your_catalog>.<your_schema> TO `<app-service-principal-client-id>`;
--- repeat per schema, plus the erd_meta schema itself:
-GRANT USE SCHEMA ON SCHEMA <your_catalog>.erd_meta TO `<app-service-principal-client-id>`;
-GRANT SELECT ON SCHEMA <your_catalog>.erd_meta TO `<app-service-principal-client-id>`;
-```
 
-Find your app's service principal client id with `databricks apps get erd-explorer-dev -p <profile>`.
+-- (b) wherever erd_metadata_location actually points -- by DEFAULT this is
+-- <first erd_catalogs entry>.erd_meta (so often the same catalog as (a), just a
+-- different schema), but if you've overridden erd_metadata_location to a different
+-- catalog, grant on THAT catalog instead, not your data catalog:
+GRANT USE CATALOG ON CATALOG <metadata_catalog> TO `<app-service-principal-client-id>`;  -- only if different from (a)
+GRANT USE SCHEMA ON SCHEMA <metadata_catalog>.<metadata_schema> TO `<app-service-principal-client-id>`;
+GRANT SELECT ON SCHEMA <metadata_catalog>.<metadata_schema> TO `<app-service-principal-client-id>`;
+```
 
 **2. Genie Space access** — a Genie Space is a workspace object with its own separate
 ACL from Unity Catalog grants. This one *is* automated: `setup/create_genie_space.py`
@@ -247,6 +289,10 @@ via your own CLI profile — no mocking.
   caller can see rather than erroring.
 - **Genie doesn't know about a table you just added** — the scoped views and Genie
   Space are snapshots, not live. Re-run `databricks bundle run setup_genie_space`.
+- **`/api/graph?pairs=...` returns a 400** — either a pair isn't in `catalog.schema`
+  format, or you asked for a catalog outside this deployment's `erd_catalogs` allow-list.
+  Both are intentional: the app rejects invalid/out-of-scope requests clearly instead of
+  silently widening back to "everything."
 
 ## Caveats
 
@@ -258,6 +304,13 @@ via your own CLI profile — no mocking.
   rather than invent relationships that aren't there.
 - This is a schema/metadata tool, not a data catalog or lineage tool — it doesn't show
   row counts, actual values, or upstream/downstream pipeline lineage.
+- **Unscoped mode is a real widening of what Genie can see** — think of it as "trust the
+  UC grants I've already given this service principal" rather than "safe by default."
+  If you want Genie to answer questions about a small, deliberate set of catalogs no
+  matter what else the app's SP can browse, use an explicit `erd_catalogs` list instead.
+- In unscoped mode, catalogs whose names start with `__` (Databricks-internal plumbing,
+  e.g. `__databricks_internal_catalog_...`) are automatically excluded from both the
+  graph and Genie's scope — they aren't real user catalogs and would just be noise.
 
 ## Project structure
 

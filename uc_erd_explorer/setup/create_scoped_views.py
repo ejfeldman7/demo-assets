@@ -45,14 +45,18 @@ def _in_clause(values):
 
 
 def build_statements(catalogs: list, metadata_catalog: str, metadata_schema: str) -> list:
+    """catalogs=[] means unscoped mode: the views cover every catalog visible to this
+    deployment's credentials (Unity Catalog's own privilege filtering still applies --
+    "unscoped" means "whatever this deployment's grants allow," not literally every
+    catalog that exists). This is a deliberate, explicit choice made by leaving
+    ERD_CATALOGS unset -- see server/config.py -- not a default anyone falls into
+    silently."""
     catalogs = _validate_identifiers(catalogs, "catalog")
     _validate_identifiers([metadata_catalog, metadata_schema], "metadata catalog/schema")
-    if not catalogs:
-        raise ValueError("At least one catalog is required")
 
-    cat_in = _in_clause(catalogs)
     loc = f"{metadata_catalog}.{metadata_schema}"
-    catalog_list_str = ", ".join(catalogs)
+    catalog_filter = f"AND table_catalog IN {_in_clause(catalogs)}" if catalogs else ""
+    catalog_list_str = ", ".join(catalogs) if catalogs else "ALL catalogs visible to this deployment"
     # Exclude the metadata schema's own housekeeping views from the "what tables exist"
     # results -- without this, this schema's 9 views would show up as fake business
     # tables in table_summary/scoped_tables every time it's (re)created.
@@ -72,8 +76,8 @@ def build_statements(catalogs: list, metadata_catalog: str, metadata_schema: str
 CREATE OR REPLACE VIEW {loc}.scoped_tables COMMENT 'Tables in the approved catalogs only ({catalog_list_str}). Internal -- see table_summary.' AS
 SELECT table_catalog, table_schema, table_name, table_type, comment
 FROM system.information_schema.tables
-WHERE table_catalog IN {cat_in}
-  AND table_schema NOT IN ({excluded_schemas})
+WHERE table_schema NOT IN ({excluded_schemas})
+  {catalog_filter}
 """.strip())
 
     stmts.append(f"""
@@ -81,8 +85,8 @@ CREATE OR REPLACE VIEW {loc}.scoped_columns COMMENT 'Columns in the approved cat
 SELECT table_catalog, table_schema, table_name, column_name, ordinal_position,
        full_data_type, is_nullable, comment
 FROM system.information_schema.columns
-WHERE table_catalog IN {cat_in}
-  AND table_schema NOT IN ({excluded_schemas})
+WHERE table_schema NOT IN ({excluded_schemas})
+  {catalog_filter}
 """.strip())
 
     stmts.append(f"""
@@ -90,7 +94,8 @@ CREATE OR REPLACE VIEW {loc}.scoped_table_constraints COMMENT 'PRIMARY/FOREIGN K
 SELECT constraint_catalog, constraint_schema, constraint_name, constraint_type,
        table_catalog, table_schema, table_name
 FROM system.information_schema.table_constraints
-WHERE table_catalog IN {cat_in}
+WHERE 1=1
+  {catalog_filter}
 """.strip())
 
     stmts.append(f"""
@@ -99,7 +104,8 @@ SELECT constraint_catalog, constraint_schema, constraint_name,
        table_catalog, table_schema, table_name, column_name,
        ordinal_position, position_in_unique_constraint
 FROM system.information_schema.key_column_usage
-WHERE table_catalog IN {cat_in}
+WHERE 1=1
+  {catalog_filter}
 """.strip())
 
     stmts.append(f"""
@@ -107,7 +113,8 @@ CREATE OR REPLACE VIEW {loc}.scoped_referential_constraints COMMENT 'FK constrai
 SELECT constraint_catalog, constraint_schema, constraint_name,
        unique_constraint_catalog, unique_constraint_schema, unique_constraint_name
 FROM system.information_schema.referential_constraints
-WHERE constraint_catalog IN {cat_in}
+WHERE 1=1
+  {catalog_filter.replace("table_catalog", "constraint_catalog")}
 """.strip())
 
     # --- denormalized ERD helper views (built on the scoped views above, never touch
@@ -191,16 +198,22 @@ def main():
     args = parser.parse_args()
 
     catalogs = [c.strip() for c in (args.catalogs or os.environ.get("ERD_CATALOGS", "")).split(",") if c.strip()]
-    if not catalogs:
-        catalogs = ["megacorp"]
+    # catalogs=[] is a deliberate, explicit "unscoped" mode (no --catalogs / ERD_CATALOGS
+    # given) -- NOT silently defaulted to a demo catalog. See build_statements docstring.
 
     loc_raw = args.metadata_location or os.environ.get("ERD_METADATA_LOCATION", "")
     if loc_raw and "." in loc_raw:
         metadata_catalog, metadata_schema = loc_raw.split(".", 1)
-    else:
+    elif catalogs:
         metadata_catalog, metadata_schema = catalogs[0], "erd_meta"
+    else:
+        raise SystemExit(
+            "--metadata-location (or ERD_METADATA_LOCATION) is required when --catalogs "
+            "is empty (unscoped mode) -- there's no catalog to default the metadata "
+            "views into."
+        )
 
-    print(f"Scoping views to catalogs: {catalogs}")
+    print(f"Scoping views to catalogs: {catalogs or 'ALL (unscoped)'}")
     print(f"Creating views in: {metadata_catalog}.{metadata_schema}")
 
     w = WorkspaceClient(profile=args.profile) if args.profile else WorkspaceClient()
