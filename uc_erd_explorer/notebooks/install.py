@@ -46,7 +46,13 @@ assert warehouse_id, "warehouse_id widget is required -- pick any SQL warehouse 
 assert erd_catalogs_raw, "erd_catalogs widget is required"
 
 catalogs = [c.strip() for c in erd_catalogs_raw.split(",") if c.strip()]
-metadata_location = erd_metadata_location_raw or f"{catalogs[0]}.erd_meta"
+# Same guard as the CLI route's resolve_metadata_location() -- only treat the widget
+# value as a real "catalog.schema" if it actually contains a dot; otherwise fall back to
+# the computed default instead of crashing on `.split(".", 1)` unpacking a 1-element list.
+if erd_metadata_location_raw and "." in erd_metadata_location_raw:
+    metadata_location = erd_metadata_location_raw
+else:
+    metadata_location = f"{catalogs[0]}.erd_meta"
 metadata_catalog, metadata_schema = metadata_location.split(".", 1)
 
 print(f"app_name={app_name}")

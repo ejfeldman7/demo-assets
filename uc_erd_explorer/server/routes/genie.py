@@ -11,6 +11,7 @@ The Genie Space itself (space_id below) is built ONLY on 3 narrow, pre-scoped vi
 see setup/create_scoped_views.py + setup/create_genie_space.py for the actual data
 model / access boundary. This proxy is just plumbing; it has no bearing on Genie's scope.
 """
+import asyncio
 import time
 from typing import Optional
 
@@ -43,16 +44,21 @@ def _extract_answer(message: dict) -> str:
     return "Genie didn't return a text answer for that question."
 
 
-def _poll_until_done(client, space_id: str, conversation_id: str, message_id: str) -> dict:
+async def _poll_until_done(client, space_id: str, conversation_id: str, message_id: str) -> dict:
+    """Poll for up to _POLL_TIMEOUT_SECONDS. The databricks-sdk client is synchronous, so
+    each call is offloaded to a thread (asyncio.to_thread) and the wait between polls uses
+    asyncio.sleep -- a blocking time.sleep() here would freeze the whole FastAPI event
+    loop (and every other concurrent request) for the entire poll duration."""
     deadline = time.time() + _POLL_TIMEOUT_SECONDS
     while time.time() < deadline:
-        message = client.api_client.do(
+        message = await asyncio.to_thread(
+            client.api_client.do,
             method="GET",
             path=f"/api/2.0/genie/spaces/{space_id}/conversations/{conversation_id}/messages/{message_id}",
         )
         if message.get("status") in ("COMPLETED", "FAILED"):
             return message
-        time.sleep(_POLL_INTERVAL_SECONDS)
+        await asyncio.sleep(_POLL_INTERVAL_SECONDS)
     raise HTTPException(status_code=504, detail="Genie timed out waiting for a response.")
 
 
@@ -69,7 +75,8 @@ async def ask(req: AskRequest):
     client = get_workspace_client()
     try:
         if req.conversation_id:
-            resp = client.api_client.do(
+            resp = await asyncio.to_thread(
+                client.api_client.do,
                 method="POST",
                 path=f"/api/2.0/genie/spaces/{space_id}/conversations/{req.conversation_id}/messages",
                 body={"content": req.message},
@@ -77,15 +84,21 @@ async def ask(req: AskRequest):
             conversation_id = req.conversation_id
             message_id = resp.get("id") or resp.get("message_id")
         else:
-            resp = client.api_client.do(
+            resp = await asyncio.to_thread(
+                client.api_client.do,
                 method="POST",
                 path=f"/api/2.0/genie/spaces/{space_id}/start-conversation",
                 body={"content": req.message},
             )
-            conversation_id = resp["conversation_id"]
-            message_id = resp["message_id"]
+            # .get() rather than direct indexing -- keeps this resilient the same way the
+            # continue-conversation branch above already is, in case a future Genie API
+            # revision nests these fields differently.
+            conversation_id = resp.get("conversation_id") or (resp.get("conversation") or {}).get("id")
+            message_id = resp.get("message_id") or (resp.get("message") or {}).get("id")
+            if not conversation_id or not message_id:
+                raise HTTPException(status_code=502, detail=f"Unexpected Genie response shape: {resp}")
 
-        message = _poll_until_done(client, space_id, conversation_id, message_id)
+        message = await _poll_until_done(client, space_id, conversation_id, message_id)
         return {
             "conversation_id": conversation_id,
             "message_id": message_id,

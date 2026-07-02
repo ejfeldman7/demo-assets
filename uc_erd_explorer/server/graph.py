@@ -22,7 +22,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from databricks.sdk.service import sql
 
-from .config import get_catalogs, get_warehouse_id, get_workspace_client
+from .config import get_catalogs, get_metadata_location, get_warehouse_id, get_workspace_client
 
 # In-memory cache: {(frozenset(catalogs), frozenset(schemas)): (timestamp, payload)}
 _CACHE: Dict[Tuple[frozenset, frozenset], Tuple[float, Dict[str, Any]]] = {}
@@ -30,15 +30,33 @@ _CACHE_TTL_SECONDS = 300  # 5 minutes
 
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9_]+$")
 
-# Internal schemas always excluded from the ERD graph, so neither UC's own metadata
-# views nor the app's own Genie-plumbing views ever show up as fake table nodes:
-#   - information_schema: UC's ~30 metadata views, present in every catalog.
-#   - erd_meta: the hard-scoped views this app creates for the Genie Space
-#     (setup/create_scoped_views.py) -- plumbing, not business tables.
-# NOT hardcoded to any business schema names (e.g. "factory"/"erp") since ERD_CATALOGS
-# can point at catalogs with arbitrary schema names -- see config.get_catalogs().
-_EXCLUDED_SCHEMAS = ("information_schema", "erd_meta")
-_EXCLUDED_SCHEMAS_SQL = "(" + ", ".join(f"'{s}'" for s in _EXCLUDED_SCHEMAS) + ")"
+
+def validate_schema_names(schemas: List[str]) -> List[str]:
+    """Validate requested schema names, raising ValueError naming the bad one(s) rather
+    than silently dropping them -- a caller who mistypes a schema name should get a clear
+    400, not a graph silently widened back to every schema in scope."""
+    invalid = [s for s in schemas if not _IDENTIFIER_RE.match(s)]
+    if invalid:
+        raise ValueError(f"Invalid schema name(s): {invalid}")
+    return schemas
+
+
+def _internal_schema_exclusion_sql(catalog_col: str, schema_col: str) -> str:
+    """SQL condition excluding UC's own metadata schema plus THIS deployment's actual
+    configured Genie metadata catalog+schema (via get_metadata_location(), which reads
+    ERD_METADATA_LOCATION) -- never a hardcoded schema name. Scoped by catalog+schema
+    together (not schema name alone), so an unrelated catalog that happens to also have a
+    schema literally named "erd_meta" isn't wrongly excluded.
+    """
+    meta_catalog, meta_schema = get_metadata_location()
+    if not (_IDENTIFIER_RE.match(meta_catalog) and _IDENTIFIER_RE.match(meta_schema)):
+        # Defensive: an invalid configured name can't be excluded via string interpolation
+        # into SQL; information_schema exclusion below still applies either way.
+        meta_catalog, meta_schema = "", ""
+    return (
+        f"{schema_col} != 'information_schema' "
+        f"AND NOT ({catalog_col} = '{meta_catalog}' AND {schema_col} = '{meta_schema}')"
+    )
 
 
 # --- SQL helpers ------------------------------------------------------------
@@ -80,7 +98,7 @@ def _query_columns(catalogs: List[str], schemas: Optional[List[str]]) -> List[Li
     SELECT table_catalog, table_schema, table_name, column_name, full_data_type, ordinal_position
     FROM system.information_schema.columns
     WHERE table_catalog IN {catalog_clause}
-      AND table_schema NOT IN {_EXCLUDED_SCHEMAS_SQL}
+      AND {_internal_schema_exclusion_sql("table_catalog", "table_schema")}
       {schema_filter}
     ORDER BY table_catalog, table_schema, table_name, ordinal_position
     """
@@ -95,7 +113,7 @@ def _query_tables(catalogs: List[str], schemas: Optional[List[str]]) -> List[Lis
     SELECT table_catalog, table_schema, table_name
     FROM system.information_schema.tables
     WHERE table_catalog IN {catalog_clause}
-      AND table_schema NOT IN {_EXCLUDED_SCHEMAS_SQL}
+      AND {_internal_schema_exclusion_sql("table_catalog", "table_schema")}
       {schema_filter}
     ORDER BY table_catalog, table_schema, table_name
     """
@@ -115,7 +133,7 @@ def _query_primary_keys(catalogs: List[str], schemas: Optional[List[str]]) -> Li
      AND tc.constraint_name    = kcu.constraint_name
     WHERE tc.constraint_type = 'PRIMARY KEY'
       AND tc.constraint_catalog IN {catalog_clause}
-      AND kcu.table_schema NOT IN {_EXCLUDED_SCHEMAS_SQL}
+      AND {_internal_schema_exclusion_sql("kcu.table_catalog", "kcu.table_schema")}
       {schema_filter}
     """
     return _rows(_execute(stmt))
@@ -166,7 +184,9 @@ def build_graph(schemas: Optional[List[str]] = None) -> Dict[str, Any]:
     """Build (or return cached) {nodes, edges} for the configured catalog allow-list,
     optionally further filtered to specific schemas."""
     catalogs = get_catalogs()
-    schemas = [s for s in schemas if _IDENTIFIER_RE.match(s)] if schemas else None
+    if schemas:
+        validate_schema_names(schemas)  # raises ValueError naming the bad entry, rather
+        # than silently dropping it and widening the result back to every schema in scope.
     key = (frozenset(catalogs), frozenset(schemas or ()))
 
     cached = _CACHE.get(key)

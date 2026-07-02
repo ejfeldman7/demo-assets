@@ -19,11 +19,13 @@ async def get_graph(
     )
 ):
     """Return {nodes, edges} for the deployment's configured catalog allow-list."""
+    parsed = None
+    if schemas:
+        parsed = [s.strip() for s in schemas.split(",") if s.strip()]
     try:
-        parsed = None
-        if schemas:
-            parsed = [s.strip() for s in schemas.split(",") if s.strip()]
         return build_graph(parsed)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=str(e))
 

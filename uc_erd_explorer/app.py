@@ -1,8 +1,9 @@
 """
 Interactive Unity Catalog ERD Viewer — Databricks App backend.
 
-FastAPI serves the ERD graph API (+ a Genie proxy stub) and the built React SPA.
-Fixed to the `megacorp` catalog; queries UC metadata as the app's service principal.
+FastAPI serves the ERD graph API, the Genie chat proxy, and the built React SPA.
+Catalog scope is configurable via ERD_CATALOGS (defaults to the demo `megacorp` catalog);
+queries UC metadata as the app's service principal.
 """
 import os
 
