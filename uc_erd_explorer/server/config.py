@@ -5,6 +5,7 @@ Local dev:  WorkspaceClient(profile=DATABRICKS_PROFILE or your CLI's DEFAULT pro
 Deployed:   WorkspaceClient()  — auto-injected service-principal credentials
 """
 import os
+from functools import lru_cache
 from typing import List, Optional
 
 from databricks.sdk import WorkspaceClient
@@ -76,3 +77,15 @@ def get_genie_space_id() -> Optional[str]:
     """Resolve the Genie Space id from GENIE_SPACE_ID env var, set by the DAB/notebook
     deploy flow once setup/create_genie_space.py has run (see README.md)."""
     return os.environ.get("GENIE_SPACE_ID") or None
+
+
+@lru_cache(maxsize=1)
+def get_workspace_name() -> str:
+    """Best-effort human-readable workspace identifier for the UI header, derived from
+    the authenticated WorkspaceClient's host -- never hardcoded, so this reads correctly
+    in every deployment. Cached since the host doesn't change for the life of the process."""
+    host = (get_workspace_client().config.host or "").removeprefix("https://").removeprefix("http://").rstrip("/")
+    for suffix in (".cloud.databricks.com", ".azuredatabricks.net", ".gcp.databricks.com"):
+        if host.endswith(suffix):
+            return host[: -len(suffix)]
+    return host or "workspace"

@@ -3,7 +3,7 @@ from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Query
 
-from ..config import get_catalogs
+from ..config import get_catalogs, get_workspace_name
 from ..graph import build_graph, list_catalog_schemas
 
 router = APIRouter(tags=["graph"])
@@ -52,6 +52,11 @@ async def get_schema_tree():
 
 @router.get("/config")
 async def get_config():
-    """Expose which catalogs this deployment is scoped to, for the frontend."""
+    """Expose which catalogs this deployment is scoped to, and which workspace it's
+    running in, for the frontend."""
     catalogs = get_catalogs()
-    return {"catalogs": catalogs, "unscoped": catalogs is None}
+    try:
+        workspace = get_workspace_name()
+    except Exception:  # noqa: BLE001
+        workspace = None
+    return {"catalogs": catalogs, "unscoped": catalogs is None, "workspace": workspace}

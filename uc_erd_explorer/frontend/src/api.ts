@@ -1,9 +1,17 @@
-import type { GraphResponse, SchemaTreeResponse } from './types'
+import type { ConfigResponse, GraphResponse, SchemaTreeResponse } from './types'
 
 export async function fetchSchemaTree(): Promise<SchemaTreeResponse> {
   const res = await fetch('/api/schema-tree')
   if (!res.ok) {
     throw new Error(`Failed to load catalog/schema tree: ${res.status} ${res.statusText}`)
+  }
+  return res.json()
+}
+
+export async function fetchConfig(): Promise<ConfigResponse> {
+  const res = await fetch('/api/config')
+  if (!res.ok) {
+    throw new Error(`Failed to load config: ${res.status} ${res.statusText}`)
   }
   return res.json()
 }

@@ -13,7 +13,7 @@ import ReactFlow, {
 } from 'reactflow'
 import 'reactflow/dist/style.css'
 
-import { fetchGraph, fetchSchemaTree } from './api'
+import { fetchConfig, fetchGraph, fetchSchemaTree } from './api'
 import { TableNode } from './TableNode'
 import { GeniePanel } from './GeniePanel'
 import { CatalogSchemaPicker } from './CatalogSchemaPicker'
@@ -31,6 +31,7 @@ function ErdCanvas() {
   const [graph, setGraph] = useState<GraphResponse | null>(null)
   const [tree, setTree] = useState<CatalogSchemas[]>([])
   const [treeUnscoped, setTreeUnscoped] = useState(false)
+  const [workspaceName, setWorkspaceName] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   // null = "All" -- no filter, everything in scope.
@@ -50,6 +51,13 @@ function ErdCanvas() {
         setTreeUnscoped(t.unscoped)
       })
       .catch((e) => setError((e as Error).message))
+  }, [])
+
+  // Load the deployment's workspace name once, for the top-bar pill.
+  useEffect(() => {
+    fetchConfig()
+      .then((c) => setWorkspaceName(c.workspace))
+      .catch(() => setWorkspaceName(null))
   }, [])
 
   // Load graph whenever the catalog/schema selection changes.
@@ -204,10 +212,12 @@ function ErdCanvas() {
         <div style={styles.topDivider} />
         <div style={styles.appTitle}>Catalog ERD Explorer</div>
         <div style={styles.topSpacer} />
-        <div style={styles.workspacePill}>
-          <span style={styles.workspaceDot} />
-          fe-vm-ef-demo-workspace
-        </div>
+        {workspaceName && (
+          <div style={styles.workspacePill}>
+            <span style={styles.workspaceDot} />
+            {workspaceName}
+          </div>
+        )}
         <div style={styles.avatar}>EF</div>
       </header>
 

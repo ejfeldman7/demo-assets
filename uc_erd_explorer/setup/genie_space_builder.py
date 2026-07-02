@@ -184,6 +184,53 @@ class GenieSpaceBuilder:
         self._ensure_list(self.SQL_FUNCTIONS_PATH).append(entry)
         return entry["id"]
 
+    def add_filter(
+        self,
+        sql: str,
+        display_name: str = "",
+        item_id: Optional[Any] = None,
+        **extra: Any,
+    ) -> str:
+        """Add a reusable SQL filter snippet (instructions.sql_snippets.filters)."""
+        entry = {"id": self._resolve_id(item_id), "sql": self._as_line_list(sql)}
+        if display_name:
+            entry["display_name"] = display_name
+        entry.update(extra)
+        self._ensure_list(self.SNIPPET_FILTERS_PATH).append(entry)
+        return entry["id"]
+
+    def add_expression(
+        self,
+        alias: str,
+        sql: str,
+        display_name: str = "",
+        item_id: Optional[Any] = None,
+        **extra: Any,
+    ) -> str:
+        """Add a reusable SQL expression snippet (instructions.sql_snippets.expressions)."""
+        entry = {"id": self._resolve_id(item_id), "alias": alias, "sql": self._as_line_list(sql)}
+        if display_name:
+            entry["display_name"] = display_name
+        entry.update(extra)
+        self._ensure_list(self.SNIPPET_EXPRESSIONS_PATH).append(entry)
+        return entry["id"]
+
+    def add_measure(
+        self,
+        alias: str,
+        sql: str,
+        display_name: str = "",
+        item_id: Optional[Any] = None,
+        **extra: Any,
+    ) -> str:
+        """Add a reusable SQL measure snippet (instructions.sql_snippets.measures)."""
+        entry = {"id": self._resolve_id(item_id), "alias": alias, "sql": self._as_line_list(sql)}
+        if display_name:
+            entry["display_name"] = display_name
+        entry.update(extra)
+        self._ensure_list(self.SNIPPET_MEASURES_PATH).append(entry)
+        return entry["id"]
+
     def add_example_sql(
         self,
         title: str,

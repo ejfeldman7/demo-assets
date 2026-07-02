@@ -45,4 +45,12 @@ export interface SchemaTreeResponse {
   unscoped: boolean
 }
 
+export interface ConfigResponse {
+  catalogs: string[] | null
+  unscoped: boolean
+  // Derived from the deployment's own WorkspaceClient host -- null if it couldn't be
+  // resolved (e.g. auth failure), never a hardcoded placeholder.
+  workspace: string | null
+}
+
 export type FilterMode = 'neighbors' | 'component'

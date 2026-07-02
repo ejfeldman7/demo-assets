@@ -39,6 +39,160 @@ from genie_space_builder import GenieSpaceBuilder
 # mirror views and "primary_keys" exist only as internal plumbing these are built on.
 CURATED_VIEWS = ["table_summary", "column_inventory", "fk_edges"]
 
+# Column-level metadata for the 3 curated views. These views have a fixed schema
+# regardless of which catalogs are in scope (see create_scoped_views.py), so this is
+# generic, reusable guidance -- not specific to any one deployment's catalog/table names.
+# enable_format_assistance/enable_entity_matching mirror what Databricks' own Genie
+# Space quality checks recommend for text/identifier columns; low-cardinality enum-ish
+# columns (table_type) skip entity matching since there's nothing to "match" against.
+COLUMN_CONFIGS = {
+    "table_summary": [
+        ("table_catalog", None, True),
+        ("table_schema", None, True),
+        ("table_name", None, True),
+        ("table_type", "The object type, e.g. TABLE or VIEW.", False),
+        ("column_count", "Total number of columns in the table.", False),
+        ("primary_key_column_count", "The number of columns in this table that are designated as part of the primary key constraint.", False),
+        ("outgoing_foreign_key_count", "The number of foreign key constraints where this table holds the FK column pointing to another table's primary key.", False),
+        ("incoming_foreign_key_count", "The number of foreign key constraints from other tables that reference this table's primary key.", False),
+    ],
+    "column_inventory": [
+        ("table_catalog", None, True),
+        ("table_schema", None, True),
+        ("table_name", None, True),
+        ("column_name", None, True),
+        ("full_data_type", "The full SQL data type of the column, e.g. STRING, BIGINT, TIMESTAMP, or DECIMAL(18,2).", False),
+        ("ordinal_position", "The column's 1-based position within its table.", False),
+        ("is_primary_key", "Boolean flag indicating whether this column is part of the table's primary key constraint.", False),
+        ("is_foreign_key", "Boolean flag indicating whether this column participates in a foreign key constraint referencing another table.", False),
+    ],
+    "fk_edges": [
+        ("fk_catalog", None, True),
+        ("fk_schema", None, True),
+        ("fk_table", None, True),
+        ("fk_column", None, True),
+        ("pk_catalog", None, True),
+        ("pk_schema", None, True),
+        ("pk_table", None, True),
+        ("pk_column", None, True),
+        ("constraint_name", "The name of the foreign key constraint as declared in Unity Catalog metadata.", False),
+    ],
+}
+
+
+def column_configs_for(view: str) -> list:
+    """Build data_sources.tables[].column_configs for a curated view from COLUMN_CONFIGS."""
+    configs = []
+    for column_name, description, entity_match in COLUMN_CONFIGS[view]:
+        entry = {
+            "column_name": column_name,
+            "enable_format_assistance": True,
+        }
+        if entity_match:
+            entry["enable_entity_matching"] = True
+        if description:
+            entry["description"] = [description]
+        configs.append(entry)
+    # The API requires column_configs sorted by column_name (discovered via a real
+    # InvalidParameterValue response, not documented).
+    return sorted(configs, key=lambda c: c["column_name"])
+
+
+def join_specs_for_views(loc: str) -> list:
+    """The 3 joins that stitch the curated views together -- always valid regardless of
+    catalog scope, since the views' column names never change."""
+    return [
+        {
+            "left": {"identifier": f"{loc}.table_summary", "alias": "ts"},
+            "right": {"identifier": f"{loc}.column_inventory", "alias": "ci"},
+            "sql": [
+                "`ts`.`table_catalog` = `ci`.`table_catalog` AND `ts`.`table_schema` = `ci`.`table_schema` "
+                "AND `ts`.`table_name` = `ci`.`table_name`",
+                "--rt=FROM_RELATIONSHIP_TYPE_ONE_TO_MANY--",
+            ],
+            "comment": ["Join table_summary to column_inventory on the three-part table identifier (catalog, schema, name)."],
+        },
+        {
+            "left": {"identifier": f"{loc}.column_inventory", "alias": "ci"},
+            "right": {"identifier": f"{loc}.fk_edges", "alias": "fk"},
+            "sql": [
+                "`ci`.`table_catalog` = `fk`.`fk_catalog` AND `ci`.`table_schema` = `fk`.`fk_schema` "
+                "AND `ci`.`table_name` = `fk`.`fk_table` AND `ci`.`column_name` = `fk`.`fk_column`",
+                "--rt=FROM_RELATIONSHIP_TYPE_MANY_TO_ONE--",
+            ],
+            "comment": ["Join column_inventory to fk_edges matching on the FK-side table and column identifiers."],
+        },
+        {
+            "left": {"identifier": f"{loc}.table_summary", "alias": "ts"},
+            "right": {"identifier": f"{loc}.fk_edges", "alias": "fk"},
+            "sql": [
+                "`ts`.`table_catalog` = `fk`.`fk_catalog` AND `ts`.`table_schema` = `fk`.`fk_schema` "
+                "AND `ts`.`table_name` = `fk`.`fk_table`",
+                "--rt=FROM_RELATIONSHIP_TYPE_ONE_TO_MANY--",
+            ],
+            "comment": ["Join table_summary to fk_edges matching on the FK-side table identifier (fk_catalog, fk_schema, fk_table)."],
+        },
+    ]
+
+
+def sql_snippets_for_views(catalogs: list) -> dict:
+    """Reusable filter/expression/measure snippets. The catalog-only filter is only
+    emitted when there's exactly one configured catalog to name -- with zero (unscoped)
+    or multiple catalogs there's no single literal worth hardcoding a snippet for."""
+    filters = []
+    if len(catalogs) == 1:
+        catalog = catalogs[0]
+        filters.append({
+            "sql": f"table_catalog = '{catalog}'",
+            "display_name": f"{catalog} Catalog Only",
+            "synonyms": [f"{catalog} only", f"limit to {catalog}", f"{catalog} catalog"],
+        })
+    filters += [
+        {
+            "sql": "is_foreign_key = TRUE",
+            "display_name": "Foreign Key Columns Only",
+            "synonyms": ["foreign keys only", "FK columns", "only foreign key columns"],
+        },
+        {
+            "sql": "is_primary_key = TRUE",
+            "display_name": "Primary Key Columns Only",
+            "synonyms": ["primary keys only", "PK columns", "only primary key columns"],
+        },
+        {
+            "sql": "outgoing_foreign_key_count = 0",
+            "display_name": "Tables Without Foreign Keys",
+            "synonyms": ["no foreign keys", "isolated tables", "tables without FK", "standalone tables"],
+        },
+        {
+            "sql": "outgoing_foreign_key_count > 0",
+            "display_name": "Tables With Foreign Keys",
+            "synonyms": ["has foreign keys", "tables with FK", "tables with relationships"],
+        },
+    ]
+    expressions = [
+        {
+            "alias": "full_table_identifier",
+            "sql": "CONCAT(table_catalog, '.', table_schema, '.', table_name)",
+            "display_name": "Full Table Identifier",
+        },
+        {
+            "alias": "fk_full_table_identifier",
+            "sql": "CONCAT(fk_catalog, '.', fk_schema, '.', fk_table)",
+            "display_name": "FK Full Table Identifier",
+        },
+        {
+            "alias": "pk_full_table_identifier",
+            "sql": "CONCAT(pk_catalog, '.', pk_schema, '.', pk_table)",
+            "display_name": "PK Full Table Identifier",
+        },
+    ]
+    measures = [
+        {"alias": "total_tables", "sql": "COUNT(DISTINCT table_name)", "display_name": "Total Tables"},
+        {"alias": "total_columns", "sql": "COUNT(DISTINCT column_name)", "display_name": "Total Columns"},
+        {"alias": "total_fk_relationships", "sql": "COUNT(*)", "display_name": "Total FK Relationships"},
+    ]
+    return {"filters": filters, "expressions": expressions, "measures": measures}
+
 # Stable marker embedded in the description, used to find "our" space across re-runs
 # regardless of title (title includes the catalog list, which can change).
 MANAGED_MARKER = "[erd-explorer-managed]"
@@ -79,8 +233,9 @@ Rules:
 
 
 def example_sql_for_views(catalogs: list, loc: str) -> list:
-    """Catalog-agnostic example Q+SQL pairs against the 3 curated views -- teaches the
-    query pattern without assuming any particular customer's table names."""
+    """Catalog-agnostic example (question, sql, usage_guidance) triples against the 3
+    curated views -- teaches the query pattern without assuming any particular
+    customer's table names. 10-15 examples is the sweet spot for Genie accuracy."""
     examples = []
     if catalogs:
         example_catalog = catalogs[0]
@@ -88,64 +243,125 @@ def example_sql_for_views(catalogs: list, loc: str) -> list:
             f"Show all tables in the {example_catalog} catalog.",
             f"SELECT table_schema, table_name, table_type FROM {loc}.table_summary "
             f"WHERE table_catalog = '{example_catalog}' ORDER BY table_schema, table_name;",
+            "Enumerate all tables in a catalog, grouped by schema. Helpful for browsing the overall structure of the data model.",
         ))
     else:
         examples.append((
             "Show all tables and which catalog they're in.",
             f"SELECT table_catalog, table_schema, table_name, table_type FROM {loc}.table_summary "
             f"ORDER BY table_catalog, table_schema, table_name;",
+            "Enumerate every table this deployment can see, grouped by catalog and schema.",
         ))
     examples += [
         (
             "Which tables have no foreign key relationships?",
             f"SELECT table_catalog, table_schema, table_name FROM {loc}.table_summary "
             f"WHERE outgoing_foreign_key_count = 0 ORDER BY table_catalog, table_schema, table_name;",
+            "Identify isolated tables with no outgoing foreign key constraints -- useful for finding leaf or standalone entities in the ERD.",
+        ),
+        (
+            "Which tables have incoming foreign keys (are referenced by other tables)?",
+            f"SELECT table_catalog, table_schema, table_name, incoming_foreign_key_count FROM {loc}.table_summary "
+            f"WHERE incoming_foreign_key_count > 0 ORDER BY incoming_foreign_key_count DESC;",
+            "Find the most-referenced ('parent') tables in the schema.",
         ),
         (
             "Show the columns and data types for a given schema.table, including which are primary/foreign keys.",
             f"SELECT column_name, full_data_type, is_primary_key, is_foreign_key FROM {loc}.column_inventory "
             f"WHERE table_schema = 'SCHEMA_NAME' AND table_name = 'TABLE_NAME' ORDER BY ordinal_position;",
+            "Inspect the columns, data types, and key roles for a specific table. Replace SCHEMA_NAME and TABLE_NAME with the target table's schema and name.",
+        ),
+        (
+            "Show all foreign key columns for a given table.",
+            f"SELECT column_name, full_data_type, ordinal_position FROM {loc}.column_inventory "
+            f"WHERE table_schema = 'SCHEMA_NAME' AND table_name = 'TABLE_NAME' AND is_foreign_key = TRUE ORDER BY ordinal_position;",
+            "List just the FK columns of a specific table, in declaration order.",
+        ),
+        (
+            "List all primary key columns across all tables.",
+            f"SELECT table_catalog, table_schema, table_name, column_name FROM {loc}.column_inventory "
+            f"WHERE is_primary_key = TRUE ORDER BY table_catalog, table_schema, table_name, column_name;",
+            "Get a full inventory of every declared primary key column.",
         ),
         (
             "What foreign keys reference a given table (who points at it)?",
             f"SELECT fk_catalog, fk_schema, fk_table, fk_column FROM {loc}.fk_edges "
             f"WHERE pk_schema = 'SCHEMA_NAME' AND pk_table = 'TABLE_NAME';",
+            "Find all tables that hold a foreign key pointing at a given table (its dependents). Replace SCHEMA_NAME and TABLE_NAME with the target parent table.",
+        ),
+        (
+            "What foreign keys does a given table declare (what does it point to)?",
+            f"SELECT fk_column, pk_catalog, pk_schema, pk_table, pk_column, constraint_name FROM {loc}.fk_edges "
+            f"WHERE fk_schema = 'SCHEMA_NAME' AND fk_table = 'TABLE_NAME';",
+            "Find every table a given table declares a foreign key toward (its dependencies). Replace SCHEMA_NAME and TABLE_NAME with the target table.",
         ),
         (
             "Which tables does a given table join to (both directions)?",
             f"SELECT * FROM {loc}.fk_edges "
             f"WHERE (fk_schema = 'SCHEMA_NAME' AND fk_table = 'TABLE_NAME') "
             f"   OR (pk_schema = 'SCHEMA_NAME' AND pk_table = 'TABLE_NAME');",
+            "Get every FK relationship a table participates in, whether it's the FK side or the PK side. Replace SCHEMA_NAME and TABLE_NAME with the target table.",
+        ),
+        (
+            "Find all tables that have both primary keys and outgoing foreign keys.",
+            f"SELECT table_catalog, table_schema, table_name, primary_key_column_count, outgoing_foreign_key_count FROM {loc}.table_summary "
+            f"WHERE primary_key_column_count > 0 AND outgoing_foreign_key_count > 0 ORDER BY table_schema, table_name;",
+            "Find well-formed entity tables that both declare a primary key and reference other tables.",
+        ),
+        (
+            "Which tables have the most columns?",
+            f"SELECT table_catalog, table_schema, table_name, column_count FROM {loc}.table_summary "
+            f"ORDER BY column_count DESC LIMIT 20;",
+            "Surface the widest tables in the schema -- often the most complex entities.",
         ),
         (
             "List all parent-child (foreign-key) relationships across the approved catalogs.",
             f"SELECT fk_catalog, fk_schema, fk_table, fk_column, pk_catalog, pk_schema, pk_table, pk_column "
             f"FROM {loc}.fk_edges ORDER BY pk_catalog, pk_schema, pk_table;",
+            "Get the full ERD edge list -- every declared foreign-key relationship, ordered by parent table.",
         ),
     ]
     return examples
 
 
 def benchmarks_for_views(catalogs: list, loc: str) -> list:
-    """(question, expected_answer_shape) pairs for the validation checklist / Genie
-    benchmarks feature -- adjust expected content per-catalog after first deploy."""
-    benchmarks = []
-    if catalogs:
-        example_catalog = catalogs[0]
-        benchmarks.append((
-            f"How many tables are in the {example_catalog} catalog?",
-            "A single number matching the row count of table_summary filtered to that catalog.",
-        ))
-    benchmarks += [
+    """(question, expected_sql) pairs for Genie's automated benchmarks feature.
+    response_format="SQL" (not the builder's default "TEXT") is required here -- an
+    earlier version of this script avoided benchmarks because "TEXT" answers were
+    rejected by the API; "SQL" answers work fine."""
+    benchmarks = [
         (
             "Which tables have no foreign keys?",
-            "A list of tables from table_summary where outgoing_foreign_key_count = 0.",
+            f"SELECT table_catalog, table_schema, table_name FROM {loc}.table_summary "
+            f"WHERE outgoing_foreign_key_count = 0 ORDER BY table_catalog, table_schema, table_name;",
         ),
         (
-            "What is a foreign key relationship you can find?",
-            "A fk_table.fk_column -> pk_table.pk_column pair sourced from fk_edges, not invented.",
+            "What are the primary key columns for a given table?",
+            f"SELECT column_name, full_data_type, ordinal_position FROM {loc}.column_inventory "
+            f"WHERE table_schema = 'SCHEMA_NAME' AND table_name = 'TABLE_NAME' AND is_primary_key = TRUE ORDER BY ordinal_position;",
+        ),
+        (
+            "Which tables have both incoming and outgoing foreign keys (junction or bridge tables)?",
+            f"SELECT table_catalog, table_schema, table_name, incoming_foreign_key_count, outgoing_foreign_key_count FROM {loc}.table_summary "
+            f"WHERE incoming_foreign_key_count > 0 AND outgoing_foreign_key_count > 0 ORDER BY table_schema, table_name;",
+        ),
+        (
+            "Which tables have the most incoming foreign key references (most referenced tables)?",
+            f"SELECT table_catalog, table_schema, table_name, incoming_foreign_key_count FROM {loc}.table_summary "
+            f"ORDER BY incoming_foreign_key_count DESC LIMIT 20;",
+        ),
+        (
+            "How many tables exist in each schema?",
+            f"SELECT table_catalog, table_schema, COUNT(*) AS table_count FROM {loc}.table_summary "
+            f"GROUP BY table_catalog, table_schema ORDER BY table_catalog, table_schema;",
         ),
     ]
+    if catalogs:
+        example_catalog = catalogs[0]
+        benchmarks.insert(0, (
+            f"How many tables are in the {example_catalog} catalog?",
+            f"SELECT COUNT(*) FROM {loc}.table_summary WHERE table_catalog = '{example_catalog}';",
+        ))
     return benchmarks
 
 
@@ -202,18 +418,41 @@ def build_serialized_space(catalogs: list, loc: str, warehouse_id: str) -> Genie
         warehouse_id=warehouse_id,
     )
     for view in CURATED_VIEWS:
-        builder.add_table(f"{loc}.{view}")
+        builder.add_table(f"{loc}.{view}", column_configs=column_configs_for(view))
     builder.set_instructions(INSTRUCTIONS_TEMPLATE.format(catalog_list=catalog_list))
 
-    examples = example_sql_for_views(catalogs, loc)
-    sorted_ids = sorted(uuid4().hex for _ in examples)
-    for item_id, (question, sql) in zip(sorted_ids, examples):
-        builder.add_example_sql(question, sql, item_id=item_id)
+    # Every ID-keyed collection in serialized_space must be sorted ascending by id --
+    # a real, undocumented API requirement (InvalidParameterValue: "must be sorted by
+    # id") discovered by actually calling the API, not from the builder's own
+    # id-uniqueness validation, which doesn't check ordering. Generate+sort ids up
+    # front per collection, independently, rather than relying on insertion order.
+    def _sorted_ids(n: int) -> list[str]:
+        return sorted(uuid4().hex for _ in range(n))
 
-    # NOTE: Genie's `benchmarks` feature has a server-side enum for answer format that
-    # rejects the builder helper's own "TEXT" default (InvalidParameterValue) -- rather
-    # than fight that, the benchmark questions live as manual validation steps in
-    # TASKS.md / DEMO.md instead of as a formal Genie benchmark object.
+    # Join specs teach Genie how the 3 curated views relate to each other, so it can
+    # answer questions that span more than one of them without guessing a join.
+    join_specs = join_specs_for_views(loc)
+    for item_id, join_spec in zip(_sorted_ids(len(join_specs)), join_specs):
+        builder.add_join_spec(join_spec, item_id=item_id)
+
+    # Reusable filter/expression/measure snippets -- Genie surfaces these as building
+    # blocks when composing SQL, which measurably improves answer quality/consistency.
+    snippets = sql_snippets_for_views(catalogs)
+    for item_id, f in zip(_sorted_ids(len(snippets["filters"])), snippets["filters"]):
+        builder.add_filter(f.pop("sql"), display_name=f.pop("display_name", ""), item_id=item_id, **f)
+    for item_id, e in zip(_sorted_ids(len(snippets["expressions"])), snippets["expressions"]):
+        builder.add_expression(e.pop("alias"), e.pop("sql"), display_name=e.pop("display_name", ""), item_id=item_id, **e)
+    for item_id, m in zip(_sorted_ids(len(snippets["measures"])), snippets["measures"]):
+        builder.add_measure(m.pop("alias"), m.pop("sql"), display_name=m.pop("display_name", ""), item_id=item_id, **m)
+
+    examples = example_sql_for_views(catalogs, loc)
+    for item_id, (question, sql, guidance) in zip(_sorted_ids(len(examples)), examples):
+        builder.add_example_sql(question, sql, description=guidance, item_id=item_id)
+
+    benchmarks = benchmarks_for_views(catalogs, loc)
+    for item_id, (question, sql) in zip(_sorted_ids(len(benchmarks)), benchmarks):
+        builder.add_benchmark(question, sql, response_format="SQL", item_id=item_id)
+
     builder.validate()
     return builder
 
