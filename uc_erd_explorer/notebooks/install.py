@@ -31,6 +31,7 @@ dbutils.widgets.text("warehouse_id", "", "SQL warehouse id (required)")
 dbutils.widgets.text("erd_catalogs", "megacorp", "Catalogs to visualize (comma-separated; leave BLANK for unscoped -- every catalog visible to this deployment, including Genie)")
 dbutils.widgets.text("erd_metadata_location", "", "Genie metadata views location \"catalog.schema\" (blank = <first catalog>.erd_meta; REQUIRED if erd_catalogs is blank)")
 dbutils.widgets.dropdown("create_demo_catalog", "no", ["yes", "no"], "Create the synthetic megacorp demo catalog first?")
+dbutils.widgets.dropdown("add_demo_metadata", "no", ["yes", "no"], "Also add illustrative COMMENTs/tags to the demo data? (separate opt-in -- most real deployments won't want fabricated metadata layered onto their own catalogs, and even demo users may want the bare structure only)")
 
 repo_root_widget = dbutils.widgets.get("repo_root").strip()
 app_name = dbutils.widgets.get("app_name").strip()
@@ -38,6 +39,7 @@ warehouse_id = dbutils.widgets.get("warehouse_id").strip()
 erd_catalogs_raw = dbutils.widgets.get("erd_catalogs").strip()
 erd_metadata_location_raw = dbutils.widgets.get("erd_metadata_location").strip()
 create_demo_catalog = dbutils.widgets.get("create_demo_catalog") == "yes"
+add_demo_metadata = dbutils.widgets.get("add_demo_metadata") == "yes"
 
 assert repo_root_widget, "repo_root widget is required -- the Workspace path to this repo's checkout"
 assert app_name, "app_name widget is required"
@@ -65,6 +67,7 @@ print(f"warehouse_id={warehouse_id}")
 print(f"catalogs={catalogs}")
 print(f"metadata_location={metadata_location}")
 print(f"create_demo_catalog={create_demo_catalog}")
+print(f"add_demo_metadata={add_demo_metadata}")
 
 # COMMAND ----------
 
@@ -120,6 +123,28 @@ if create_demo_catalog:
     print(f"\nDemo catalog ready ({len(ddl_statements)} statements).")
 else:
     print("Skipped (create_demo_catalog=no).")
+
+# COMMAND ----------
+
+# MAGIC %md ## 3b. (Optional) Add illustrative comments/tags to the demo data
+# MAGIC A separate opt-in from catalog creation above -- this layers a handful of
+# MAGIC illustrative `COMMENT`/tag statements onto a few megacorp columns/tables purely to
+# MAGIC demo the ERD viewer's comment/tag surfacing feature. Skip this if you'd rather see
+# MAGIC the bare structure, or if you're pointing at your own catalog(s) instead.
+
+# COMMAND ----------
+
+if add_demo_metadata:
+    with open(os.path.join(SETUP_DIR, "megacorp_demo_metadata.sql")) as f:
+        metadata_statements = _split_sql_statements(f.read())
+    for i, stmt in enumerate(metadata_statements, 1):
+        print(f"[{i}/{len(metadata_statements)}] {stmt.strip().splitlines()[0][:70]}...", end=" ")
+        resp = w.statement_execution.execute_statement(warehouse_id=warehouse_id, statement=stmt, wait_timeout="50s")
+        assert resp.status.state.value == "SUCCEEDED", resp.status.error
+        print("ok")
+    print(f"\nDemo metadata added ({len(metadata_statements)} statements).")
+else:
+    print("Skipped (add_demo_metadata=no).")
 
 # COMMAND ----------
 
