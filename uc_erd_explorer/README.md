@@ -102,10 +102,10 @@ top of 5 internal, 1:1-filtered mirrors of `system.information_schema.*` (also c
 
 The default config points at a synthetic `megacorp` catalog, but **deploying this project
 does not create it for you** — nothing runs automatically against your workspace beyond
-the app and its Genie setup job. Creating the demo catalog is an explicit, opt-in step on
-both routes (Route 1: run `setup/run_ddl.py` yourself; Route 2: the `create_demo_catalog`
-notebook widget, default `no`) — most real deployments will point `erd_catalogs` at their
-own existing catalog(s) instead and skip this entirely.
+the app and its Genie setup job. Creating the demo data is an explicit, opt-in step on
+both routes (Route 1: run `setup/create_megacorp_demo.py` yourself; Route 2: the
+`create_demo_catalog` notebook widget, default `no`) — most real deployments will point
+`erd_catalogs` at their own existing catalog(s) instead and skip this entirely.
 
 If you do opt in, you get a fictional manufacturer with a **factory** schema (plants,
 production lines, machines, materials, work orders, quality inspections, sensor readings,
@@ -116,12 +116,23 @@ including cross-schema references and one deliberately *undeclared* relationship
 enough to be a genuinely interesting graph without needing any real customer data. DDL is
 in `setup/megacorp_schema.sql`; no rows are populated, only structure.
 
-A second, separate opt-in (`setup/megacorp_demo_metadata.sql`, Route 1: run it yourself;
-Route 2: the `add_demo_metadata` widget, default `no`) layers a handful of illustrative
-`COMMENT`s and Unity Catalog tags onto a few megacorp columns/tables, purely to demo the
-comment/tag surfacing feature. It's independent of `create_demo_catalog` on purpose —
-even someone deploying the demo data may want the bare structure without fabricated
-metadata opinions layered on top.
+**Target catalog is configurable, not hardcoded to "megacorp"** — pass `--catalog
+<name>` (Route 1) or set the `demo_catalog` widget (Route 2, default `megacorp`) to put
+the demo data somewhere else. `setup/create_megacorp_demo.py` handles three cases: no
+catalog given → use/create `megacorp`; a given catalog that doesn't exist yet → create
+it, then the schemas/tables; a given catalog that already exists → skip `CREATE CATALOG`
+entirely and just add the schemas/tables to it. That last case matters because `CREATE
+CATALOG` needs metastore-level privilege a deployer pointed at an existing catalog may
+not have (and shouldn't need) — creating schemas/tables inside a catalog they already
+have access to is a much lower bar.
+
+A second, separate opt-in (`setup/megacorp_demo_metadata.sql`, via `--with-metadata` /
+`--metadata-only` on Route 1, or the `add_demo_metadata` widget on Route 2, default `no`)
+layers a handful of illustrative `COMMENT`s and Unity Catalog tags onto a few megacorp
+columns/tables, purely to demo the comment/tag surfacing feature. It's independent of
+catalog creation on purpose — even someone deploying the demo data may want the bare
+structure without fabricated metadata opinions layered on top, and it can be re-run later
+against a catalog that already has the demo structure from a previous run.
 
 ## Prerequisites
 
@@ -153,12 +164,16 @@ At this point the app and its setup job exist in the workspace but the demo cata
 Genie Space don't yet. Finish the bootstrap:
 
 ```bash
-# 1. Create the synthetic megacorp catalog (skip this if pointing at your own catalog(s) instead)
-uv run --with databricks-sdk python setup/run_ddl.py setup/megacorp_schema.sql --profile <your-profile>
+# 1. Create the synthetic megacorp demo data (skip this if pointing at your own catalog(s)
+#    instead). --catalog defaults to "megacorp"; pass a different name to put it elsewhere --
+#    created if it doesn't exist yet, used as-is if it already does. Add --with-metadata to
+#    also do step 1b below in the same command.
+uv run --with databricks-sdk python setup/create_megacorp_demo.py --warehouse-id <your-warehouse-id> --profile <your-profile> [--catalog <name>]
 
-# 1b. (optional, independent of step 1) Add illustrative comments/tags to the demo data,
-#     to demo the comment/tag surfacing feature. Skip for bare structure only.
-uv run --with databricks-sdk python setup/run_ddl.py setup/megacorp_demo_metadata.sql --profile <your-profile>
+# 1b. (optional, independent of step 1 -- re-runnable on its own against a catalog that
+#     already has the demo structure) Add illustrative comments/tags to the demo data, to
+#     demo the comment/tag surfacing feature. Skip for bare structure only.
+uv run --with databricks-sdk python setup/create_megacorp_demo.py --warehouse-id <your-warehouse-id> --profile <your-profile> [--catalog <name>] --metadata-only
 
 # 2. Grant the app's service principal access to it (see "Permissions" below for the exact commands)
 databricks apps get erd-explorer-dev -p <your-profile>   # note service_principal_client_id
@@ -363,8 +378,10 @@ erd-explorer/
 ├── frontend/                     # React + Vite + reactflow + dagre SPA
 │   └── dist/                     # built output -- committed on purpose, see Troubleshooting
 ├── setup/
-│   ├── megacorp_schema.sql, run_ddl.py       # optional: creates the demo catalog
+│   ├── megacorp_schema.sql, create_megacorp_demo.py   # optional: creates the demo data
+│   │                                                     (in any target catalog)
 │   ├── megacorp_demo_metadata.sql            # optional: illustrative comments/tags for the demo
+│   ├── run_ddl.py                            # generic one-off .sql file executor
 │   ├── create_scoped_views.py                # Genie's hard-scoped data source
 │   └── create_genie_space.py                 # Genie Space create/update + ACL grant
 ├── notebooks/
