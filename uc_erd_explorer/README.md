@@ -104,7 +104,7 @@ The default config points at a synthetic `megacorp` catalog, but **deploying thi
 does not create it for you** — nothing runs automatically against your workspace beyond
 the app and its Genie setup job. Creating the demo data is an explicit, opt-in step on
 both routes (Route 1: run `setup/create_megacorp_demo.py` yourself; Route 2: the
-`create_demo_catalog` notebook widget, default `no`) — most real deployments will point
+`create_demo_data` notebook widget, default `no`) — most real deployments will point
 `erd_catalogs` at their own existing catalog(s) instead and skip this entirely.
 
 If you do opt in, you get a fictional manufacturer with a **factory** schema (plants,
@@ -117,14 +117,16 @@ enough to be a genuinely interesting graph without needing any real customer dat
 in `setup/megacorp_schema.sql`; no rows are populated, only structure.
 
 **Target catalog is configurable, not hardcoded to "megacorp"** — pass `--catalog
-<name>` (Route 1) or set the `demo_catalog` widget (Route 2, default `megacorp`) to put
-the demo data somewhere else. `setup/create_megacorp_demo.py` handles three cases: no
-catalog given → use/create `megacorp`; a given catalog that doesn't exist yet → create
-it, then the schemas/tables; a given catalog that already exists → skip `CREATE CATALOG`
-entirely and just add the schemas/tables to it. That last case matters because `CREATE
-CATALOG` needs metastore-level privilege a deployer pointed at an existing catalog may
-not have (and shouldn't need) — creating schemas/tables inside a catalog they already
-have access to is a much lower bar.
+<name>` (Route 1) or set the `demo_catalog` widget (Route 2, default blank -- reuses
+`erd_catalogs`'s first entry so you don't have to type the same catalog name twice, or
+falls back to `megacorp` if that's also blank) to put the demo data somewhere else.
+`setup/create_megacorp_demo.py` handles three cases: no catalog given → use/create
+`megacorp`; a given catalog that doesn't exist yet → create it, then the schemas/tables;
+a given catalog that already exists → skip `CREATE CATALOG` entirely and just add the
+schemas/tables to it. That last case matters because `CREATE CATALOG` needs
+metastore-level privilege a deployer pointed at an existing catalog may not have (and
+shouldn't need) — creating schemas/tables inside a catalog they already have access to
+is a much lower bar.
 
 A second, separate opt-in (`setup/megacorp_demo_metadata.sql`, via `--with-metadata` /
 `--metadata-only` on Route 1, or the `add_demo_metadata` widget on Route 2, default `no`)
@@ -175,8 +177,11 @@ uv run --with databricks-sdk python setup/create_megacorp_demo.py --warehouse-id
 #     demo the comment/tag surfacing feature. Skip for bare structure only.
 uv run --with databricks-sdk python setup/create_megacorp_demo.py --warehouse-id <your-warehouse-id> --profile <your-profile> [--catalog <name>] --metadata-only
 
-# 2. Grant the app's service principal access to it (see "Permissions" below for the exact commands)
-databricks apps get erd-explorer-dev -p <your-profile>   # note service_principal_client_id
+# 2. Grant the app's service principal access to it (see "Permissions" below for details --
+#    this looks up the service principal for you, no copy/paste needed)
+uv run --with databricks-sdk python setup/grant_catalog_access.py \
+    --warehouse-id <your-warehouse-id> --profile <your-profile> \
+    --app-name erd-explorer-dev --catalogs megacorp --metadata-location megacorp.erd_meta
 
 # 3. Create the scoped metadata views + Genie Space (idempotent, safe to re-run)
 databricks bundle run setup_genie_space -t dev -p <your-profile>
@@ -217,16 +222,19 @@ entirely from inside the workspace UI.
    | `app_name` | no (default `erd-explorer`) | Databricks App name |
    | `erd_catalogs` | no (default `megacorp`) | Comma-separated catalog allow-list. Clear it entirely for unscoped mode (every catalog visible to this deployment — see "Unscoped mode" below) |
    | `erd_metadata_location` | no (default `<first catalog>.erd_meta`) | Where the scoped Genie views live. **Required** if you clear `erd_catalogs` |
-   | `create_demo_catalog` | no (default `no`) | Set to `yes` to create the synthetic `megacorp` catalog first |
-   | `add_demo_metadata` | no (default `no`) | Independent of `create_demo_catalog` -- set to `yes` to also layer illustrative comments/tags onto the demo data, for demoing the comment/tag surfacing feature |
+   | `create_demo_data` | no (default `no`) | Set to `yes` to create the synthetic megacorp schemas/tables in `demo_catalog`. Works whether `demo_catalog` already exists (e.g. you don't have CREATE CATALOG permission -- only schemas/tables get added to it) or not (it gets created too) |
+   | `demo_catalog` | no (default blank) | Catalog to create the demo data in, only used if `create_demo_data=yes`. Blank reuses the first `erd_catalogs` entry, so the common case (demo data + app pointed at the same catalog) only needs `erd_catalogs` filled in; falls back to `megacorp` if `erd_catalogs` is also blank |
+   | `add_demo_metadata` | no (default `no`) | Independent of `create_demo_data` -- set to `yes` to also layer illustrative comments/tags onto the demo data, for demoing the comment/tag surfacing feature |
 
 4. Fill in the widgets, then **Run all** again. The notebook will, in order: optionally
-   create the demo catalog, create the scoped Genie metadata views, stage an isolated
+   create the demo data, create the scoped Genie metadata views, stage an isolated
    deploy folder (so widget-driven config never touches the tracked `app.yaml`), create
    the Databricks App and deploy it, create/update the Genie Space and grant the app
-   access to it, then redeploy with the real Genie Space id and start the app. It prints
-   the app URL and the service principal client id at the end.
-5. One remaining manual step, same as Route 1 — see **Permissions** below.
+   access to it, redeploy with the real Genie Space id and start the app, then grant the
+   app's service principal Unity Catalog access to `erd_catalogs` (see **Permissions**
+   below — this requires *you* to already have grant-issuing rights on those catalogs;
+   if you don't, it prints the exact SQL for a catalog admin to run instead). It prints
+   the app URL at the end.
 
 The notebook is idempotent (safe to "Run all" repeatedly, e.g. after changing widget
 values) and calls the identical `setup/create_scoped_views.py` /
@@ -278,36 +286,32 @@ including one not otherwise shown in the graph.
 
 ## Permissions
 
-Two *separate* things need granting, and both are workspace-specific enough that we
-don't auto-generate the grant statements — but everything downstream of them is scripted.
-
-Both need your app's **service principal client id**. Get it either way:
-- CLI: `databricks apps get erd-explorer-dev -p <profile>` (look for `service_principal_client_id`)
-- UI: open the app in the Databricks Apps UI and check its **Authorization** tab — see
-  [Databricks Apps authorization docs](https://docs.databricks.com/aws/en/dev-tools/databricks-apps/auth#app-authorization)
-  for exactly where to find it if the tab layout has moved.
+Two things need granting. Both are automated now — you don't need to hand-craft or
+copy/paste GRANT statements — but both still depend on *you* (whoever runs the script)
+already having grant-issuing rights on the target catalog(s); if you don't, the
+automation fails per-statement with a clear permission error and prints the exact SQL
+for a catalog admin to run instead of aborting the whole setup.
 
 **1. Unity Catalog data access** (lets `/api/graph` and the scoped views actually return
-rows — without this, queries succeed but silently return zero rows, not an error). This
-is really **two grants, for two potentially different locations**:
+rows — without this, queries succeed but silently return zero rows, not an error).
+`setup/grant_catalog_access.py` looks up the app's service principal via the Apps API
+itself (no copy/paste) and grants catalog-level `USE CATALOG`/`USE SCHEMA`/`SELECT` —
+cascading to every schema/table inside, matching `erd_catalogs` being catalog-level
+scoping — on each catalog in `erd_catalogs`, plus a schema-specific grant on wherever
+`erd_metadata_location` actually points (which may be a different catalog entirely):
 
-```sql
--- (a) your actual data catalog(s) -- repeat this block per catalog/schema in erd_catalogs
-GRANT USE CATALOG ON CATALOG <your_catalog> TO `<app-service-principal-client-id>`;
-GRANT USE SCHEMA ON SCHEMA <your_catalog>.<your_schema> TO `<app-service-principal-client-id>`;
-GRANT SELECT ON SCHEMA <your_catalog>.<your_schema> TO `<app-service-principal-client-id>`;
-
--- (b) wherever erd_metadata_location actually points -- by DEFAULT this is
--- <first erd_catalogs entry>.erd_meta (so often the same catalog as (a), just a
--- different schema), but if you've overridden erd_metadata_location to a different
--- catalog, grant on THAT catalog instead, not your data catalog:
-GRANT USE CATALOG ON CATALOG <metadata_catalog> TO `<app-service-principal-client-id>`;  -- only if different from (a)
-GRANT USE SCHEMA ON SCHEMA <metadata_catalog>.<metadata_schema> TO `<app-service-principal-client-id>`;
-GRANT SELECT ON SCHEMA <metadata_catalog>.<metadata_schema> TO `<app-service-principal-client-id>`;
+```bash
+uv run --with databricks-sdk python setup/grant_catalog_access.py \
+    --warehouse-id <your-warehouse-id> --profile <your-profile> \
+    --app-name erd-explorer-dev --catalogs megacorp --metadata-location megacorp.erd_meta
 ```
 
+Route 2 (notebook) runs this automatically as its own step, reusing the same function.
+Skipped entirely in unscoped mode (`erd_catalogs` blank) — there's no fixed catalog list
+to grant on; the app relies on whatever grants its service principal already has.
+
 **2. Genie Space access** — a Genie Space is a workspace object with its own separate
-ACL from Unity Catalog grants. This one *is* automated: `setup/create_genie_space.py`
+ACL from Unity Catalog grants. This one is also automated: `setup/create_genie_space.py`
 takes `--grant-to-app <app-name>` (already wired into the DAB job) and grants the app's
 service principal `CAN_RUN` on the space automatically every time the setup job runs.
 

@@ -29,9 +29,9 @@ dbutils.widgets.text("repo_root", "", "Workspace path to this repo's root (requi
 dbutils.widgets.text("app_name", "erd-explorer", "Databricks App name")
 dbutils.widgets.text("warehouse_id", "", "SQL warehouse id (required)")
 dbutils.widgets.text("erd_catalogs", "megacorp", "Catalogs to visualize (comma-separated; leave BLANK for unscoped -- every catalog visible to this deployment, including Genie)")
-dbutils.widgets.text("erd_metadata_location", "", "Genie metadata views location \"catalog.schema\" (blank = <first catalog>.erd_meta; REQUIRED if erd_catalogs is blank)")
-dbutils.widgets.dropdown("create_demo_catalog", "no", ["yes", "no"], "Create the synthetic megacorp demo data first?")
-dbutils.widgets.text("demo_catalog", "megacorp", "Catalog to create the demo data in (only used if create_demo_catalog=yes). Created if it doesn't exist; used as-is if it already exists.")
+dbutils.widgets.text("erd_metadata_location", "", "Genie metadata views location \"catalog.schema\" (blank = <first erd_catalogs entry>.erd_meta; REQUIRED if erd_catalogs is blank)")
+dbutils.widgets.dropdown("create_demo_data", "no", ["yes", "no"], "Create the synthetic megacorp schemas/tables? Works whether demo_catalog already exists (e.g. you don't have CREATE CATALOG permission -- only schemas/tables get added to it) or not (it gets created too)")
+dbutils.widgets.text("demo_catalog", "", "Catalog to create the demo data in (only used if create_demo_data=yes). Blank = reuse the first erd_catalogs entry, so you don't have to type the same catalog name twice; falls back to \"megacorp\" if erd_catalogs is also blank.")
 dbutils.widgets.dropdown("add_demo_metadata", "no", ["yes", "no"], "Also add illustrative COMMENTs/tags to the demo data? (separate opt-in -- most real deployments won't want fabricated metadata layered onto their own catalogs, and even demo users may want the bare structure only)")
 
 repo_root_widget = dbutils.widgets.get("repo_root").strip()
@@ -39,8 +39,8 @@ app_name = dbutils.widgets.get("app_name").strip()
 warehouse_id = dbutils.widgets.get("warehouse_id").strip()
 erd_catalogs_raw = dbutils.widgets.get("erd_catalogs").strip()
 erd_metadata_location_raw = dbutils.widgets.get("erd_metadata_location").strip()
-create_demo_catalog = dbutils.widgets.get("create_demo_catalog") == "yes"
-demo_catalog = dbutils.widgets.get("demo_catalog").strip()
+create_demo_data = dbutils.widgets.get("create_demo_data") == "yes"
+demo_catalog_raw = dbutils.widgets.get("demo_catalog").strip()
 add_demo_metadata = dbutils.widgets.get("add_demo_metadata") == "yes"
 
 assert repo_root_widget, "repo_root widget is required -- the Workspace path to this repo's checkout"
@@ -64,11 +64,21 @@ else:
     )
 metadata_catalog, metadata_schema = metadata_location.split(".", 1)
 
+# demo_catalog cascades from erd_catalogs (same "don't type the same name twice" pattern
+# as erd_metadata_location above) so the common case -- demo data + app pointed at the
+# same one catalog -- only needs erd_catalogs filled in.
+if demo_catalog_raw:
+    demo_catalog = demo_catalog_raw
+elif catalogs:
+    demo_catalog = catalogs[0]
+else:
+    demo_catalog = "megacorp"
+
 print(f"app_name={app_name}")
 print(f"warehouse_id={warehouse_id}")
 print(f"catalogs={catalogs}")
 print(f"metadata_location={metadata_location}")
-print(f"create_demo_catalog={create_demo_catalog}")
+print(f"create_demo_data={create_demo_data}")
 print(f"demo_catalog={demo_catalog}")
 print(f"add_demo_metadata={add_demo_metadata}")
 
@@ -96,6 +106,7 @@ sys.path.insert(0, SETUP_DIR)
 import create_scoped_views
 import create_genie_space
 import create_megacorp_demo
+import grant_catalog_access
 
 from databricks.sdk import WorkspaceClient
 
@@ -120,10 +131,10 @@ print(f"Authenticated as: {w.current_user.me().user_name}")
 
 # COMMAND ----------
 
-if create_demo_catalog:
+if create_demo_data:
     create_megacorp_demo.create_megacorp_demo(w, warehouse_id, demo_catalog)
 else:
-    print("Skipped (create_demo_catalog=no).")
+    print("Skipped (create_demo_data=no).")
 
 # COMMAND ----------
 
@@ -350,24 +361,20 @@ print(f"\nApp is live: {app['url']}")
 
 # COMMAND ----------
 
-# MAGIC %md ## 9. One remaining manual step: Unity Catalog grants
-# MAGIC Same as the CLI/DAB route -- this can't be generically automated since it depends
-# MAGIC on your workspace's own admin/grant model. Run this SQL (in a cell below, or any
-# MAGIC SQL editor) once, substituting your catalog/schema names:
+# MAGIC %md ## 9. Grant the app's service principal access to your catalog(s)
+# MAGIC Uses the `service_principal_client_id` fetched from the Apps API in step 6 --
+# MAGIC no need to copy/paste it. Same `setup/grant_catalog_access.py` function the CLI
+# MAGIC route's equivalent script calls. Catalog-level grants cascade to every schema/table
+# MAGIC inside (matching `erd_catalogs` being catalog-level scoping), plus a
+# MAGIC schema-specific grant for the Genie metadata location. Requires *you* (whoever is
+# MAGIC running this notebook) to already have grant-issuing rights on these catalogs --
+# MAGIC if you don't, the statements below fail with a clear permission error rather than
+# MAGIC silently doing nothing, and print the exact SQL for a catalog admin to run instead.
 # MAGIC
-# MAGIC ```sql
-# MAGIC GRANT USE CATALOG ON CATALOG <your_catalog> TO `<service_principal_client_id>`;
-# MAGIC GRANT USE SCHEMA ON SCHEMA <your_catalog>.<your_schema> TO `<service_principal_client_id>`;
-# MAGIC GRANT SELECT ON SCHEMA <your_catalog>.<your_schema> TO `<service_principal_client_id>`;
-# MAGIC -- repeat per schema, plus the erd_meta schema:
-# MAGIC GRANT USE SCHEMA ON SCHEMA <your_catalog>.erd_meta TO `<service_principal_client_id>`;
-# MAGIC GRANT SELECT ON SCHEMA <your_catalog>.erd_meta TO `<service_principal_client_id>`;
-# MAGIC ```
-# MAGIC
-# MAGIC The service principal client id is printed in cell 6 above.
+# MAGIC Skipped entirely in unscoped mode (`erd_catalogs` blank) -- there's no fixed catalog
+# MAGIC list to grant on; the app relies on whatever grants its service principal already
+# MAGIC has, same as any other unscoped deployment.
 
 # COMMAND ----------
 
-print(f"service_principal_client_id = {app_sp_client_id}")
-print("Run the GRANT statements above (substituting this id) if you haven't already,")
-print("then reload the app URL printed in step 8.")
+grant_catalog_access.grant_catalog_access(w, warehouse_id, catalogs, metadata_catalog, metadata_schema, app_sp_client_id)
