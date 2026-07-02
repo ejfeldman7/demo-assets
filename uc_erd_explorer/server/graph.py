@@ -14,12 +14,22 @@ grants allow," not literally every catalog that exists). Per user decision, Geni
 setup mirrors this: unscoped ERD_CATALOGS means an unscoped Genie Space too (see
 setup/create_scoped_views.py) -- this is a deliberate, documented choice, not a gap.
 
-Nodes  = tables (with their columns; each column flagged is_pk / is_fk).
+Nodes  = tables (with their columns; each column flagged is_pk / is_fk). Tables and
+         columns also carry their UC `comment` (nullable) and `tags` (from
+         table_tags/column_tags, e.g. PII classification) -- both are surfaced as-is,
+         empty/None when a deployment's catalog has none set.
 Edges  = FOREIGN KEY -> PRIMARY KEY relationships (direction: FK table -> PK table).
 An edge only renders if BOTH endpoints are in-scope, so a FK pointing at a catalog
 outside the allow-list is silently dropped rather than leaking that catalog's existence.
 
-Results are cached in-memory for ~5 minutes (schema metadata changes rarely).
+Results are cached in-memory (TTL configurable via ERD_CACHE_TTL_SECONDS, default 300s
+-- schema metadata changes rarely). Catalogs above ERD_SCHEMA_COLLAPSE_THRESHOLD tables
+(default 80) default to a collapsed, one-node-per-schema view instead of full
+table-level detail -- see build_schema_summary() -- since a flat table-per-node layout
+gets slow to query and unreadable well before a few hundred nodes. Selecting a specific
+schema (via `pairs`) always returns full detail for it regardless of the threshold --
+this is also how the frontend "expands" a collapsed schema node on click, reusing the
+same pairs-based mechanism as the catalog/schema tree picker rather than a second one.
 """
 import re
 import time
@@ -27,11 +37,17 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from databricks.sdk.service import sql
 
-from .config import get_catalogs, get_metadata_location, get_warehouse_id, get_workspace_client
+from .config import (
+    get_cache_ttl_seconds,
+    get_catalogs,
+    get_metadata_location,
+    get_schema_collapse_threshold,
+    get_warehouse_id,
+    get_workspace_client,
+)
 
 # In-memory cache: {(frozenset(catalogs), frozenset(pairs)): (timestamp, payload)}
 _CACHE: Dict[Tuple[frozenset, frozenset], Tuple[float, Dict[str, Any]]] = {}
-_CACHE_TTL_SECONDS = 300  # 5 minutes
 
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9_]+$")
 
@@ -124,7 +140,7 @@ def _query_columns(catalogs: Optional[List[str]], pairs: Optional[List[Tuple[str
     catalog_filter = f"AND table_catalog IN {_in_clause(catalogs)}" if catalogs else ""
     pair_filter = f"AND {_pair_in_clause('table_catalog', 'table_schema', pairs)}" if pairs else ""
     stmt = f"""
-    SELECT table_catalog, table_schema, table_name, column_name, full_data_type, ordinal_position
+    SELECT table_catalog, table_schema, table_name, column_name, full_data_type, ordinal_position, comment
     FROM system.information_schema.columns
     WHERE {_internal_schema_exclusion_sql("table_catalog", "table_schema")}
       {catalog_filter}
@@ -140,7 +156,7 @@ def _query_tables(catalogs: Optional[List[str]], pairs: Optional[List[Tuple[str,
     catalog_filter = f"AND table_catalog IN {_in_clause(catalogs)}" if catalogs else ""
     pair_filter = f"AND {_pair_in_clause('table_catalog', 'table_schema', pairs)}" if pairs else ""
     stmt = f"""
-    SELECT table_catalog, table_schema, table_name
+    SELECT table_catalog, table_schema, table_name, comment
     FROM system.information_schema.tables
     WHERE {_internal_schema_exclusion_sql("table_catalog", "table_schema")}
       {catalog_filter}
@@ -148,6 +164,43 @@ def _query_tables(catalogs: Optional[List[str]], pairs: Optional[List[Tuple[str,
     ORDER BY table_catalog, table_schema, table_name
     """
     return _rows(_execute(stmt))
+
+
+def _query_table_tags(catalogs: Optional[List[str]], pairs: Optional[List[Tuple[str, str]]]) -> List[List[Any]]:
+    """(catalog, schema, table, tag_name, tag_value) rows from Unity Catalog's tag
+    governance feature (e.g. PII classification). Tolerant of the system table being
+    unavailable in older workspaces/metastores -- degrades to "no tags" rather than
+    breaking the whole graph."""
+    catalog_filter = f"AND catalog_name IN {_in_clause(catalogs)}" if catalogs else ""
+    pair_filter = f"AND {_pair_in_clause('catalog_name', 'schema_name', pairs)}" if pairs else ""
+    stmt = f"""
+    SELECT catalog_name, schema_name, table_name, tag_name, tag_value
+    FROM system.information_schema.table_tags
+    WHERE {_internal_schema_exclusion_sql("catalog_name", "schema_name")}
+      {catalog_filter}
+      {pair_filter}
+    """
+    try:
+        return _rows(_execute(stmt))
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def _query_column_tags(catalogs: Optional[List[str]], pairs: Optional[List[Tuple[str, str]]]) -> List[List[Any]]:
+    """(catalog, schema, table, column, tag_name, tag_value) rows -- see _query_table_tags."""
+    catalog_filter = f"AND catalog_name IN {_in_clause(catalogs)}" if catalogs else ""
+    pair_filter = f"AND {_pair_in_clause('catalog_name', 'schema_name', pairs)}" if pairs else ""
+    stmt = f"""
+    SELECT catalog_name, schema_name, table_name, column_name, tag_name, tag_value
+    FROM system.information_schema.column_tags
+    WHERE {_internal_schema_exclusion_sql("catalog_name", "schema_name")}
+      {catalog_filter}
+      {pair_filter}
+    """
+    try:
+        return _rows(_execute(stmt))
+    except Exception:  # noqa: BLE001
+        return []
 
 
 def _query_primary_keys(catalogs: Optional[List[str]], pairs: Optional[List[Tuple[str, str]]]) -> List[List[Any]]:
@@ -229,6 +282,81 @@ def list_catalog_schemas() -> List[Dict[str, Any]]:
     return [{"catalog": c, "schemas": sorted(s)} for c, s in sorted(tree.items())]
 
 
+# --- inferred (undeclared) relationship heuristic ---------------------------
+#
+# Deliberately isolated from the declared-FK query/assembly below: this is a guess, not
+# a guarantee, and keeping it in one self-contained function makes it trivial to disable
+# (skip calling it) or retune (edit only this function) without touching the real
+# constraint-based logic. Never treat its output as equivalent to a declared FK.
+
+
+def infer_relationships(
+    columns: List[List[Any]],
+    pks: List[List[Any]],
+    fk_cols: Dict[Tuple[str, str, str], set],
+) -> List[Dict[str, Any]]:
+    """Heuristic: a column named exactly like another table's primary key column, with
+    the same data type, is treated as a LIKELY undeclared foreign key (e.g. an orders
+    table's `customer_id` column matching customers' `customer_id` primary key). Only
+    fires on an unambiguous single match -- if two or more tables declare a primary key
+    column with that same (name, type), the guess is too uncertain to make and is
+    skipped entirely, rather than picking one arbitrarily.
+
+    `columns` / `pks` are the same rows `build_graph` already queried (catalog, schema,
+    table, column_name, full_type, ordinal, comment) and (catalog, schema, table,
+    column) respectively -- no extra queries needed. `fk_cols` (table -> set of column
+    names already covered by a declared FK) excludes anything already a real,
+    constraint-backed relationship.
+    """
+    col_type: Dict[Tuple[str, str, str, str], str] = {}
+    pk_col_names: Dict[Tuple[str, str, str], set] = {}
+    for (catalog, schema, table, column_name, full_type, _ord, _comment) in columns:
+        col_type[(catalog, schema, table, column_name)] = full_type
+    for (catalog, schema, table, column) in pks:
+        pk_col_names.setdefault((catalog, schema, table), set()).add(column)
+
+    # Index PK columns by (lowercased name, type) -> candidate (catalog, schema, table, column).
+    # Only single-column primary keys are eligible targets: a composite PK's individual
+    # columns (e.g. a many-to-many junction table's own FK-shaped PK members) aren't
+    # meaningful standalone reference targets, and routinely reuse another table's PK
+    # column name+type by design -- including them would make ordinary junction tables
+    # look like false ambiguity for every real match.
+    pk_index: Dict[Tuple[str, str], List[Tuple[str, str, str, str]]] = {}
+    for (catalog, schema, table, column) in pks:
+        if len(pk_col_names.get((catalog, schema, table), set())) != 1:
+            continue
+        full_type = col_type.get((catalog, schema, table, column))
+        if not full_type:
+            continue
+        pk_index.setdefault((column.lower(), full_type), []).append((catalog, schema, table, column))
+
+    inferred: List[Dict[str, Any]] = []
+    for (catalog, schema, table, column_name, full_type, _ord, _comment) in columns:
+        if column_name in pk_col_names.get((catalog, schema, table), set()):
+            continue  # this table's own PK column -- a naming coincidence, not a reference
+        if column_name in fk_cols.get((catalog, schema, table), set()):
+            continue  # already a declared FK -- don't also mark it "inferred"
+        candidates = [
+            c for c in pk_index.get((column_name.lower(), full_type), [])
+            if (c[0], c[1], c[2]) != (catalog, schema, table)
+        ]
+        if len(candidates) != 1:
+            continue  # no match, or too ambiguous (multiple same-named PKs) to guess
+        pk_catalog, pk_schema, pk_table, pk_column = candidates[0]
+        inferred.append(
+            {
+                "id": f"inferred:{catalog}.{schema}.{table}.{column_name}",
+                "source": _node_id(catalog, schema, table),
+                "target": _node_id(pk_catalog, pk_schema, pk_table),
+                "fk_columns": [column_name],
+                "pk_columns": [pk_column],
+                "constraint_name": None,
+                "inferred": True,
+            }
+        )
+    return inferred
+
+
 # --- graph assembly ---------------------------------------------------------
 
 
@@ -249,16 +377,42 @@ def build_graph(pairs: Optional[List[Tuple[str, str]]] = None) -> Dict[str, Any]
     key = (frozenset(catalogs or ()), frozenset(pairs or ()))
 
     cached = _CACHE.get(key)
-    if cached and (time.time() - cached[0]) < _CACHE_TTL_SECONDS:
+    if cached and (time.time() - cached[0]) < get_cache_ttl_seconds():
         return cached[1]
 
     tables = _query_tables(catalogs, pairs)
+
+    # Above the collapse threshold, render one node per schema instead of one per table
+    # -- but only for the unfiltered "All" view. A specific schema selection (pairs) is
+    # exactly how a collapsed schema node "expands": clicking it sets that schema as the
+    # picker selection, which re-requests /api/graph?pairs=... and always gets full
+    # detail regardless of how many tables are in scope overall.
+    collapse_threshold = get_schema_collapse_threshold()
+    if not pairs and collapse_threshold and len(tables) > collapse_threshold:
+        payload = build_schema_summary(catalogs, tables)
+        _CACHE[key] = (time.time(), payload)
+        return payload
+
     columns = _query_columns(catalogs, pairs)
     pks = _query_primary_keys(catalogs, pairs)
     fks = _query_foreign_keys(catalogs)
+    table_tags = _query_table_tags(catalogs, pairs)
+    column_tags = _query_column_tags(catalogs, pairs)
 
     # Set of table node-ids present in this view (drives edge filtering).
-    present: set = {_node_id(c, s, t) for (c, s, t) in tables}
+    present: set = {_node_id(c, s, t) for (c, s, t, _comment) in tables}
+
+    # Tag lookups: node-id -> [{name, value}, ...], (catalog, schema, table, column) -> [...].
+    table_tags_by_id: Dict[str, List[Dict[str, str]]] = {}
+    for (catalog, schema, table, tag_name, tag_value) in table_tags:
+        table_tags_by_id.setdefault(_node_id(catalog, schema, table), []).append(
+            {"name": tag_name, "value": tag_value}
+        )
+    column_tags_by_key: Dict[Tuple[str, str, str, str], List[Dict[str, str]]] = {}
+    for (catalog, schema, table, column, tag_name, tag_value) in column_tags:
+        column_tags_by_key.setdefault((catalog, schema, table, column), []).append(
+            {"name": tag_name, "value": tag_value}
+        )
 
     # PK column lookup: (catalog, schema, table) -> {column, ...}
     pk_cols: Dict[Tuple[str, str, str], set] = {}
@@ -289,16 +443,28 @@ def build_graph(pairs: Optional[List[Tuple[str, str]]] = None) -> Dict[str, Any]
                 "fk_columns": [],
                 "pk_columns": [],
                 "constraint_name": constraint_name,
+                "inferred": False,
             },
         )
         acc["fk_columns"].append(fk_column)
         acc["pk_columns"].append(pk_column)
     edges = list(edge_acc.values())
 
+    # Heuristic, undeclared-relationship edges -- always computed and included (tagged
+    # `inferred: true`) so the frontend can toggle them on/off client-side without a
+    # second request; default OFF there keeps first load identical to pre-heuristic
+    # behavior. Endpoints are already guaranteed in-scope (infer_relationships only sees
+    # the same pre-filtered `columns`/`pks` rows as everything else above), but filtered
+    # against `present` again anyway for defense-in-depth, matching the declared-edge check.
+    edges += [
+        e for e in infer_relationships(columns, pks, fk_cols)
+        if e["source"] in present and e["target"] in present
+    ]
+
     # --- nodes ---
     # Group columns by (catalog, schema, table) preserving ordinal order.
     cols_by_table: Dict[Tuple[str, str, str], List[Dict[str, Any]]] = {}
-    for (catalog, schema, table, column_name, full_type, _ord) in columns:
+    for (catalog, schema, table, column_name, full_type, _ord, comment) in columns:
         is_pk = column_name in pk_cols.get((catalog, schema, table), set())
         is_fk = column_name in fk_cols.get((catalog, schema, table), set())
         cols_by_table.setdefault((catalog, schema, table), []).append(
@@ -307,17 +473,22 @@ def build_graph(pairs: Optional[List[Tuple[str, str]]] = None) -> Dict[str, Any]
                 "type": full_type,
                 "is_pk": is_pk,
                 "is_fk": is_fk,
+                "comment": comment,
+                "tags": column_tags_by_key.get((catalog, schema, table, column_name), []),
             }
         )
 
     nodes = []
-    for (catalog, schema, table) in tables:
+    for (catalog, schema, table, comment) in tables:
+        node_id = _node_id(catalog, schema, table)
         nodes.append(
             {
-                "id": _node_id(catalog, schema, table),
+                "id": node_id,
                 "catalog": catalog,
                 "schema": schema,
                 "table": table,
+                "comment": comment,
+                "tags": table_tags_by_id.get(node_id, []),
                 "columns": cols_by_table.get((catalog, schema, table), []),
             }
         )
@@ -331,8 +502,60 @@ def build_graph(pairs: Optional[List[Tuple[str, str]]] = None) -> Dict[str, Any]
         "catalogs": sorted({n["catalog"] for n in nodes}),
         "unscoped": catalogs is None,
         "pairs": [f"{c}.{s}" for c, s in pairs] if pairs else None,
+        "view": "detail",
         "nodes": nodes,
         "edges": edges,
     }
     _CACHE[key] = (time.time(), payload)
     return payload
+
+
+def build_schema_summary(catalogs: Optional[List[str]], tables: List[List[Any]]) -> Dict[str, Any]:
+    """One node per (catalog, schema) with its table count, plus one aggregate edge per
+    schema-to-schema FK relationship (deduped from every underlying table-level FK)
+    -- the collapsed view `build_graph` falls back to above ERD_SCHEMA_COLLAPSE_THRESHOLD
+    tables. `tables` is the same (catalog, schema, table, comment) rows the caller
+    already queried, so this needs only one extra query (FKs, to compute schema-level
+    edges) rather than re-deriving everything from scratch."""
+    schema_counts: Dict[Tuple[str, str], int] = {}
+    for (catalog, schema, _table, _comment) in tables:
+        schema_counts[(catalog, schema)] = schema_counts.get((catalog, schema), 0) + 1
+
+    nodes = [
+        {"id": f"{catalog}.{schema}", "catalog": catalog, "schema": schema, "table_count": count}
+        for (catalog, schema), count in sorted(schema_counts.items())
+    ]
+    present_schema_ids = {n["id"] for n in nodes}
+
+    fks = _query_foreign_keys(catalogs)
+    schema_edge_counts: Dict[Tuple[str, str], int] = {}
+    for (fk_catalog, fk_schema, _fk_table, _fk_col, _ord,
+         pk_catalog, pk_schema, _pk_table, _pk_col, _constraint_name) in fks:
+        source = f"{fk_catalog}.{fk_schema}"
+        target = f"{pk_catalog}.{pk_schema}"
+        if source == target or source not in present_schema_ids or target not in present_schema_ids:
+            continue
+        schema_edge_counts[(source, target)] = schema_edge_counts.get((source, target), 0) + 1
+
+    edges = [
+        {
+            "id": f"schema-edge:{source}->{target}",
+            "source": source,
+            "target": target,
+            "fk_columns": [],
+            "pk_columns": [],
+            "constraint_name": None,
+            "inferred": False,
+            "relationship_count": count,
+        }
+        for (source, target), count in sorted(schema_edge_counts.items())
+    ]
+
+    return {
+        "catalogs": sorted({n["catalog"] for n in nodes}),
+        "unscoped": catalogs is None,
+        "pairs": None,
+        "view": "schema_summary",
+        "nodes": nodes,
+        "edges": edges,
+    }

@@ -79,6 +79,35 @@ def get_genie_space_id() -> Optional[str]:
     return os.environ.get("GENIE_SPACE_ID") or None
 
 
+def get_cache_ttl_seconds() -> int:
+    """How long /api/graph results are cached in-memory before re-querying
+    information_schema. Configurable via ERD_CACHE_TTL_SECONDS -- schema metadata
+    changes rarely, so the 300s default trades a little staleness for far fewer
+    warehouse round-trips on repeated loads/filters within a session."""
+    raw = os.environ.get("ERD_CACHE_TTL_SECONDS")
+    if raw:
+        try:
+            return max(0, int(raw))
+        except ValueError:
+            pass
+    return 300
+
+
+def get_schema_collapse_threshold() -> Optional[int]:
+    """Table count above which /api/graph defaults to one node per schema instead of one
+    per table (see server/graph.py's schema-summary view) -- unreadable/slow flat layouts
+    on catalogs with hundreds of tables. Configurable via ERD_SCHEMA_COLLAPSE_THRESHOLD;
+    0 or an invalid value disables collapsing entirely (always render full detail)."""
+    raw = os.environ.get("ERD_SCHEMA_COLLAPSE_THRESHOLD")
+    if raw:
+        try:
+            value = int(raw)
+            return value if value > 0 else None
+        except ValueError:
+            pass
+    return 80
+
+
 @lru_cache(maxsize=1)
 def get_workspace_name() -> str:
     """Best-effort human-readable workspace identifier for the UI header, derived from

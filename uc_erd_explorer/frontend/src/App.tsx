@@ -5,6 +5,7 @@ import ReactFlow, {
   Controls,
   MiniMap,
   MarkerType,
+  Panel,
   ReactFlowProvider,
   useReactFlow,
   type Edge,
@@ -15,17 +16,24 @@ import 'reactflow/dist/style.css'
 
 import { fetchConfig, fetchGraph, fetchSchemaTree } from './api'
 import { TableNode } from './TableNode'
+import { SchemaNode } from './SchemaNode'
 import { GeniePanel } from './GeniePanel'
 import { CatalogSchemaPicker } from './CatalogSchemaPicker'
 import { connectedComponent, directNeighbors, layoutGraph } from './graphUtils'
+import { exportGraphAsImage, exportGraphAsMarkdown } from './export'
 import type {
   CatalogSchemas,
   FilterMode,
   GraphResponse,
+  SchemaNodeData,
   TableNodeData,
 } from './types'
 
-const nodeTypes = { table: TableNode }
+const nodeTypes = { table: TableNode, schema: SchemaNode }
+
+function isSchemaNodeData(data: TableNodeData | SchemaNodeData): data is SchemaNodeData {
+  return !('columns' in data)
+}
 
 function ErdCanvas() {
   const [graph, setGraph] = useState<GraphResponse | null>(null)
@@ -39,9 +47,12 @@ function ErdCanvas() {
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [filterMode, setFilterMode] = useState<FilterMode>('neighbors')
   const [search, setSearch] = useState('')
+  // Heuristic undeclared-relationship edges are always fetched but hidden by default,
+  // so first load renders identically to before this feature existed.
+  const [showInferred, setShowInferred] = useState(false)
 
   const { fitView, setCenter, getNode } = useReactFlow()
-  const laidOutRef = useRef<Node<TableNodeData>[]>([])
+  const laidOutRef = useRef<Node<TableNodeData | SchemaNodeData>[]>([])
 
   // Load the catalog/schema tree once, to populate the picker.
   useEffect(() => {
@@ -71,7 +82,7 @@ function ErdCanvas() {
     // /api/graph means everything in scope), so short-circuit to an empty graph here
     // instead of firing a request that would come back with the full catalog.
     if (selectedPairs && selectedPairs.size === 0) {
-      setGraph({ catalogs: [], unscoped: treeUnscoped, pairs: [], nodes: [], edges: [] })
+      setGraph({ catalogs: [], unscoped: treeUnscoped, pairs: [], view: 'detail', nodes: [], edges: [] })
       setLoading(false)
       return
     }
@@ -92,48 +103,72 @@ function ErdCanvas() {
     }
   }, [selectedPairs, treeUnscoped])
 
+  // Edges filtered to the current inferred-visibility toggle -- used for both rendering
+  // and click-to-filter connectivity, so a hidden inferred edge never silently changes
+  // what "connected" means. Default (showInferred=false) matches pre-heuristic behavior
+  // exactly, since the backend always returns inferred edges tagged, never omitted.
+  const scopedGraphEdges = useMemo(
+    () => (graph ? graph.edges.filter((e) => showInferred || !e.inferred) : []),
+    [graph, showInferred],
+  )
+
   // Base (laid-out) nodes + edges derived from the loaded graph.
   const { baseNodes, baseEdges } = useMemo(() => {
     if (!graph) {
-      return { baseNodes: [] as Node<TableNodeData>[], baseEdges: [] as Edge[] }
+      return { baseNodes: [] as Node<TableNodeData | SchemaNodeData>[], baseEdges: [] as Edge[] }
     }
 
-    const rawNodes: Node<TableNodeData>[] = graph.nodes.map((n) => ({
+    const rawNodes: Node<TableNodeData | SchemaNodeData>[] = graph.nodes.map((n) => ({
       id: n.id,
-      type: 'table',
+      type: graph.view === 'schema_summary' ? 'schema' : 'table',
       position: { x: 0, y: 0 },
       data: n,
     }))
 
-    const edges: Edge[] = graph.edges.map((e) => ({
+    const edges: Edge[] = scopedGraphEdges.map((e) => ({
       id: e.id,
       source: e.source,
       target: e.target,
-      label: `${e.fk_columns.join(', ')} → ${e.pk_columns.join(', ')}`,
+      data: { inferred: e.inferred },
+      label: e.inferred
+        ? `${e.fk_columns.join(', ')} → ${e.pk_columns.join(', ')} (inferred)`
+        : `${e.fk_columns.join(', ')} → ${e.pk_columns.join(', ')}`,
       type: 'smoothstep',
-      markerEnd: { type: MarkerType.ArrowClosed, width: 16, height: 16, color: '#98a2b3' },
-      labelStyle: { fontSize: 10, fill: '#667085' },
-      labelBgStyle: { fill: '#ffffff', fillOpacity: 0.9 },
+      // Inferred edges render above declared ones so a dashed line that happens to
+      // overlap a solid one is never fully hidden underneath it.
+      zIndex: e.inferred ? 1 : 0,
+      markerEnd: {
+        type: MarkerType.ArrowClosed,
+        width: 16,
+        height: 16,
+        color: e.inferred ? 'var(--db-red)' : '#98a2b3',
+      },
+      labelStyle: { fontSize: 10, fontWeight: e.inferred ? 700 : 400, fill: e.inferred ? 'var(--db-red)' : '#667085' },
+      labelBgStyle: { fill: '#ffffff', fillOpacity: 0.95 },
       labelBgPadding: [4, 2] as [number, number],
       labelBgBorderRadius: 4,
-      style: { stroke: '#98a2b3', strokeWidth: 1.5 },
+      style: {
+        stroke: e.inferred ? 'var(--db-red)' : '#98a2b3',
+        strokeWidth: e.inferred ? 2 : 1.5,
+        strokeDasharray: e.inferred ? '6 4' : undefined,
+      },
     }))
 
     const laidOut = layoutGraph(rawNodes, edges)
     laidOutRef.current = laidOut
     return { baseNodes: laidOut, baseEdges: edges }
-  }, [graph])
+  }, [graph, scopedGraphEdges])
 
   // Compute the currently-visible set based on selection + mode.
   const visibleSet = useMemo<Set<string> | null>(() => {
     if (!selectedId || !graph) return null
     return filterMode === 'neighbors'
-      ? directNeighbors(selectedId, graph.edges)
-      : connectedComponent(selectedId, graph.edges)
-  }, [selectedId, filterMode, graph])
+      ? directNeighbors(selectedId, scopedGraphEdges)
+      : connectedComponent(selectedId, scopedGraphEdges)
+  }, [selectedId, filterMode, graph, scopedGraphEdges])
 
   // Apply dim/selection styling to nodes.
-  const displayNodes = useMemo<Node<TableNodeData>[]>(() => {
+  const displayNodes = useMemo<Node<TableNodeData | SchemaNodeData>[]>(() => {
     return baseNodes.map((n) => ({
       ...n,
       data: {
@@ -148,12 +183,13 @@ function ErdCanvas() {
     return baseEdges.map((e) => {
       const inSet =
         !visibleSet || (visibleSet.has(e.source) && visibleSet.has(e.target))
+      const inferred = Boolean((e.data as { inferred?: boolean } | undefined)?.inferred)
       return {
         ...e,
         style: {
           ...e.style,
           opacity: inSet ? 1 : 0.1,
-          stroke: inSet ? '#98a2b3' : '#e4e7ec',
+          stroke: inSet ? (inferred ? 'var(--db-red)' : '#98a2b3') : '#e4e7ec',
         },
         animated: Boolean(selectedId) && inSet,
       }
@@ -161,6 +197,14 @@ function ErdCanvas() {
   }, [baseEdges, visibleSet, selectedId])
 
   const onNodeClick: NodeMouseHandler = useCallback((_, node) => {
+    const data = node.data as TableNodeData | SchemaNodeData
+    if (isSchemaNodeData(data)) {
+      // "Expand" a collapsed schema node by selecting just that schema in the tree
+      // picker -- the same pairs-based mechanism the sidebar picker uses, which
+      // re-fetches /api/graph scoped to it and always returns full table-level detail.
+      setSelectedPairs(new Set([node.id]))
+      return
+    }
     setSelectedId((cur) => (cur === node.id ? null : node.id))
   }, [])
 
@@ -168,6 +212,24 @@ function ErdCanvas() {
     setSelectedId(null)
     setTimeout(() => fitView({ padding: 0.15, duration: 400 }), 0)
   }, [fitView])
+
+  // Disabled in the collapsed schema-summary view -- there's no table/column detail to
+  // export until a schema is expanded, and an image of two big summary boxes isn't
+  // useful as a "schema doc" export either.
+  const canExport = graph !== null && graph.view === 'detail' && displayNodes.length > 0
+
+  const handleExportImage = useCallback(
+    (format: 'png' | 'svg') => {
+      if (!canExport) return
+      exportGraphAsImage(displayNodes, format, 'erd-export')
+    },
+    [canExport, displayNodes],
+  )
+
+  const handleExportDocs = useCallback(() => {
+    if (!canExport || !graph) return
+    exportGraphAsMarkdown(graph, 'erd-schema-docs')
+  }, [canExport, graph])
 
   // Fit view when a fresh graph loads.
   useEffect(() => {
@@ -179,9 +241,13 @@ function ErdCanvas() {
   const runSearch = useCallback(() => {
     const q = search.trim().toLowerCase()
     if (!q) return
+    // Only meaningful for actual table nodes -- in the collapsed schema-summary view
+    // there are no table names to search yet (select a schema to expand it first).
+    const nodes = laidOutRef.current.filter(
+      (n): n is Node<TableNodeData> => !isSchemaNodeData(n.data),
+    )
     // Prefer an exact table-name match (so "materials" hits factory.materials,
     // not bill_of_materials), then fall back to a substring match.
-    const nodes = laidOutRef.current
     const match =
       nodes.find((n) => n.data.table.toLowerCase() === q) ??
       nodes.find((n) => n.data.table.toLowerCase().includes(q))
@@ -200,6 +266,9 @@ function ErdCanvas() {
   const selectedTable = selectedId
     ? selectedId.split('.').slice(1).join('.')
     : null
+
+  const inferredCount = graph ? graph.edges.filter((e) => e.inferred).length : 0
+  const declaredCount = graph ? graph.edges.filter((e) => !e.inferred).length : 0
 
   return (
     <div style={styles.app}>
@@ -290,6 +359,20 @@ function ErdCanvas() {
             </button>
           </div>
 
+          <SectionLabel>Undeclared relationships</SectionLabel>
+          <div style={styles.card}>
+            <Switch
+              label="Show inferred edges"
+              checked={showInferred}
+              onChange={() => setShowInferred((v) => !v)}
+            />
+            <div style={styles.hint}>
+              {inferredCount > 0
+                ? `${inferredCount} likely-but-undeclared relationship${inferredCount === 1 ? '' : 's'} found by matching column names/types against primary keys -- a guess, never a real constraint.`
+                : 'No undeclared relationships detected via column name/type matching.'}
+            </div>
+          </div>
+
           <div style={styles.statsBox}>
             <Stat
               label="Tables"
@@ -297,7 +380,7 @@ function ErdCanvas() {
             />
             <Stat
               label="Relationships"
-              value={graph ? String(graph.edges.length) : '—'}
+              value={graph ? String(declaredCount) : '—'}
             />
           </div>
           {selectedTable && (
@@ -331,7 +414,7 @@ function ErdCanvas() {
             <Controls />
             <MiniMap
               nodeColor={(n) =>
-                (n.data as TableNodeData)?.schema === 'erp'
+                (n.data as TableNodeData | SchemaNodeData)?.schema === 'erp'
                   ? '#7c3aed'
                   : '#2272b4'
               }
@@ -339,6 +422,32 @@ function ErdCanvas() {
               pannable
               zoomable
             />
+            <Panel position="top-right">
+              <div style={styles.exportPanel} title={canExport ? undefined : 'Expand a schema first to export'}>
+                <span style={styles.exportLabel}>Export</span>
+                <button
+                  onClick={() => handleExportImage('png')}
+                  disabled={!canExport}
+                  style={exportBtn(canExport)}
+                >
+                  PNG
+                </button>
+                <button
+                  onClick={() => handleExportImage('svg')}
+                  disabled={!canExport}
+                  style={exportBtn(canExport)}
+                >
+                  SVG
+                </button>
+                <button
+                  onClick={handleExportDocs}
+                  disabled={!canExport}
+                  style={exportBtn(canExport)}
+                >
+                  Docs (.md)
+                </button>
+              </div>
+            </Panel>
           </ReactFlow>
         </main>
       </div>
@@ -361,6 +470,64 @@ function Stat({ label, value }: { label: string; value: string }) {
   )
 }
 
+function Switch({
+  label,
+  checked,
+  onChange,
+}: {
+  label: string
+  checked: boolean
+  onChange: () => void
+}) {
+  return (
+    <button
+      onClick={onChange}
+      role="switch"
+      aria-checked={checked}
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        gap: 10,
+        width: '100%',
+        padding: '7px 8px',
+        borderRadius: 7,
+        border: 'none',
+        background: 'transparent',
+        cursor: 'pointer',
+        textAlign: 'left',
+      }}
+    >
+      <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--text)' }}>{label}</span>
+      <span
+        style={{
+          position: 'relative',
+          width: 34,
+          height: 19,
+          flexShrink: 0,
+          borderRadius: 999,
+          background: checked ? 'var(--db-red)' : '#d0d5dd',
+          transition: 'background 0.15s ease',
+        }}
+      >
+        <span
+          style={{
+            position: 'absolute',
+            top: 2,
+            left: checked ? 17 : 2,
+            width: 15,
+            height: 15,
+            borderRadius: '50%',
+            background: '#fff',
+            boxShadow: '0 1px 2px rgba(16,24,40,0.2)',
+            transition: 'left 0.15s ease',
+          }}
+        />
+      </span>
+    </button>
+  )
+}
+
 function sidebarRow(active: boolean): CSSProperties {
   return {
     display: 'flex',
@@ -379,7 +546,38 @@ function sidebarRow(active: boolean): CSSProperties {
   }
 }
 
+function exportBtn(enabled: boolean): CSSProperties {
+  return {
+    border: '1px solid var(--border, #e4e7ec)',
+    borderRadius: 6,
+    background: '#fff',
+    color: enabled ? 'var(--text)' : '#c0c5cd',
+    fontSize: 11,
+    fontWeight: 600,
+    padding: '4px 8px',
+    cursor: enabled ? 'pointer' : 'default',
+  }
+}
+
 const styles: Record<string, CSSProperties> = {
+  exportPanel: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 6,
+    background: '#fff',
+    border: '1px solid #e4e7ec',
+    borderRadius: 8,
+    padding: '6px 8px',
+    boxShadow: '0 1px 2px rgba(16,24,40,0.06), 0 1px 3px rgba(16,24,40,0.1)',
+  },
+  exportLabel: {
+    fontSize: 10.5,
+    fontWeight: 700,
+    color: '#98a2b3',
+    textTransform: 'uppercase',
+    letterSpacing: 0.4,
+    marginRight: 2,
+  },
   app: {
     width: '100vw',
     height: '100vh',

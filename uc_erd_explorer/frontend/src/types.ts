@@ -1,8 +1,16 @@
+export interface TagValue {
+  name: string
+  value: string
+}
+
 export interface ColumnMeta {
   name: string
   type: string
   is_pk: boolean
   is_fk: boolean
+  // Unity Catalog COMMENT / tags -- null/empty when the deployment's catalog has none.
+  comment: string | null
+  tags: TagValue[]
 }
 
 export interface TableNodeData {
@@ -10,7 +18,20 @@ export interface TableNodeData {
   catalog: string
   schema: string
   table: string
+  comment: string | null
+  tags: TagValue[]
   columns: ColumnMeta[]
+}
+
+// A collapsed schema summary node -- what /api/graph returns per (catalog, schema)
+// instead of per-table once a catalog has more tables than
+// ERD_SCHEMA_COLLAPSE_THRESHOLD. Selecting the schema (the same tree-picker mechanism
+// used everywhere else) is what "expands" it to full TableNodeData detail.
+export interface SchemaNodeData {
+  id: string
+  catalog: string
+  schema: string
+  table_count: number
 }
 
 export interface GraphEdge {
@@ -19,7 +40,13 @@ export interface GraphEdge {
   target: string
   fk_columns: string[]
   pk_columns: string[]
-  constraint_name: string
+  constraint_name: string | null
+  // True for a heuristic, undeclared-relationship guess (see server/graph.py
+  // infer_relationships) -- never equivalent to a real constraint. Hidden by default.
+  inferred: boolean
+  // Present only in the schema_summary view: how many table-level FKs were rolled up
+  // into this one schema-to-schema edge.
+  relationship_count?: number
 }
 
 export interface GraphResponse {
@@ -31,7 +58,10 @@ export interface GraphResponse {
   // The catalog.schema pairs this response was narrowed to, or null if unfiltered
   // (everything in scope).
   pairs: string[] | null
-  nodes: TableNodeData[]
+  // "schema_summary" means `nodes` are SchemaNodeData, not TableNodeData -- see
+  // SchemaNodeData's doc comment.
+  view: 'detail' | 'schema_summary'
+  nodes: TableNodeData[] | SchemaNodeData[]
   edges: GraphEdge[]
 }
 

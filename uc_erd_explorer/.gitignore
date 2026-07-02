@@ -23,6 +23,10 @@ npm-debug.log*
 # OS
 .DS_Store
 
+# Internal build-history record, not meant for public consumption (see DEMO.md for the
+# public-facing architecture/design writeup instead).
+TASKS.md
+
 # NOTE: frontend/dist/ is intentionally NOT ignored -- the built React SPA is what the
 # FastAPI backend serves, and `databricks bundle deploy` respects .gitignore when syncing
 # source files. An earlier unscoped "dist/"/"build/" pattern here (meant for Python

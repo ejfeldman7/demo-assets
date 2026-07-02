@@ -97,6 +97,10 @@ CREATE TABLE IF NOT EXISTS megacorp.factory.quality_inspections (
   inspection_id BIGINT NOT NULL,
   work_order_id BIGINT,
   inspector_name STRING,
+  -- Deliberately NOT declared as a FOREIGN KEY -- a realistic example of an undeclared
+  -- relationship (added after `operators` existed, never backfilled with a formal
+  -- constraint) that the ERD viewer's inferred-relationship heuristic is built to catch.
+  operator_id BIGINT COMMENT 'The operator believed responsible for the inspection outcome. Not a declared FK.',
   inspection_date DATE,
   result STRING,
   defect_count BIGINT,

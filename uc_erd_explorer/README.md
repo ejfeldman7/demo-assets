@@ -26,6 +26,19 @@ asking schema questions in plain English.
 - **No source data required**: everything is read from `information_schema` /
   `system.information_schema`, so this works against any Unity Catalog catalog with
   declared PK/FK constraints — you don't need to grant it access to actual row data.
+- **UC comments and tags surfaced in the diagram**: table/column `COMMENT`s render as a
+  hover tooltip (an "ⓘ" icon marks anything with one), and Unity Catalog tags (e.g. a PII
+  classification) render as small colored badges on the table header and/or individual
+  column rows — turning the diagram into a real catalog browser, not just a shape.
+- **Inferred (undeclared) relationships**: a low-confidence heuristic flags columns that
+  look like an undeclared foreign key (same name + type as another table's primary key,
+  no formal constraint declared) and renders them as dashed, distinctly colored edges,
+  clearly labeled "inferred" — off by default, one click to show, never presented as
+  equivalent to a real constraint.
+- **Scales to large catalogs**: `/api/graph` results are cached in-memory, and catalogs
+  above a configurable table-count threshold default to one node per schema instead of
+  one per table — click a schema node to expand it to full table-level detail (the same
+  underlying mechanism as the catalog/schema tree picker, not a separate interaction).
 
 ![Click-to-filter](docs/screenshots/erd-click-filter.png)
 
@@ -189,6 +202,8 @@ front door onto the same automation, not a separate implementation to maintain.
 | `erd_catalogs` | `ERD_CATALOGS` (comma-separated) | `megacorp` (packaged demo default) | The catalog allow-list — scopes **both** the ERD graph and the Genie Space. Set to an empty string for unscoped mode, see below |
 | `erd_metadata_location` | `ERD_METADATA_LOCATION` (`"catalog.schema"`) | `megacorp.erd_meta` | Where the scoped Genie metadata views live. **Required** if `erd_catalogs` is empty (no catalog to default from) |
 | `genie_space_id` | `GENIE_SPACE_ID` | (set after first setup run) | Which Genie Space the chat panel talks to |
+| `erd_cache_ttl_seconds` | `ERD_CACHE_TTL_SECONDS` | `300` | How long `/api/graph` results are cached in-memory before re-querying `information_schema` |
+| `erd_schema_collapse_threshold` | `ERD_SCHEMA_COLLAPSE_THRESHOLD` | `80` | Table count above which the ERD defaults to one node per schema (click to expand); `0` always renders full detail |
 
 **One asymmetry worth knowing**: the ERD graph is queried live, so changing
 `erd_catalogs` and redeploying takes effect immediately. The Genie Space's views and
@@ -325,11 +340,12 @@ erd-explorer/
 │   └── dist/                     # built output -- committed on purpose, see Troubleshooting
 ├── setup/
 │   ├── megacorp_schema.sql, run_ddl.py       # optional: creates the demo catalog
+│   ├── megacorp_demo_metadata.sql            # optional: illustrative comments/tags for the demo
 │   ├── create_scoped_views.py                # Genie's hard-scoped data source
 │   └── create_genie_space.py                 # Genie Space create/update + ACL grant
 ├── notebooks/
 │   └── install.py                # Route 2: notebook-based install (calls the same
 │                                    setup/ functions as Route 1's DAB job)
 ├── databricks.yml                # Route 1: Databricks Asset Bundle (app + setup job)
-└── DEMO.md, TASKS.md             # build history / design decisions (internal record)
+└── DEMO.md                       # build history / design decisions (internal record)
 ```

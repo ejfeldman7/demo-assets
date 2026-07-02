@@ -40,6 +40,19 @@ variables:
       `databricks bundle run setup_genie_space`, copy the printed space_id into this
       variable's default (or pass --var="genie_space_id=<id>"), then redeploy.
     default: ""
+  erd_cache_ttl_seconds:
+    description: >-
+      Seconds /api/graph results are cached in-memory before re-querying
+      information_schema. Schema metadata changes rarely, so the default trades a
+      little staleness for far fewer warehouse round-trips on repeated loads/filters.
+    default: "300"
+  erd_schema_collapse_threshold:
+    description: >-
+      Table count above which the ERD defaults to one node per schema instead of one
+      per table (click a schema node to expand it to full detail) -- a flat
+      table-per-node layout gets slow to query and unreadable well before a few hundred
+      nodes. Set to "0" to always render full detail regardless of catalog size.
+    default: "80"
 
 targets:
   dev:
@@ -73,6 +86,10 @@ resources:
             value: ${var.erd_catalogs}
           - name: "GENIE_SPACE_ID"
             value: ${var.genie_space_id}
+          - name: "ERD_CACHE_TTL_SECONDS"
+            value: ${var.erd_cache_ttl_seconds}
+          - name: "ERD_SCHEMA_COLLAPSE_THRESHOLD"
+            value: ${var.erd_schema_collapse_threshold}
       resources:
         - name: sql-warehouse
           description: "Warehouse for information_schema metadata queries"
