@@ -42,6 +42,10 @@ asking schema questions in plain English.
 
 ![Click-to-filter](docs/screenshots/erd-click-filter.png)
 
+![UC comments and tags](docs/screenshots/erd-comments-tags.png)
+
+![Inferred relationships](docs/screenshots/erd-inferred-relationships.png)
+
 ![Genie chat](docs/screenshots/genie-chat.png)
 
 ## Why the Genie scoping matters
