@@ -16,6 +16,17 @@ dist-ssr
 # committed, a fresh Git folder clone has no way to produce it. Run `npm run build` and
 # commit the updated frontend/dist/ after any change to frontend/src/.
 
+# package-lock.json is intentionally NOT committed here (same reasoning as uv.lock at the
+# repo root): this project was originally developed on a machine whose npm is globally
+# configured (~/.npmrc) to resolve packages through a Databricks-internal registry proxy
+# (npm-proxy.dev.databricks.com) instead of the public npm registry. A lockfile generated
+# there records that proxy as every package's source, which is unreachable from outside
+# Databricks' network -- silently breaking `npm ci` (and, eventually, `npm install`
+# reusing a stale lock) for any external user, undetected until a CI job actually ran
+# `npm ci` from outside that network. Use `npm install` (which doesn't require a
+# preexisting lockfile) rather than `npm ci` in CI/docs for this project.
+package-lock.json
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
