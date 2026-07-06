@@ -4,6 +4,18 @@ __pycache__/
 wheels/
 *.egg-info
 
+# uv.lock is intentionally NOT committed here. This repo was originally developed on a
+# machine whose uv is globally configured to resolve packages through a Databricks-
+# internal PyPI proxy (pypi-proxy.dev.databricks.com) rather than public pypi.org --
+# every uv.lock generated there records that proxy as the package source, which is
+# unreachable from outside Databricks' network. A public demo repo's checked-in lockfile
+# pinning an unreachable internal registry would break `uv sync`/`uv run` for every
+# external user (and did break it, silently, for this whole project's history, until a
+# CI job actually exercised `uv sync` from outside that network). Leaving it uncommitted
+# means each environment resolves fresh against whatever index it's actually configured
+# for -- correct urls, just without commit-pinned exact versions.
+uv.lock
+
 # Virtual environments
 .venv
 venv/
