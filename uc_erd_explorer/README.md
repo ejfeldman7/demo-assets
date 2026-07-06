@@ -336,8 +336,11 @@ via your own CLI profile — no mocking.
   **intentionally not gitignored here** — Route 2 (notebook/Git folder) has no local
   build step at all, so if `dist/` weren't committed, a fresh Git folder clone could never
   produce it. `databricks.yml` also has a `sync.include: ["frontend/dist/**"]` as
-  defense-in-depth for Route 1 in case gitignore rules change. **After any change to
-  `frontend/src/`, always run `npm run build` and commit the updated `frontend/dist/`.**
+  defense-in-depth for Route 1 in case gitignore rules change. A CI check
+  (`.github/workflows/uc-erd-explorer-frontend-dist-check.yml`) rebuilds from source on
+  every push/PR touching `frontend/` and fails if the result differs from what's
+  committed, so this can't silently drift for long — but rebuild before committing
+  anyway rather than relying on CI to catch it after the fact.
 - **Genie chat returns a permission error** (`does not have read permission for node...`)
   — the app's service principal has UC data access but not Genie Space access. Re-run
   `databricks bundle run setup_genie_space` (it re-applies the `CAN_RUN` grant every
