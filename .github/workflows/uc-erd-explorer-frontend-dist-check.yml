@@ -28,12 +28,10 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
-          # No npm cache here -- package-lock.json isn't committed (see
-          # frontend/.gitignore), so there's no lockfile for setup-node to key a cache on.
+          cache: "npm"
+          cache-dependency-path: uc_erd_explorer/frontend/package-lock.json
 
-      # npm install, not npm ci: this repo intentionally doesn't commit
-      # package-lock.json (see frontend/.gitignore) -- npm ci requires a preexisting lock.
-      - run: npm install
+      - run: npm ci
       - run: npm run build
 
       - name: Fail if the built dist/ differs from what's committed
