@@ -328,6 +328,23 @@ cd frontend && npm install && npm run dev
 The Vite dev server proxies API calls to the backend. Query the real `system.information_schema`
 via your own CLI profile — no mocking.
 
+### Tests
+
+```bash
+uv run --group dev pytest tests/ -v
+```
+
+Pure unit tests for the fragile config/scoping logic (`server/config.py`,
+`server/graph.py`'s `infer_relationships()` heuristic and SQL-fragment builders) and the
+setup scripts' idempotency-relevant behavior (`create_scoped_views.py` /
+`create_genie_space.py` statement building, `create_megacorp_demo.py`'s catalog
+substitution, `grant_catalog_access.py`'s branching) — mocked/synthetic inputs
+throughout, no real Databricks warehouse or credentials needed, safe to run in CI on
+every push. Real end-to-end verification (the setup scripts actually creating/granting
+things correctly against a live workspace) stays a manual step, same as it's always been
+for this project — a live-credentials integration suite isn't wired into CI on purpose,
+to avoid needing a Databricks service-principal secret in this repo.
+
 ## Troubleshooting
 
 - **App shows `"Frontend not built"`** — the React SPA (`frontend/dist/`) wasn't
