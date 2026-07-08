@@ -1,0 +1,1249 @@
+scope: 'logistics, megacorp'
+tables:
+  - catalog: logistics
+    schema: shipping
+    table: carriers
+    comment: Shipping carrier master.
+    tags: []
+    columns:
+      - name: carrier_id
+        type: bigint
+        is_primary_key: true
+        is_foreign_key: false
+        comment: null
+        tags: []
+      - name: carrier_name
+        type: string
+        is_primary_key: false
+        is_foreign_key: false
+        comment: null
+        tags: []
+      - name: carrier_type
+        type: string
+        is_primary_key: false
+        is_foreign_key: false
+        comment: 'One of: FREIGHT, PARCEL, OCEAN, RAIL'
+        tags: []
+      - name: country
+        type: string
+        is_primary_key: false
+        is_foreign_key: false
+        comment: null
+        tags: []
+  - catalog: logistics
+    schema: shipping
+    table: shipment_items
+    comment: >-
+      Per-line shipment quantities, cross-linked to
+      megacorp.erp.sales_order_lines.
+    tags: []
+    columns:
+      - name: shipment_item_id
+        type: bigint
+        is_primary_key: true
+        is_foreign_key: false
+        comment: null
+        tags: []
+      - name: shipment_id
+        type: bigint
+        is_primary_key: false
+        is_foreign_key: true
+        comment: null
+        tags: []
+      - name: sales_order_line_id
+        type: bigint
+        is_primary_key: false
+        is_foreign_key: true
+        comment: null
+        tags: []
+      - name: quantity_shipped
+        type: bigint
+        is_primary_key: false
+        is_foreign_key: false
+        comment: null
+        tags: []
+  - catalog: logistics
+    schema: shipping
+    table: shipments
+    comment: >-
+      Shipment tracking for a sales order, cross-linked to
+      megacorp.erp.sales_orders.
+    tags: []
+    columns:
+      - name: shipment_id
+        type: bigint
+        is_primary_key: true
+        is_foreign_key: false
+        comment: null
+        tags: []
+      - name: sales_order_id
+        type: bigint
+        is_primary_key: false
+        is_foreign_key: true
+        comment: null
+        tags: []
+      - name: carrier_id
+        type: bigint
+        is_primary_key: false
+        is_foreign_key: true
+        comment: null
+        tags: []
+      - name: warehouse_id
+        type: bigint
+        is_primary_key: false
+        is_foreign_key: true
+        comment: null
+        tags: []
+      - name: ship_date
+        type: date
+        is_primary_key: false
+        is_foreign_key: false
+        comment: null
+        tags: []
+      - name: delivery_date
+        type: date
+        is_primary_key: false
+        is_foreign_key: false
+        comment: null
+        tags: []
+      - name: status
+        type: string
+        is_primary_key: false
+        is_foreign_key: false
+        comment: null
+        tags: []
+      - name: tracking_number
+        type: string
+        is_primary_key: false
+        is_foreign_key: false
+        comment: null
+        tags: []
+  - catalog: logistics
+    schema: shipping
+    table: warehouses
+    comment: Distribution warehouses that fulfill sales orders.
+    tags: []
+    columns:
+      - name: warehouse_id
+        type: bigint
+        is_primary_key: true
+        is_foreign_key: false
+        comment: null
+        tags: []
+      - name: warehouse_name
+        type: string
+        is_primary_key: false
+        is_foreign_key: false
+        comment: null
+        tags: []
+      - name: country
+        type: string
+        is_primary_key: false
+        is_foreign_key: false
+        comment: null
+        tags: []
+  - catalog: megacorp
+    schema: erp
+    table: cost_centers
+    comment: 'Finance cost centers, each tied to a factory plant.'
+    tags: []
+    columns:
+      - name: cost_center_id
+        type: bigint
+        is_primary_key: true
+        is_foreign_key: false
+        comment: null
+        tags: []
+      - name: cost_center_name
+        type: string
+        is_primary_key: false
+        is_foreign_key: false
+        comment: null
+        tags: []
+      - name: plant_id
+        type: bigint
+        is_primary_key: false
+        is_foreign_key: true
+        comment: null
+        tags: []
+  - catalog: megacorp
+    schema: erp
+    table: customers
+    comment: ERP customer master.
+    tags:
+      - name: domain
+        value: sales
+      - name: contains_pii
+        value: 'true'
+    columns:
+      - name: customer_id
+        type: bigint
+        is_primary_key: true
+        is_foreign_key: false
+        comment: null
+        tags: []
+      - name: customer_name
+        type: string
+        is_primary_key: false
+        is_foreign_key: false
+        comment: Customer legal/display name.
+        tags:
+          - name: contains_pii
+            value: 'true'
+      - name: industry
+        type: string
+        is_primary_key: false
+        is_foreign_key: false
+        comment: null
+        tags: []
+      - name: country
+        type: string
+        is_primary_key: false
+        is_foreign_key: false
+        comment: null
+        tags: []
+      - name: credit_limit
+        type: 'decimal(14,2)'
+        is_primary_key: false
+        is_foreign_key: false
+        comment: 'Maximum outstanding balance approved for this customer, in USD.'
+        tags:
+          - name: sensitivity
+            value: internal
+      - name: created_at
+        type: date
+        is_primary_key: false
+        is_foreign_key: false
+        comment: null
+        tags: []
+  - catalog: megacorp
+    schema: erp
+    table: general_ledger
+    comment: >-
+      General ledger postings, optionally referencing the invoice that generated
+      them.
+    tags: []
+    columns:
+      - name: gl_entry_id
+        type: bigint
+        is_primary_key: true
+        is_foreign_key: false
+        comment: null
+        tags: []
+      - name: cost_center_id
+        type: bigint
+        is_primary_key: false
+        is_foreign_key: true
+        comment: null
+        tags: []
+      - name: reference_invoice_id
+        type: bigint
+        is_primary_key: false
+        is_foreign_key: true
+        comment: null
+        tags: []
+      - name: account_code
+        type: string
+        is_primary_key: false
+        is_foreign_key: false
+        comment: null
+        tags: []
+      - name: debit_amount
+        type: 'decimal(14,2)'
+        is_primary_key: false
+        is_foreign_key: false
+        comment: null
+        tags: []
+      - name: credit_amount
+        type: 'decimal(14,2)'
+        is_primary_key: false
+        is_foreign_key: false
+        comment: null
+        tags: []
+      - name: posting_date
+        type: date
+        is_primary_key: false
+        is_foreign_key: false
+        comment: null
+        tags: []
+  - catalog: megacorp
+    schema: erp
+    table: invoice_line_items
+    comment: Line-item detail of an invoice.
+    tags: []
+    columns:
+      - name: invoice_line_item_id
+        type: bigint
+        is_primary_key: true
+        is_foreign_key: false
+        comment: null
+        tags: []
+      - name: invoice_id
+        type: bigint
+        is_primary_key: false
+        is_foreign_key: true
+        comment: null
+        tags: []
+      - name: description
+        type: string
+        is_primary_key: false
+        is_foreign_key: false
+        comment: null
+        tags: []
+      - name: amount
+        type: 'decimal(12,2)'
+        is_primary_key: false
+        is_foreign_key: false
+        comment: null
+        tags: []
+      - name: tax_amount
+        type: 'decimal(12,2)'
+        is_primary_key: false
+        is_foreign_key: false
+        comment: null
+        tags: []
+  - catalog: megacorp
+    schema: erp
+    table: invoices
+    comment: Customer invoices billed against a sales order.
+    tags:
+      - name: domain
+        value: finance
+    columns:
+      - name: invoice_id
+        type: bigint
+        is_primary_key: true
+        is_foreign_key: false
+        comment: null
+        tags: []
+      - name: sales_order_id
+        type: bigint
+        is_primary_key: false
+        is_foreign_key: true
+        comment: null
+        tags: []
+      - name: customer_id
+        type: bigint
+        is_primary_key: false
+        is_foreign_key: true
+        comment: null
+        tags: []
+      - name: invoice_date
+        type: date
+        is_primary_key: false
+        is_foreign_key: false
+        comment: null
+        tags: []
+      - name: due_date
+        type: date
+        is_primary_key: false
+        is_foreign_key: false
+        comment: null
+        tags: []
+      - name: amount
+        type: 'decimal(14,2)'
+        is_primary_key: false
+        is_foreign_key: false
+        comment: null
+        tags: []
+      - name: status
+        type: string
+        is_primary_key: false
+        is_foreign_key: false
+        comment: null
+        tags: []
+  - catalog: megacorp
+    schema: erp
+    table: payments
+    comment: Customer payments applied against an invoice.
+    tags: []
+    columns:
+      - name: payment_id
+        type: bigint
+        is_primary_key: true
+        is_foreign_key: false
+        comment: null
+        tags: []
+      - name: invoice_id
+        type: bigint
+        is_primary_key: false
+        is_foreign_key: true
+        comment: null
+        tags: []
+      - name: payment_date
+        type: date
+        is_primary_key: false
+        is_foreign_key: false
+        comment: null
+        tags: []
+      - name: amount
+        type: 'decimal(14,2)'
+        is_primary_key: false
+        is_foreign_key: false
+        comment: null
+        tags: []
+      - name: payment_method
+        type: string
+        is_primary_key: false
+        is_foreign_key: false
+        comment: null
+        tags: []
+  - catalog: megacorp
+    schema: erp
+    table: purchase_order_lines
+    comment: >-
+      Line items of a purchase order, referencing the raw-material/component
+      being procured.
+    tags: []
+    columns:
+      - name: purchase_order_line_id
+        type: bigint
+        is_primary_key: true
+        is_foreign_key: false
+        comment: null
+        tags: []
+      - name: purchase_order_id
+        type: bigint
+        is_primary_key: false
+        is_foreign_key: true
+        comment: null
+        tags: []
+      - name: material_id
+        type: bigint
+        is_primary_key: false
+        is_foreign_key: true
+        comment: null
+        tags: []
+      - name: quantity
+        type: bigint
+        is_primary_key: false
+        is_foreign_key: false
+        comment: null
+        tags: []
+      - name: unit_cost
+        type: 'decimal(12,2)'
+        is_primary_key: false
+        is_foreign_key: false
+        comment: null
+        tags: []
+  - catalog: megacorp
+    schema: erp
+    table: purchase_orders
+    comment: Purchase orders issued to vendors.
+    tags: []
+    columns:
+      - name: purchase_order_id
+        type: bigint
+        is_primary_key: true
+        is_foreign_key: false
+        comment: null
+        tags: []
+      - name: vendor_id
+        type: bigint
+        is_primary_key: false
+        is_foreign_key: true
+        comment: null
+        tags: []
+      - name: order_date
+        type: date
+        is_primary_key: false
+        is_foreign_key: false
+        comment: null
+        tags: []
+      - name: status
+        type: string
+        is_primary_key: false
+        is_foreign_key: false
+        comment: null
+        tags: []
+      - name: total_amount
+        type: 'decimal(14,2)'
+        is_primary_key: false
+        is_foreign_key: false
+        comment: null
+        tags: []
+  - catalog: megacorp
+    schema: erp
+    table: sales_order_lines
+    comment: 'Line items of a sales order, referencing the finished-goods material sold.'
+    tags: []
+    columns:
+      - name: sales_order_line_id
+        type: bigint
+        is_primary_key: true
+        is_foreign_key: false
+        comment: null
+        tags: []
+      - name: sales_order_id
+        type: bigint
+        is_primary_key: false
+        is_foreign_key: true
+        comment: null
+        tags: []
+      - name: material_id
+        type: bigint
+        is_primary_key: false
+        is_foreign_key: true
+        comment: null
+        tags: []
+      - name: quantity
+        type: bigint
+        is_primary_key: false
+        is_foreign_key: false
+        comment: null
+        tags: []
+      - name: unit_price
+        type: 'decimal(12,2)'
+        is_primary_key: false
+        is_foreign_key: false
+        comment: null
+        tags: []
+  - catalog: megacorp
+    schema: erp
+    table: sales_orders
+    comment: Customer sales orders.
+    tags: []
+    columns:
+      - name: sales_order_id
+        type: bigint
+        is_primary_key: true
+        is_foreign_key: false
+        comment: null
+        tags: []
+      - name: customer_id
+        type: bigint
+        is_primary_key: false
+        is_foreign_key: true
+        comment: null
+        tags: []
+      - name: order_date
+        type: date
+        is_primary_key: false
+        is_foreign_key: false
+        comment: null
+        tags: []
+      - name: status
+        type: string
+        is_primary_key: false
+        is_foreign_key: false
+        comment: null
+        tags: []
+      - name: total_amount
+        type: 'decimal(14,2)'
+        is_primary_key: false
+        is_foreign_key: false
+        comment: null
+        tags: []
+  - catalog: megacorp
+    schema: erp
+    table: vendors
+    comment: ERP vendor/supplier master.
+    tags: []
+    columns:
+      - name: vendor_id
+        type: bigint
+        is_primary_key: true
+        is_foreign_key: false
+        comment: null
+        tags: []
+      - name: vendor_name
+        type: string
+        is_primary_key: false
+        is_foreign_key: false
+        comment: Vendor legal/display name.
+        tags:
+          - name: contains_pii
+            value: 'true'
+      - name: country
+        type: string
+        is_primary_key: false
+        is_foreign_key: false
+        comment: null
+        tags: []
+      - name: payment_terms
+        type: string
+        is_primary_key: false
+        is_foreign_key: false
+        comment: null
+        tags: []
+  - catalog: megacorp
+    schema: factory
+    table: bill_of_materials
+    comment: >-
+      Bill of materials: which component materials make up a parent (finished
+      good) material.
+    tags: []
+    columns:
+      - name: bom_id
+        type: bigint
+        is_primary_key: true
+        is_foreign_key: false
+        comment: null
+        tags: []
+      - name: parent_material_id
+        type: bigint
+        is_primary_key: false
+        is_foreign_key: true
+        comment: null
+        tags: []
+      - name: component_material_id
+        type: bigint
+        is_primary_key: false
+        is_foreign_key: true
+        comment: null
+        tags: []
+      - name: quantity_required
+        type: 'decimal(12,4)'
+        is_primary_key: false
+        is_foreign_key: false
+        comment: null
+        tags: []
+  - catalog: megacorp
+    schema: factory
+    table: machine_sensor_readings
+    comment: IoT sensor telemetry from factory machines.
+    tags: []
+    columns:
+      - name: reading_id
+        type: bigint
+        is_primary_key: true
+        is_foreign_key: false
+        comment: null
+        tags: []
+      - name: machine_id
+        type: bigint
+        is_primary_key: false
+        is_foreign_key: true
+        comment: null
+        tags: []
+      - name: reading_timestamp
+        type: timestamp
+        is_primary_key: false
+        is_foreign_key: false
+        comment: null
+        tags: []
+      - name: temperature_c
+        type: double
+        is_primary_key: false
+        is_foreign_key: false
+        comment: null
+        tags: []
+      - name: vibration_mm_s
+        type: double
+        is_primary_key: false
+        is_foreign_key: false
+        comment: null
+        tags: []
+      - name: pressure_bar
+        type: double
+        is_primary_key: false
+        is_foreign_key: false
+        comment: null
+        tags: []
+  - catalog: megacorp
+    schema: factory
+    table: machines
+    comment: Machines assigned to a production line.
+    tags: []
+    columns:
+      - name: machine_id
+        type: bigint
+        is_primary_key: true
+        is_foreign_key: false
+        comment: null
+        tags: []
+      - name: production_line_id
+        type: bigint
+        is_primary_key: false
+        is_foreign_key: true
+        comment: null
+        tags: []
+      - name: machine_type
+        type: string
+        is_primary_key: false
+        is_foreign_key: false
+        comment: null
+        tags: []
+      - name: install_date
+        type: date
+        is_primary_key: false
+        is_foreign_key: false
+        comment: null
+        tags: []
+      - name: status
+        type: string
+        is_primary_key: false
+        is_foreign_key: false
+        comment: null
+        tags: []
+  - catalog: megacorp
+    schema: factory
+    table: materials
+    comment: 'Materials master: raw materials, components, and finished goods.'
+    tags: []
+    columns:
+      - name: material_id
+        type: bigint
+        is_primary_key: true
+        is_foreign_key: false
+        comment: null
+        tags: []
+      - name: material_name
+        type: string
+        is_primary_key: false
+        is_foreign_key: false
+        comment: null
+        tags: []
+      - name: material_type
+        type: string
+        is_primary_key: false
+        is_foreign_key: false
+        comment: 'RAW_MATERIAL, COMPONENT, or FINISHED_GOOD'
+        tags: []
+      - name: unit_of_measure
+        type: string
+        is_primary_key: false
+        is_foreign_key: false
+        comment: null
+        tags: []
+      - name: standard_cost
+        type: 'decimal(12,2)'
+        is_primary_key: false
+        is_foreign_key: false
+        comment: null
+        tags: []
+  - catalog: megacorp
+    schema: factory
+    table: operators
+    comment: Factory-floor operators assigned to a plant.
+    tags: []
+    columns:
+      - name: operator_id
+        type: bigint
+        is_primary_key: true
+        is_foreign_key: false
+        comment: null
+        tags: []
+      - name: plant_id
+        type: bigint
+        is_primary_key: false
+        is_foreign_key: true
+        comment: null
+        tags: []
+      - name: operator_name
+        type: string
+        is_primary_key: false
+        is_foreign_key: false
+        comment: Operator full name.
+        tags:
+          - name: contains_pii
+            value: 'true'
+      - name: hire_date
+        type: date
+        is_primary_key: false
+        is_foreign_key: false
+        comment: null
+        tags: []
+      - name: certification_level
+        type: string
+        is_primary_key: false
+        is_foreign_key: false
+        comment: null
+        tags: []
+  - catalog: megacorp
+    schema: factory
+    table: plants
+    comment: Physical manufacturing plants.
+    tags: []
+    columns:
+      - name: plant_id
+        type: bigint
+        is_primary_key: true
+        is_foreign_key: false
+        comment: null
+        tags: []
+      - name: plant_name
+        type: string
+        is_primary_key: false
+        is_foreign_key: false
+        comment: null
+        tags: []
+      - name: location
+        type: string
+        is_primary_key: false
+        is_foreign_key: false
+        comment: null
+        tags: []
+      - name: country
+        type: string
+        is_primary_key: false
+        is_foreign_key: false
+        comment: null
+        tags: []
+      - name: capacity_units_per_day
+        type: bigint
+        is_primary_key: false
+        is_foreign_key: false
+        comment: null
+        tags: []
+  - catalog: megacorp
+    schema: factory
+    table: production_lines
+    comment: Production lines within a plant.
+    tags: []
+    columns:
+      - name: production_line_id
+        type: bigint
+        is_primary_key: true
+        is_foreign_key: false
+        comment: null
+        tags: []
+      - name: plant_id
+        type: bigint
+        is_primary_key: false
+        is_foreign_key: true
+        comment: null
+        tags: []
+      - name: line_name
+        type: string
+        is_primary_key: false
+        is_foreign_key: false
+        comment: null
+        tags: []
+      - name: line_type
+        type: string
+        is_primary_key: false
+        is_foreign_key: false
+        comment: null
+        tags: []
+  - catalog: megacorp
+    schema: factory
+    table: quality_inspections
+    comment: Quality inspection results tied to a work order.
+    tags: []
+    columns:
+      - name: inspection_id
+        type: bigint
+        is_primary_key: true
+        is_foreign_key: false
+        comment: null
+        tags: []
+      - name: work_order_id
+        type: bigint
+        is_primary_key: false
+        is_foreign_key: true
+        comment: null
+        tags: []
+      - name: inspector_name
+        type: string
+        is_primary_key: false
+        is_foreign_key: false
+        comment: Inspector full name.
+        tags:
+          - name: contains_pii
+            value: 'true'
+      - name: inspection_date
+        type: date
+        is_primary_key: false
+        is_foreign_key: false
+        comment: null
+        tags: []
+      - name: result
+        type: string
+        is_primary_key: false
+        is_foreign_key: false
+        comment: null
+        tags: []
+      - name: defect_count
+        type: bigint
+        is_primary_key: false
+        is_foreign_key: false
+        comment: null
+        tags: []
+      - name: operator_id
+        type: bigint
+        is_primary_key: false
+        is_foreign_key: false
+        comment: >-
+          The operator believed responsible for the inspection outcome. Not a
+          declared FK.
+        tags: []
+  - catalog: megacorp
+    schema: factory
+    table: shifts
+    comment: Shift definitions per plant.
+    tags: []
+    columns:
+      - name: shift_id
+        type: bigint
+        is_primary_key: true
+        is_foreign_key: false
+        comment: null
+        tags: []
+      - name: plant_id
+        type: bigint
+        is_primary_key: false
+        is_foreign_key: true
+        comment: null
+        tags: []
+      - name: shift_name
+        type: string
+        is_primary_key: false
+        is_foreign_key: false
+        comment: null
+        tags: []
+      - name: start_time
+        type: string
+        is_primary_key: false
+        is_foreign_key: false
+        comment: null
+        tags: []
+      - name: end_time
+        type: string
+        is_primary_key: false
+        is_foreign_key: false
+        comment: null
+        tags: []
+  - catalog: megacorp
+    schema: factory
+    table: work_order_operators
+    comment: >-
+      Junction table: which operators worked which work order during which shift
+      (many-to-many).
+    tags: []
+    columns:
+      - name: work_order_id
+        type: bigint
+        is_primary_key: true
+        is_foreign_key: true
+        comment: null
+        tags: []
+      - name: operator_id
+        type: bigint
+        is_primary_key: true
+        is_foreign_key: true
+        comment: null
+        tags: []
+      - name: shift_id
+        type: bigint
+        is_primary_key: true
+        is_foreign_key: true
+        comment: null
+        tags: []
+      - name: hours_worked
+        type: 'decimal(5,2)'
+        is_primary_key: false
+        is_foreign_key: false
+        comment: null
+        tags: []
+  - catalog: megacorp
+    schema: factory
+    table: work_orders
+    comment: Production work orders for a given material on a given line.
+    tags: []
+    columns:
+      - name: work_order_id
+        type: bigint
+        is_primary_key: true
+        is_foreign_key: false
+        comment: null
+        tags: []
+      - name: production_line_id
+        type: bigint
+        is_primary_key: false
+        is_foreign_key: true
+        comment: null
+        tags: []
+      - name: material_id
+        type: bigint
+        is_primary_key: false
+        is_foreign_key: true
+        comment: null
+        tags: []
+      - name: quantity_planned
+        type: bigint
+        is_primary_key: false
+        is_foreign_key: false
+        comment: null
+        tags: []
+      - name: quantity_produced
+        type: bigint
+        is_primary_key: false
+        is_foreign_key: false
+        comment: null
+        tags: []
+      - name: start_date
+        type: date
+        is_primary_key: false
+        is_foreign_key: false
+        comment: null
+        tags: []
+      - name: end_date
+        type: date
+        is_primary_key: false
+        is_foreign_key: false
+        comment: null
+        tags: []
+      - name: status
+        type: string
+        is_primary_key: false
+        is_foreign_key: false
+        comment: 'One of: PLANNED, IN_PROGRESS, COMPLETED, CANCELLED.'
+        tags: []
+relationships:
+  - source: megacorp.factory.bill_of_materials
+    target: megacorp.factory.materials
+    fk_columns:
+      - component_material_id
+    pk_columns:
+      - material_id
+    constraint_name: bom_component_material_id_fk
+    inferred: false
+  - source: megacorp.factory.bill_of_materials
+    target: megacorp.factory.materials
+    fk_columns:
+      - parent_material_id
+    pk_columns:
+      - material_id
+    constraint_name: bom_parent_material_id_fk
+    inferred: false
+  - source: megacorp.erp.cost_centers
+    target: megacorp.factory.plants
+    fk_columns:
+      - plant_id
+    pk_columns:
+      - plant_id
+    constraint_name: cost_centers_plant_id_fk
+    inferred: false
+  - source: megacorp.erp.general_ledger
+    target: megacorp.erp.cost_centers
+    fk_columns:
+      - cost_center_id
+    pk_columns:
+      - cost_center_id
+    constraint_name: general_ledger_cost_center_id_fk
+    inferred: false
+  - source: megacorp.erp.general_ledger
+    target: megacorp.erp.invoices
+    fk_columns:
+      - reference_invoice_id
+    pk_columns:
+      - invoice_id
+    constraint_name: general_ledger_reference_invoice_id_fk
+    inferred: false
+  - source: megacorp.erp.invoice_line_items
+    target: megacorp.erp.invoices
+    fk_columns:
+      - invoice_id
+    pk_columns:
+      - invoice_id
+    constraint_name: invoice_line_items_invoice_id_fk
+    inferred: false
+  - source: megacorp.erp.invoices
+    target: megacorp.erp.customers
+    fk_columns:
+      - customer_id
+    pk_columns:
+      - customer_id
+    constraint_name: invoices_customer_id_fk
+    inferred: false
+  - source: megacorp.erp.invoices
+    target: megacorp.erp.sales_orders
+    fk_columns:
+      - sales_order_id
+    pk_columns:
+      - sales_order_id
+    constraint_name: invoices_sales_order_id_fk
+    inferred: false
+  - source: megacorp.factory.machine_sensor_readings
+    target: megacorp.factory.machines
+    fk_columns:
+      - machine_id
+    pk_columns:
+      - machine_id
+    constraint_name: machine_sensor_readings_machine_id_fk
+    inferred: false
+  - source: megacorp.factory.machines
+    target: megacorp.factory.production_lines
+    fk_columns:
+      - production_line_id
+    pk_columns:
+      - production_line_id
+    constraint_name: machines_production_line_id_fk
+    inferred: false
+  - source: megacorp.factory.operators
+    target: megacorp.factory.plants
+    fk_columns:
+      - plant_id
+    pk_columns:
+      - plant_id
+    constraint_name: operators_plant_id_fk
+    inferred: false
+  - source: megacorp.erp.payments
+    target: megacorp.erp.invoices
+    fk_columns:
+      - invoice_id
+    pk_columns:
+      - invoice_id
+    constraint_name: payments_invoice_id_fk
+    inferred: false
+  - source: megacorp.factory.production_lines
+    target: megacorp.factory.plants
+    fk_columns:
+      - plant_id
+    pk_columns:
+      - plant_id
+    constraint_name: production_lines_plant_id_fk
+    inferred: false
+  - source: megacorp.erp.purchase_order_lines
+    target: megacorp.factory.materials
+    fk_columns:
+      - material_id
+    pk_columns:
+      - material_id
+    constraint_name: purchase_order_lines_material_id_fk
+    inferred: false
+  - source: megacorp.erp.purchase_order_lines
+    target: megacorp.erp.purchase_orders
+    fk_columns:
+      - purchase_order_id
+    pk_columns:
+      - purchase_order_id
+    constraint_name: purchase_order_lines_purchase_order_id_fk
+    inferred: false
+  - source: megacorp.erp.purchase_orders
+    target: megacorp.erp.vendors
+    fk_columns:
+      - vendor_id
+    pk_columns:
+      - vendor_id
+    constraint_name: purchase_orders_vendor_id_fk
+    inferred: false
+  - source: megacorp.factory.quality_inspections
+    target: megacorp.factory.work_orders
+    fk_columns:
+      - work_order_id
+    pk_columns:
+      - work_order_id
+    constraint_name: quality_inspections_work_order_id_fk
+    inferred: false
+  - source: megacorp.erp.sales_order_lines
+    target: megacorp.factory.materials
+    fk_columns:
+      - material_id
+    pk_columns:
+      - material_id
+    constraint_name: sales_order_lines_material_id_fk
+    inferred: false
+  - source: megacorp.erp.sales_order_lines
+    target: megacorp.erp.sales_orders
+    fk_columns:
+      - sales_order_id
+    pk_columns:
+      - sales_order_id
+    constraint_name: sales_order_lines_sales_order_id_fk
+    inferred: false
+  - source: megacorp.erp.sales_orders
+    target: megacorp.erp.customers
+    fk_columns:
+      - customer_id
+    pk_columns:
+      - customer_id
+    constraint_name: sales_orders_customer_id_fk
+    inferred: false
+  - source: megacorp.factory.shifts
+    target: megacorp.factory.plants
+    fk_columns:
+      - plant_id
+    pk_columns:
+      - plant_id
+    constraint_name: shifts_plant_id_fk
+    inferred: false
+  - source: logistics.shipping.shipment_items
+    target: megacorp.erp.sales_order_lines
+    fk_columns:
+      - sales_order_line_id
+    pk_columns:
+      - sales_order_line_id
+    constraint_name: shipment_items_sales_order_line_id_fk
+    inferred: false
+  - source: logistics.shipping.shipment_items
+    target: logistics.shipping.shipments
+    fk_columns:
+      - shipment_id
+    pk_columns:
+      - shipment_id
+    constraint_name: shipment_items_shipment_id_fk
+    inferred: false
+  - source: logistics.shipping.shipments
+    target: logistics.shipping.carriers
+    fk_columns:
+      - carrier_id
+    pk_columns:
+      - carrier_id
+    constraint_name: shipments_carrier_id_fk
+    inferred: false
+  - source: logistics.shipping.shipments
+    target: megacorp.erp.sales_orders
+    fk_columns:
+      - sales_order_id
+    pk_columns:
+      - sales_order_id
+    constraint_name: shipments_sales_order_id_fk
+    inferred: false
+  - source: logistics.shipping.shipments
+    target: logistics.shipping.warehouses
+    fk_columns:
+      - warehouse_id
+    pk_columns:
+      - warehouse_id
+    constraint_name: shipments_warehouse_id_fk
+    inferred: false
+  - source: megacorp.factory.work_order_operators
+    target: megacorp.factory.operators
+    fk_columns:
+      - operator_id
+    pk_columns:
+      - operator_id
+    constraint_name: wo_operators_operator_id_fk
+    inferred: false
+  - source: megacorp.factory.work_order_operators
+    target: megacorp.factory.shifts
+    fk_columns:
+      - shift_id
+    pk_columns:
+      - shift_id
+    constraint_name: wo_operators_shift_id_fk
+    inferred: false
+  - source: megacorp.factory.work_order_operators
+    target: megacorp.factory.work_orders
+    fk_columns:
+      - work_order_id
+    pk_columns:
+      - work_order_id
+    constraint_name: wo_operators_work_order_id_fk
+    inferred: false
+  - source: megacorp.factory.work_orders
+    target: megacorp.factory.materials
+    fk_columns:
+      - material_id
+    pk_columns:
+      - material_id
+    constraint_name: work_orders_material_id_fk
+    inferred: false
+  - source: megacorp.factory.work_orders
+    target: megacorp.factory.production_lines
+    fk_columns:
+      - production_line_id
+    pk_columns:
+      - production_line_id
+    constraint_name: work_orders_production_line_id_fk
+    inferred: false
+  - source: megacorp.factory.quality_inspections
+    target: megacorp.factory.operators
+    fk_columns:
+      - operator_id
+    pk_columns:
+      - operator_id
+    constraint_name: null
+    inferred: true

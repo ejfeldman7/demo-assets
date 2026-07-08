@@ -61,6 +61,16 @@ asking schema questions in plain English.
     inferred/undeclared relationships are listed in `metadata.csv` only, never as a
     constraint, since they're a heuristic guess, not a real one.
 
+  Example output, generated from the packaged demo data, checked in at
+  [`docs/example-exports/`](docs/example-exports/):
+  [Markdown](docs/example-exports/erd-schema-docs.md) ·
+  [YAML](docs/example-exports/erd-schema-docs.yaml) ·
+  [JSON](docs/example-exports/erd-schema-docs.json) ·
+  [ER/Studio `.zip`](docs/example-exports/erd-erstudio-export.zip) (extracted:
+  [`physical_model.sql`](docs/example-exports/erstudio/physical_model.sql),
+  [`metadata.csv`](docs/example-exports/erstudio/metadata.csv),
+  [`unsupported_types.md`](docs/example-exports/erstudio/unsupported_types.md))
+
 ![Click-to-filter](docs/screenshots/erd-click-filter.png)
 
 ![UC comments and tags](docs/screenshots/erd-comments-tags.png)
