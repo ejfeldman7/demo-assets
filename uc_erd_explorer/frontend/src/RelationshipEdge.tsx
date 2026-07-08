@@ -3,10 +3,15 @@ import { BaseEdge, EdgeLabelRenderer, getSmoothStepPath, type EdgeProps } from '
 // A custom edge, not React Flow's built-in 'smoothstep' type, for one specific reason:
 // the built-in edge's `label` prop renders as an SVG <text> inside the edges layer,
 // which sits BEHIND the nodes layer in React Flow's stacking order -- so a label that
-// happens to fall under a table card is invisible, hidden by the card itself. Rendering
-// the label through EdgeLabelRenderer (a portal into a layer that sits above nodes,
-// purpose-built by React Flow for exactly this) fixes that; the path itself still
-// renders via BaseEdge in the normal edges layer.
+// happens to fall under a table card is invisible, hidden by the card itself.
+// EdgeLabelRenderer portals the label into its own `.react-flow__edgelabel-renderer`
+// container, but that container is STILL painted behind `.react-flow__nodes` by default
+// (verified empirically: both are position:absolute with no z-index, so plain DOM order
+// inside `.react-flow__viewport` decides paint order, and the nodes container comes
+// after the edge-label container in that DOM) -- so EdgeLabelRenderer alone does NOT
+// fix the overlap, only moving where in the DOM the label lives. The label below sets an
+// explicit positive z-index (above React Flow's own default z-index:1000 for an
+// elevated/selected node) so it always paints on top regardless of DOM order.
 export function RelationshipEdge({
   id,
   sourceX,
@@ -42,6 +47,7 @@ export function RelationshipEdge({
               position: 'absolute',
               transform: `translate(-50%, -50%) translate(${labelX}px, ${labelY}px)`,
               pointerEvents: 'none',
+              zIndex: 1001,
               background: '#ffffff',
               borderRadius: 4,
               padding: '1px 5px',
