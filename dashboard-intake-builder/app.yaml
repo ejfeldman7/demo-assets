@@ -1,0 +1,27 @@
+command:
+  - python
+  - app.py
+  # app.py calls uvicorn.run(_fastapi) directly when executed as __main__
+
+# Lakebase instance. Create one named to match (or update `instance:` below to
+# match whatever you name yours) before deploying — see README.md.
+# PGHOST / PGDATABASE / PGUSER / PGPORT are auto-injected by the platform.
+resources:
+  - name: lakebase
+    database:
+      instance: dashboard-intake-builder-db
+
+env:
+  # PGDATABASE is the Postgres DB name (e.g. databricks_postgres).
+  # LAKEBASE_INSTANCE is the instance name used for credential generation —
+  # must match resources.lakebase.database.instance above.
+  - name: LAKEBASE_INSTANCE
+    value: dashboard-intake-builder-db
+
+  # Unity Catalog catalog/schema this deployment is scoped to. The agent's
+  # schema discovery (agent.py) is locked to exactly this catalog.schema —
+  # change these to point at your own gold-layer schema.
+  - name: GOLD_CATALOG
+    value: your_catalog
+  - name: GOLD_SCHEMA
+    value: your_schema

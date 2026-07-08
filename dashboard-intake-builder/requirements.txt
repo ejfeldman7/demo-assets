@@ -1,0 +1,7 @@
+gradio>=4.40.0,<5.0.0
+databricks-sdk>=0.40.0
+psycopg[binary,pool]
+openai
+fastapi
+uvicorn[standard]
+git+https://github.com/databricks-solutions/ai-dev-kit.git@main#subdirectory=databricks-tools-core

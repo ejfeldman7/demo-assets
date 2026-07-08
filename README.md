@@ -26,6 +26,7 @@ A collection of Databricks demo applications and reference implementations, orga
 |-----------|-------------|
 | [`brand-intel-demo`](./brand-intel-demo) | Compound AI system for brand manager forecasting — natural language queries routed through Genie Spaces, PDF reports, and a proactive anomaly-detection agent |
 | [`genie-multitenant-rls`](./genie-multitenant-rls) | Reference implementation for per-tenant row-level security on a shared Genie Space using ABAC policies and per-tenant service principals (Azure) |
+| [`dashboard-intake-builder`](./dashboard-intake-builder) | Gradio app where business users describe a dashboard in plain language; an LLM agent designs, validates, and publishes it as an AI/BI (Lakeview) dashboard, with version history in Lakebase |
 
 ## Deployment
 
