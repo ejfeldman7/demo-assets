@@ -17,11 +17,21 @@ import 'reactflow/dist/style.css'
 import { fetchConfig, fetchGraph, fetchSchemaTree } from './api'
 import { TableNode } from './TableNode'
 import { SchemaNode } from './SchemaNode'
+import { RelationshipEdge } from './RelationshipEdge'
 import { GeniePanel } from './GeniePanel'
 import { CatalogSchemaPicker } from './CatalogSchemaPicker'
 import { connectedComponent, directNeighbors, layoutGraph } from './graphUtils'
-import { exportGraphAsImage, exportGraphAsMarkdown } from './export'
+import {
+  exportGraphAsImage,
+  exportGraphAsJson,
+  exportGraphAsMarkdown,
+  exportGraphAsYaml,
+  scopeGraph,
+  type ExportScope,
+} from './export'
+import { catalogColor } from './catalogColors'
 import type {
+  CatalogEnv,
   CatalogSchemas,
   FilterMode,
   GraphResponse,
@@ -30,6 +40,7 @@ import type {
 } from './types'
 
 const nodeTypes = { table: TableNode, schema: SchemaNode }
+const edgeTypes = { relationship: RelationshipEdge }
 
 function isSchemaNodeData(data: TableNodeData | SchemaNodeData): data is SchemaNodeData {
   return !('columns' in data)
@@ -42,6 +53,12 @@ function ErdCanvas() {
   const [workspaceName, setWorkspaceName] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
+  // Prod/Test toggle: 'test' queries each configured catalog with testCatalogSuffix
+  // appended (e.g. edp_customer -> edp_customer_ts) -- two distinct real Unity Catalog
+  // catalogs, not an alias. Only meaningful for a scoped deployment (testAvailable).
+  const [env, setEnv] = useState<CatalogEnv>('prod')
+  const [testAvailable, setTestAvailable] = useState(false)
+  const [testCatalogSuffix, setTestCatalogSuffix] = useState('_ts')
   // null = "All" -- no filter, everything in scope.
   const [selectedPairs, setSelectedPairs] = useState<Set<string> | null>(null)
   const [selectedId, setSelectedId] = useState<string | null>(null)
@@ -54,24 +71,36 @@ function ErdCanvas() {
   const { fitView, setCenter, getNode } = useReactFlow()
   const laidOutRef = useRef<Node<TableNodeData | SchemaNodeData>[]>([])
 
-  // Load the catalog/schema tree once, to populate the picker.
+  // Load the catalog/schema tree whenever the Prod/Test environment changes, to
+  // populate the picker with that environment's actual (possibly _ts-suffixed) catalogs.
   useEffect(() => {
-    fetchSchemaTree()
+    fetchSchemaTree(env)
       .then((t) => {
         setTree(t.catalogs)
         setTreeUnscoped(t.unscoped)
       })
       .catch((e) => setError((e as Error).message))
-  }, [])
+  }, [env])
 
-  // Load the deployment's workspace name once, for the top-bar pill.
+  // Load the deployment's workspace name + Prod/Test toggle availability once.
   useEffect(() => {
     fetchConfig()
-      .then((c) => setWorkspaceName(c.workspace))
+      .then((c) => {
+        setWorkspaceName(c.workspace)
+        setTestAvailable(c.test_available)
+        setTestCatalogSuffix(c.test_catalog_suffix)
+      })
       .catch(() => setWorkspaceName(null))
   }, [])
 
-  // Load graph whenever the catalog/schema selection changes.
+  // Toggling Prod/Test resets the catalog/schema selection -- a selection made under one
+  // environment names catalogs (possibly _ts-suffixed) that don't exist under the other.
+  const handleEnvChange = useCallback(() => {
+    setSelectedPairs(null)
+    setEnv((e) => (e === 'prod' ? 'test' : 'prod'))
+  }, [])
+
+  // Load graph whenever the catalog/schema selection or environment changes.
   useEffect(() => {
     let cancelled = false
     setError(null)
@@ -88,7 +117,7 @@ function ErdCanvas() {
     }
 
     setLoading(true)
-    fetchGraph(selectedPairs ? Array.from(selectedPairs) : undefined)
+    fetchGraph(selectedPairs ? Array.from(selectedPairs) : undefined, env)
       .then((g) => {
         if (!cancelled) setGraph(g)
       })
@@ -101,7 +130,7 @@ function ErdCanvas() {
     return () => {
       cancelled = true
     }
-  }, [selectedPairs, treeUnscoped])
+  }, [selectedPairs, treeUnscoped, env])
 
   // Edges filtered to the current inferred-visibility toggle -- used for both rendering
   // and click-to-filter connectivity, so a hidden inferred edge never silently changes
@@ -133,7 +162,10 @@ function ErdCanvas() {
       label: e.inferred
         ? `${e.fk_columns.join(', ')} → ${e.pk_columns.join(', ')} (inferred)`
         : `${e.fk_columns.join(', ')} → ${e.pk_columns.join(', ')}`,
-      type: 'smoothstep',
+      // Custom type, not the built-in 'smoothstep' -- its label renders through
+      // EdgeLabelRenderer (a layer above nodes) instead of inline SVG <text> (a layer
+      // below nodes), so labels aren't hidden under table cards. See RelationshipEdge.tsx.
+      type: 'relationship',
       // Inferred edges render above declared ones so a dashed line that happens to
       // overlap a solid one is never fully hidden underneath it.
       zIndex: e.inferred ? 1 : 0,
@@ -143,10 +175,6 @@ function ErdCanvas() {
         height: 16,
         color: e.inferred ? 'var(--db-red)' : '#98a2b3',
       },
-      labelStyle: { fontSize: 10, fontWeight: e.inferred ? 700 : 400, fill: e.inferred ? 'var(--db-red)' : '#667085' },
-      labelBgStyle: { fill: '#ffffff', fillOpacity: 0.95 },
-      labelBgPadding: [4, 2] as [number, number],
-      labelBgBorderRadius: 4,
       style: {
         stroke: e.inferred ? 'var(--db-red)' : '#98a2b3',
         strokeWidth: e.inferred ? 2 : 1.5,
@@ -218,18 +246,37 @@ function ErdCanvas() {
   // useful as a "schema doc" export either.
   const canExport = graph !== null && graph.view === 'detail' && displayNodes.length > 0
 
+  // The active click-to-filter selection, translated into what the export functions
+  // need (node ids + the specific edge ids connecting them) -- null when nothing's
+  // selected, meaning exports cover the full catalog/schema-scoped graph as before.
+  const exportScope = useMemo<ExportScope | null>(() => {
+    if (!visibleSet) return null
+    return {
+      nodeIds: visibleSet,
+      edgeIds: new Set(
+        displayEdges.filter((e) => visibleSet.has(e.source) && visibleSet.has(e.target)).map((e) => e.id),
+      ),
+    }
+  }, [visibleSet, displayEdges])
+
   const handleExportImage = useCallback(
     (format: 'png' | 'svg') => {
       if (!canExport) return
-      exportGraphAsImage(displayNodes, format, 'erd-export')
+      exportGraphAsImage(displayNodes, format, 'erd-export', exportScope)
     },
-    [canExport, displayNodes],
+    [canExport, displayNodes, exportScope],
   )
 
-  const handleExportDocs = useCallback(() => {
-    if (!canExport || !graph) return
-    exportGraphAsMarkdown(graph, 'erd-schema-docs')
-  }, [canExport, graph])
+  const handleExportDocs = useCallback(
+    (format: 'md' | 'json' | 'yaml') => {
+      if (!canExport || !graph) return
+      const scoped = scopeGraph(graph, exportScope)
+      if (format === 'md') exportGraphAsMarkdown(scoped, 'erd-schema-docs')
+      else if (format === 'json') exportGraphAsJson(scoped, 'erd-schema-docs')
+      else exportGraphAsYaml(scoped, 'erd-schema-docs')
+    },
+    [canExport, graph, exportScope],
+  )
 
   // Fit view when a fresh graph loads.
   useEffect(() => {
@@ -301,6 +348,21 @@ function ErdCanvas() {
             </div>
             <div style={styles.catalogMeta}>
               Unity Catalog{treeUnscoped ? ' · unscoped (all visible)' : ''}
+            </div>
+          </div>
+
+          <SectionLabel>Environment</SectionLabel>
+          <div style={styles.card}>
+            <Switch
+              label={env === 'test' ? 'Test' : 'Prod'}
+              checked={env === 'test'}
+              onChange={handleEnvChange}
+              disabled={!testAvailable}
+            />
+            <div style={styles.hint}>
+              {testAvailable
+                ? `Test appends "${testCatalogSuffix}" to each configured catalog (e.g. a catalog named "edp_customer" becomes "edp_customer${testCatalogSuffix}").`
+                : 'Prod/Test toggle is only available for a deployment scoped to specific catalogs (ERD_CATALOGS).'}
             </div>
           </div>
 
@@ -403,6 +465,7 @@ function ErdCanvas() {
             nodes={displayNodes}
             edges={displayEdges}
             nodeTypes={nodeTypes}
+            edgeTypes={edgeTypes}
             onNodeClick={onNodeClick}
             onPaneClick={() => setSelectedId(null)}
             fitView
@@ -413,18 +476,23 @@ function ErdCanvas() {
             <Background color="#e4e7ec" gap={22} />
             <Controls />
             <MiniMap
-              nodeColor={(n) =>
-                (n.data as TableNodeData | SchemaNodeData)?.schema === 'erp'
-                  ? '#7c3aed'
-                  : '#2272b4'
-              }
+              nodeColor={(n) => catalogColor((n.data as TableNodeData | SchemaNodeData)?.catalog ?? '').bar}
               maskColor="rgba(246,247,249,0.7)"
               pannable
               zoomable
             />
             <Panel position="top-right">
-              <div style={styles.exportPanel} title={canExport ? undefined : 'Expand a schema first to export'}>
-                <span style={styles.exportLabel}>Export</span>
+              <div
+                style={styles.exportPanel}
+                title={
+                  !canExport
+                    ? 'Expand a schema first to export'
+                    : exportScope
+                      ? 'Exporting just the selected table and its connections'
+                      : undefined
+                }
+              >
+                <span style={styles.exportLabel}>Export{exportScope ? ' (selection)' : ''}</span>
                 <button
                   onClick={() => handleExportImage('png')}
                   disabled={!canExport}
@@ -440,11 +508,25 @@ function ErdCanvas() {
                   SVG
                 </button>
                 <button
-                  onClick={handleExportDocs}
+                  onClick={() => handleExportDocs('md')}
                   disabled={!canExport}
                   style={exportBtn(canExport)}
                 >
-                  Docs (.md)
+                  MD
+                </button>
+                <button
+                  onClick={() => handleExportDocs('yaml')}
+                  disabled={!canExport}
+                  style={exportBtn(canExport)}
+                >
+                  YAML
+                </button>
+                <button
+                  onClick={() => handleExportDocs('json')}
+                  disabled={!canExport}
+                  style={exportBtn(canExport)}
+                >
+                  JSON
                 </button>
               </div>
             </Panel>
@@ -474,14 +556,17 @@ function Switch({
   label,
   checked,
   onChange,
+  disabled,
 }: {
   label: string
   checked: boolean
   onChange: () => void
+  disabled?: boolean
 }) {
   return (
     <button
       onClick={onChange}
+      disabled={disabled}
       role="switch"
       aria-checked={checked}
       style={{
@@ -494,8 +579,9 @@ function Switch({
         borderRadius: 7,
         border: 'none',
         background: 'transparent',
-        cursor: 'pointer',
+        cursor: disabled ? 'default' : 'pointer',
         textAlign: 'left',
+        opacity: disabled ? 0.5 : 1,
       }}
     >
       <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--text)' }}>{label}</span>
@@ -562,8 +648,10 @@ function exportBtn(enabled: boolean): CSSProperties {
 const styles: Record<string, CSSProperties> = {
   exportPanel: {
     display: 'flex',
+    flexWrap: 'wrap',
     alignItems: 'center',
     gap: 6,
+    maxWidth: 260,
     background: '#fff',
     border: '1px solid #e4e7ec',
     borderRadius: 8,

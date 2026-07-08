@@ -1,7 +1,7 @@
-import type { ConfigResponse, GraphResponse, SchemaTreeResponse } from './types'
+import type { CatalogEnv, ConfigResponse, GraphResponse, SchemaTreeResponse } from './types'
 
-export async function fetchSchemaTree(): Promise<SchemaTreeResponse> {
-  const res = await fetch('/api/schema-tree')
+export async function fetchSchemaTree(env: CatalogEnv = 'prod'): Promise<SchemaTreeResponse> {
+  const res = await fetch(`/api/schema-tree?env=${env}`)
   if (!res.ok) {
     throw new Error(`Failed to load catalog/schema tree: ${res.status} ${res.statusText}`)
   }
@@ -17,9 +17,10 @@ export async function fetchConfig(): Promise<ConfigResponse> {
 }
 
 /** pairs = list of "catalog.schema" strings to narrow to. Omit/undefined for everything in scope. */
-export async function fetchGraph(pairs?: string[]): Promise<GraphResponse> {
-  const qs = pairs && pairs.length > 0 ? `?pairs=${encodeURIComponent(pairs.join(','))}` : ''
-  const res = await fetch(`/api/graph${qs}`)
+export async function fetchGraph(pairs?: string[], env: CatalogEnv = 'prod'): Promise<GraphResponse> {
+  const params = new URLSearchParams({ env })
+  if (pairs && pairs.length > 0) params.set('pairs', pairs.join(','))
+  const res = await fetch(`/api/graph?${params.toString()}`)
   if (!res.ok) {
     const detail = await res.json().catch(() => null)
     throw new Error(detail?.detail ?? `Failed to load graph: ${res.status} ${res.statusText}`)

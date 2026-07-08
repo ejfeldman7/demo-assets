@@ -20,6 +20,7 @@ def _clean_env(monkeypatch):
         "GENIE_SPACE_ID",
         "ERD_CACHE_TTL_SECONDS",
         "ERD_SCHEMA_COLLAPSE_THRESHOLD",
+        "ERD_TEST_CATALOG_SUFFIX",
     ):
         monkeypatch.delenv(var, raising=False)
     config.get_workspace_name.cache_clear()
@@ -100,6 +101,19 @@ class TestGetWorkspaceClient:
         monkeypatch.setattr(config, "WorkspaceClient", lambda **kw: calls.append(kw) or object())
         config.get_workspace_client()
         assert calls == [{"profile": "my-profile"}]
+
+
+class TestGetTestCatalogSuffix:
+    def test_default(self):
+        assert config.get_test_catalog_suffix() == "_ts"
+
+    def test_override(self, monkeypatch):
+        monkeypatch.setenv("ERD_TEST_CATALOG_SUFFIX", "_test")
+        assert config.get_test_catalog_suffix() == "_test"
+
+    def test_blank_falls_back_to_default(self, monkeypatch):
+        monkeypatch.setenv("ERD_TEST_CATALOG_SUFFIX", "")
+        assert config.get_test_catalog_suffix() == "_ts"
 
 
 class TestGetWarehouseId:

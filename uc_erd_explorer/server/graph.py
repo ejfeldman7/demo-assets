@@ -42,6 +42,7 @@ from .config import (
     get_catalogs,
     get_metadata_location,
     get_schema_collapse_threshold,
+    get_test_catalog_suffix,
     get_warehouse_id,
     get_workspace_client,
 )
@@ -50,6 +51,21 @@ from .config import (
 _CACHE: Dict[Tuple[frozenset, frozenset], Tuple[float, Dict[str, Any]]] = {}
 
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9_]+$")
+
+
+def _resolve_catalogs(catalogs: Optional[List[str]], env: str) -> Optional[List[str]]:
+    """Translate the configured (prod) catalog allow-list to its test-environment
+    equivalent when env == "test", by appending get_test_catalog_suffix() to each entry
+    (e.g. edp_customer -> edp_customer_ts) -- these are two distinct real Unity Catalog
+    catalogs, not an alias, so every downstream query needs the suffixed name to hit the
+    right one. Unscoped deployments (catalogs=None) have no defined catalog list to
+    suffix, so this is a no-op there -- routes expose config.get_catalogs() is not None
+    as `test_available` so the frontend can disable the toggle rather than relying on
+    this function to reject it silently."""
+    if env != "test" or not catalogs:
+        return catalogs
+    suffix = get_test_catalog_suffix()
+    return [f"{c}{suffix}" for c in catalogs]
 
 
 def validate_pairs(pairs: List[Tuple[str, str]], allowed_catalogs: Optional[List[str]]) -> List[Tuple[str, str]]:
@@ -262,11 +278,12 @@ def _query_foreign_keys(catalogs: Optional[List[str]]) -> List[List[Any]]:
 # --- catalog/schema tree (lightweight, for the frontend picker) -------------
 
 
-def list_catalog_schemas() -> List[Dict[str, Any]]:
+def list_catalog_schemas(env: str = "prod") -> List[Dict[str, Any]]:
     """Enumerate catalog -> [schema, ...] for the frontend's catalog/schema tree picker,
     without fetching the full graph. Respects the same scope as build_graph (the
-    ERD_CATALOGS allow-list, or every catalog visible if unset)."""
-    catalogs = get_catalogs()
+    ERD_CATALOGS allow-list, or every catalog visible if unset), resolved to the test
+    catalogs (see _resolve_catalogs) when env == "test"."""
+    catalogs = _resolve_catalogs(get_catalogs(), env)
     catalog_filter = f"AND table_catalog IN {_in_clause(catalogs)}" if catalogs else ""
     stmt = f"""
     SELECT DISTINCT table_catalog, table_schema
@@ -364,13 +381,16 @@ def _node_id(catalog: str, schema: str, table: str) -> str:
     return f"{catalog}.{schema}.{table}"
 
 
-def build_graph(pairs: Optional[List[Tuple[str, str]]] = None) -> Dict[str, Any]:
+def build_graph(pairs: Optional[List[Tuple[str, str]]] = None, env: str = "prod") -> Dict[str, Any]:
     """Build (or return cached) {nodes, edges} for the configured catalog allow-list
     (or every catalog visible to this deployment, if ERD_CATALOGS is unset -- see module
     docstring), optionally further narrowed to exact (catalog, schema) pairs -- the model
     the frontend's catalog/schema tree picker uses (a flat schema-name filter can't
-    express "schema X under catalog A but not under catalog B")."""
-    catalogs = get_catalogs()  # None means unscoped
+    express "schema X under catalog A but not under catalog B"). When env == "test", the
+    allow-list is resolved to its test-catalog equivalent first (see _resolve_catalogs)
+    -- `pairs` is expected to already name the resolved (suffixed) catalogs too, since
+    the frontend's picker is populated from list_catalog_schemas() with the same env."""
+    catalogs = _resolve_catalogs(get_catalogs(), env)  # None means unscoped
     if pairs:
         validate_pairs(pairs, catalogs)  # raises ValueError naming the bad entry, rather
         # than silently dropping it and widening the result back to everything in scope.

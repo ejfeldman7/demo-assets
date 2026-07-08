@@ -54,6 +54,13 @@ export function layoutGraph(
       ...n,
       targetPosition: Position.Left,
       sourcePosition: Position.Right,
+      // Explicit width/height, not just position -- getNodesBounds() (used by the PNG/
+      // SVG export) needs these on the node object itself to compute an accurate
+      // bounding box. Without them it has no footprint per node to work with, only a
+      // point, which undersizes the exported image and clips the far/bottom edge of
+      // whatever nodes happen to be at the layout's extremes.
+      width,
+      height,
       // dagre gives center; React Flow wants top-left.
       position: {
         x: pos.x - width / 2,

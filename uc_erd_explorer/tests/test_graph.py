@@ -6,6 +6,28 @@ import pytest
 from server import graph
 
 
+class TestResolveCatalogs:
+    def test_prod_env_unchanged(self, monkeypatch):
+        monkeypatch.setattr(graph, "get_test_catalog_suffix", lambda: "_ts")
+        assert graph._resolve_catalogs(["megacorp"], "prod") == ["megacorp"]
+
+    def test_test_env_appends_suffix(self, monkeypatch):
+        monkeypatch.setattr(graph, "get_test_catalog_suffix", lambda: "_ts")
+        assert graph._resolve_catalogs(["megacorp", "sales"], "test") == ["megacorp_ts", "sales_ts"]
+
+    def test_test_env_uses_configured_suffix(self, monkeypatch):
+        monkeypatch.setattr(graph, "get_test_catalog_suffix", lambda: "_test")
+        assert graph._resolve_catalogs(["edp_customer"], "test") == ["edp_customer_test"]
+
+    def test_unscoped_none_unaffected_by_test_env(self, monkeypatch):
+        monkeypatch.setattr(graph, "get_test_catalog_suffix", lambda: "_ts")
+        assert graph._resolve_catalogs(None, "test") is None
+
+    def test_empty_list_unaffected_by_test_env(self, monkeypatch):
+        monkeypatch.setattr(graph, "get_test_catalog_suffix", lambda: "_ts")
+        assert graph._resolve_catalogs([], "test") == []
+
+
 class TestValidatePairs:
     def test_valid_pairs_pass_through_unchanged(self):
         pairs = [("megacorp", "erp"), ("megacorp", "factory")]

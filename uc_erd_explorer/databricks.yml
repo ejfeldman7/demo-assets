@@ -53,6 +53,12 @@ variables:
       table-per-node layout gets slow to query and unreadable well before a few hundred
       nodes. Set to "0" to always render full detail regardless of catalog size.
     default: "80"
+  erd_test_catalog_suffix:
+    description: >-
+      Suffix appended to each erd_catalogs entry when the frontend's Prod/Test toggle is
+      set to Test (e.g. edp_customer -> edp_customer_ts) -- two distinct real Unity
+      Catalog catalogs, not an alias. Only meaningful when erd_catalogs is set.
+    default: "_ts"
 
 targets:
   dev:
@@ -90,6 +96,8 @@ resources:
             value: ${var.erd_cache_ttl_seconds}
           - name: "ERD_SCHEMA_COLLAPSE_THRESHOLD"
             value: ${var.erd_schema_collapse_threshold}
+          - name: "ERD_TEST_CATALOG_SUFFIX"
+            value: ${var.erd_test_catalog_suffix}
       resources:
         - name: sql-warehouse
           description: "Warehouse for information_schema metadata queries"

@@ -251,6 +251,22 @@ front door onto the same automation, not a separate implementation to maintain.
 | `genie_space_id` | `GENIE_SPACE_ID` | (set after first setup run) | Which Genie Space the chat panel talks to |
 | `erd_cache_ttl_seconds` | `ERD_CACHE_TTL_SECONDS` | `300` | How long `/api/graph` results are cached in-memory before re-querying `information_schema` |
 | `erd_schema_collapse_threshold` | `ERD_SCHEMA_COLLAPSE_THRESHOLD` | `80` | Table count above which the ERD defaults to one node per schema (click to expand); `0` always renders full detail |
+| `erd_test_catalog_suffix` | `ERD_TEST_CATALOG_SUFFIX` | `_ts` | Suffix appended to each `erd_catalogs` entry when the frontend's Prod/Test toggle is set to Test (e.g. `edp_customer` → `edp_customer_ts`) |
+
+### Prod/Test catalog toggle
+
+If a customer has a parallel test catalog per prod catalog (e.g. `edp_customer` and
+`edp_customer_ts`), the sidebar's Environment switch lets a user flip between them without
+redeploying: Prod queries `erd_catalogs` as configured; Test queries the same list with
+`erd_test_catalog_suffix` appended to each entry. These are two distinct real Unity
+Catalog catalogs, not an alias — the toggle re-fetches the catalog/schema tree and graph
+against whichever one is selected, and resets the current catalog/schema selection (a
+selection made under one environment names catalogs that don't exist under the other).
+Only available in scoped mode (`erd_catalogs` set) — an unscoped deployment has no defined
+catalog list to derive a test name from, so the toggle is disabled there. The Genie Space
+is **not** affected by this toggle — it stays scoped to whatever `erd_catalogs`/
+`erd_metadata_location` were configured at setup time, since it's a static, pre-built
+resource rather than a live per-request filter.
 
 **One asymmetry worth knowing**: the ERD graph is queried live, so changing
 `erd_catalogs` and redeploying takes effect immediately. The Genie Space's views and

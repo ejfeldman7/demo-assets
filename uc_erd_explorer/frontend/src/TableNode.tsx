@@ -1,10 +1,6 @@
 import { Handle, Position, type NodeProps } from 'reactflow'
+import { catalogColor } from './catalogColors'
 import type { TableNodeData, TagValue } from './types'
-
-const SCHEMA_COLORS: Record<string, { bar: string; soft: string }> = {
-  factory: { bar: '#2272b4', soft: '#eaf2fb' },
-  erp: { bar: '#7c3aed', soft: '#f1eafe' },
-}
 
 // Deterministic tag -> color mapping. Well-known governance keywords get a fixed,
 // attention-appropriate color; anything else falls back to a stable hash-based pick
@@ -58,7 +54,7 @@ export interface TableNodeProps extends NodeProps<TableNodeData> {
 }
 
 export function TableNode({ data }: TableNodeProps) {
-  const colors = SCHEMA_COLORS[data.schema] ?? { bar: '#475569', soft: '#eef2f6' }
+  const colors = catalogColor(data.catalog)
   const dimmed = data.dimmed
   const selected = data.selected
 
@@ -96,6 +92,7 @@ export function TableNode({ data }: TableNodeProps) {
           {data.comment && <span style={{ opacity: 0.75, fontSize: 11 }}>ⓘ</span>}
         </span>
         <span
+          title={`${data.catalog}.${data.schema}`}
           style={{
             fontSize: 9.5,
             fontWeight: 600,
@@ -105,9 +102,14 @@ export function TableNode({ data }: TableNodeProps) {
             background: 'rgba(255,255,255,0.18)',
             borderRadius: 4,
             padding: '1px 5px',
+            maxWidth: 110,
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+            whiteSpace: 'nowrap',
+            flexShrink: 0,
           }}
         >
-          {data.schema}
+          {data.catalog}.{data.schema}
         </span>
       </div>
       {data.tags.length > 0 && (

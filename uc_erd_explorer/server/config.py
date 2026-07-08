@@ -66,6 +66,16 @@ def get_workspace_client() -> WorkspaceClient:
     return WorkspaceClient(profile=profile) if profile else WorkspaceClient()
 
 
+def get_test_catalog_suffix() -> str:
+    """Suffix appended to each configured (prod) catalog name to get its test-environment
+    equivalent -- e.g. edp_customer -> edp_customer_ts when the frontend's Prod/Test
+    toggle is set to "test". These are two distinct real Unity Catalog catalogs, not an
+    alias, so this only matters when ERD_CATALOGS (a scoped deployment) is set -- see
+    graph.py's _resolve_catalogs(). Configurable via ERD_TEST_CATALOG_SUFFIX since not
+    every customer's test catalogs use "_ts"."""
+    return os.environ.get("ERD_TEST_CATALOG_SUFFIX") or "_ts"
+
+
 def get_warehouse_id() -> Optional[str]:
     """Resolve the SQL warehouse id used for information_schema queries. No hardcoded
     fallback on purpose -- a warehouse id from a different workspace would silently be

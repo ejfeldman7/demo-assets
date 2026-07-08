@@ -81,6 +81,14 @@ export interface ConfigResponse {
   // Derived from the deployment's own WorkspaceClient host -- null if it couldn't be
   // resolved (e.g. auth failure), never a hardcoded placeholder.
   workspace: string | null
+  // False for an unscoped deployment -- there's no defined (prod) catalog list to
+  // derive a test-catalog name from, so the Prod/Test toggle has nothing to switch to.
+  test_available: boolean
+  // e.g. "_ts" -- appended to each configured catalog name in test mode (edp_customer ->
+  // edp_customer_ts). Shown in the toggle's tooltip so it's not a mystery to the user.
+  test_catalog_suffix: string
 }
 
 export type FilterMode = 'neighbors' | 'component'
+
+export type CatalogEnv = 'prod' | 'test'
