@@ -1,7 +1,12 @@
 import { dump as yamlDump } from 'js-yaml'
 import { toPng, toSvg } from 'html-to-image'
+import { zipSync, strToU8 } from 'fflate'
 import { getNodesBounds, getViewportForBounds, type Node } from 'reactflow'
 import type { ColumnMeta, GraphEdge, GraphResponse, TableNodeData } from './types'
+import { buildDdl } from './erstudio/ddlBuilder'
+import { buildMetadataCsv } from './erstudio/metadataCsv'
+import { buildUnsupportedTypesDoc } from './erstudio/unsupportedTypesDoc'
+import type { Dialect } from './erstudio/typeMapping'
 
 function download(href: string, filename: string) {
   const link = document.createElement('a')
@@ -277,4 +282,24 @@ export function exportGraphAsJson(graph: GraphResponse, filenameBase: string): v
 export function exportGraphAsYaml(graph: GraphResponse, filenameBase: string): void {
   const blob = new Blob([yamlDump(graphToExportData(graph))], { type: 'application/yaml' })
   download(URL.createObjectURL(blob), `${filenameBase}.yaml`)
+}
+
+/**
+ * A .zip with the three files a data modeler needs to reverse-engineer this schema into
+ * ER/Studio (or any tool that imports from DDL): physical_model.sql, metadata.csv, and
+ * unsupported_types.md. Built entirely client-side from the already-scoped `graph` (the
+ * same object the MD/YAML/JSON exports use) -- no separate backend endpoint, so this
+ * automatically inherits the exact same catalog/schema AND click-to-filter scoping as
+ * every other export, rather than being limited to whatever a server route's query
+ * params happen to express.
+ */
+export function exportGraphAsErStudioZip(graph: GraphResponse, dialect: Dialect, filenameBase: string): void {
+  const { sql, unsupported } = buildDdl(graph, dialect)
+  const zipped = zipSync({
+    'physical_model.sql': strToU8(sql),
+    'metadata.csv': strToU8(buildMetadataCsv(graph)),
+    'unsupported_types.md': strToU8(buildUnsupportedTypesDoc(unsupported, dialect)),
+  })
+  const blob = new Blob([zipped as BlobPart], { type: 'application/zip' })
+  download(URL.createObjectURL(blob), `${filenameBase}.zip`)
 }

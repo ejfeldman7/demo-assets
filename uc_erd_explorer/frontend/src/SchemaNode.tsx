@@ -1,9 +1,9 @@
 import { Handle, Position, type NodeProps } from 'reactflow'
-import { catalogColor } from './catalogColors'
+import type { ColorPair } from './catalogColors'
 import type { SchemaNodeData } from './types'
 
 export interface SchemaNodeProps extends NodeProps<SchemaNodeData> {
-  data: SchemaNodeData & { dimmed?: boolean; selected?: boolean }
+  data: SchemaNodeData & { dimmed?: boolean; selected?: boolean; color?: ColorPair }
 }
 
 // Rendered instead of TableNode when the catalog has more tables than
@@ -11,7 +11,7 @@ export interface SchemaNodeProps extends NodeProps<SchemaNodeData> {
 // selects that schema in the tree picker -- the existing click-to-filter mechanism --
 // which re-fetches /api/graph scoped to it and always gets full table-level detail.
 export function SchemaNode({ data }: SchemaNodeProps) {
-  const colors = catalogColor(data.catalog)
+  const colors = data.color ?? { bar: '#475467', soft: '#f2f4f7' }
   const dimmed = data.dimmed
   const selected = data.selected
 

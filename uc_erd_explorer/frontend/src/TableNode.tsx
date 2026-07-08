@@ -1,5 +1,5 @@
 import { Handle, Position, type NodeProps } from 'reactflow'
-import { catalogColor } from './catalogColors'
+import type { ColorPair } from './catalogColors'
 import type { TableNodeData, TagValue } from './types'
 
 // Deterministic tag -> color mapping. Well-known governance keywords get a fixed,
@@ -50,11 +50,11 @@ function TagBadge({ tag, small }: { tag: TagValue; small?: boolean }) {
 }
 
 export interface TableNodeProps extends NodeProps<TableNodeData> {
-  data: TableNodeData & { dimmed?: boolean; selected?: boolean }
+  data: TableNodeData & { dimmed?: boolean; selected?: boolean; color?: ColorPair }
 }
 
 export function TableNode({ data }: TableNodeProps) {
-  const colors = catalogColor(data.catalog)
+  const colors = data.color ?? { bar: '#475467', soft: '#f2f4f7' }
   const dimmed = data.dimmed
   const selected = data.selected
 

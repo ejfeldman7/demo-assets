@@ -39,6 +39,27 @@ asking schema questions in plain English.
   above a configurable table-count threshold default to one node per schema instead of
   one per table — click a schema node to expand it to full table-level detail (the same
   underlying mechanism as the catalog/schema tree picker, not a separate interaction).
+- **Color-coded by catalog**: every table's header is colored by which catalog it's in
+  (not schema — a real deployment scopes many schemas under one catalog, and "which
+  catalog is this in" is the useful grouping for a multi-catalog customer). Colors are
+  computed fresh for whichever catalogs are actually in the current view, spaced evenly
+  around the color wheel (360° / catalog count) so any two catalogs on screen are always
+  maximally distinguishable — not a fixed name→color lookup, which can only ever be
+  coincidentally well-separated for whichever specific catalogs a given customer has.
+- **Export**, scoped to whatever's currently selected (a catalog/schema picker
+  narrowing, or a click-to-filter table selection) — computed entirely client-side from
+  the already-loaded graph, no extra server round-trip:
+  - **PNG / SVG** — the canvas as an image, cropped to just the in-scope nodes.
+  - **Markdown / YAML / JSON** — a structured schema doc (tables, columns, PK/FK flags,
+    comments, tags, declared + inferred relationships).
+  - **ER/Studio** (SQL Server or Oracle dialect) — a `.zip` with `physical_model.sql`
+    (DDL with `PRIMARY KEY`/`FOREIGN KEY` constraints, for ER/Studio's
+    reverse-engineer-from-DDL import), `metadata.csv` (one row per column, including UC
+    comments/tags), and `unsupported_types.md` (any column whose Unity Catalog type has
+    no direct relational equivalent, e.g. `ARRAY`/`MAP`/`STRUCT`/`VARIANT`, and what it
+    was mapped to instead). Only **declared** foreign keys become DDL constraints —
+    inferred/undeclared relationships are listed in `metadata.csv` only, never as a
+    constraint, since they're a heuristic guess, not a real one.
 
 ![Click-to-filter](docs/screenshots/erd-click-filter.png)
 

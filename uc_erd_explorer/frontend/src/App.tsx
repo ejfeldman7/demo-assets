@@ -22,6 +22,7 @@ import { GeniePanel } from './GeniePanel'
 import { CatalogSchemaPicker } from './CatalogSchemaPicker'
 import { connectedComponent, directNeighbors, layoutGraph } from './graphUtils'
 import {
+  exportGraphAsErStudioZip,
   exportGraphAsImage,
   exportGraphAsJson,
   exportGraphAsMarkdown,
@@ -29,7 +30,8 @@ import {
   scopeGraph,
   type ExportScope,
 } from './export'
-import { catalogColor } from './catalogColors'
+import { buildCatalogColorMap, lookupCatalogColor } from './catalogColors'
+import type { Dialect } from './erstudio/typeMapping'
 import type {
   CatalogEnv,
   CatalogSchemas,
@@ -67,6 +69,7 @@ function ErdCanvas() {
   // Heuristic undeclared-relationship edges are always fetched but hidden by default,
   // so first load renders identically to before this feature existed.
   const [showInferred, setShowInferred] = useState(false)
+  const [erStudioDialect, setErStudioDialect] = useState<Dialect>('sqlserver')
 
   const { fitView, setCenter, getNode } = useReactFlow()
   const laidOutRef = useRef<Node<TableNodeData | SchemaNodeData>[]>([])
@@ -132,6 +135,11 @@ function ErdCanvas() {
     }
   }, [selectedPairs, treeUnscoped, env])
 
+  // Colors assigned per the catalogs actually present in the current (already
+  // catalog/schema-scoped) graph -- see catalogColors.ts for why this is computed fresh
+  // per graph rather than from a fixed name->color lookup.
+  const catalogColorMap = useMemo(() => buildCatalogColorMap(graph?.catalogs ?? []), [graph])
+
   // Edges filtered to the current inferred-visibility toggle -- used for both rendering
   // and click-to-filter connectivity, so a hidden inferred edge never silently changes
   // what "connected" means. Default (showInferred=false) matches pre-heuristic behavior
@@ -195,7 +203,7 @@ function ErdCanvas() {
       : connectedComponent(selectedId, scopedGraphEdges)
   }, [selectedId, filterMode, graph, scopedGraphEdges])
 
-  // Apply dim/selection styling to nodes.
+  // Apply dim/selection styling + catalog color to nodes.
   const displayNodes = useMemo<Node<TableNodeData | SchemaNodeData>[]>(() => {
     return baseNodes.map((n) => ({
       ...n,
@@ -203,9 +211,10 @@ function ErdCanvas() {
         ...n.data,
         dimmed: visibleSet ? !visibleSet.has(n.id) : false,
         selected: n.id === selectedId,
+        color: lookupCatalogColor(catalogColorMap, n.data.catalog),
       },
     }))
-  }, [baseNodes, visibleSet, selectedId])
+  }, [baseNodes, visibleSet, selectedId, catalogColorMap])
 
   const displayEdges = useMemo<Edge[]>(() => {
     return baseEdges.map((e) => {
@@ -277,6 +286,12 @@ function ErdCanvas() {
     },
     [canExport, graph, exportScope],
   )
+
+  const handleExportErStudio = useCallback(() => {
+    if (!canExport || !graph) return
+    const scoped = scopeGraph(graph, exportScope)
+    exportGraphAsErStudioZip(scoped, erStudioDialect, 'erd-erstudio-export')
+  }, [canExport, graph, exportScope, erStudioDialect])
 
   // Fit view when a fresh graph loads.
   useEffect(() => {
@@ -476,7 +491,9 @@ function ErdCanvas() {
             <Background color="#e4e7ec" gap={22} />
             <Controls />
             <MiniMap
-              nodeColor={(n) => catalogColor((n.data as TableNodeData | SchemaNodeData)?.catalog ?? '').bar}
+              nodeColor={(n) =>
+                lookupCatalogColor(catalogColorMap, (n.data as TableNodeData | SchemaNodeData)?.catalog ?? '').bar
+              }
               maskColor="rgba(246,247,249,0.7)"
               pannable
               zoomable
@@ -492,42 +509,54 @@ function ErdCanvas() {
                       : undefined
                 }
               >
-                <span style={styles.exportLabel}>Export{exportScope ? ' (selection)' : ''}</span>
-                <button
-                  onClick={() => handleExportImage('png')}
-                  disabled={!canExport}
-                  style={exportBtn(canExport)}
-                >
-                  PNG
-                </button>
-                <button
-                  onClick={() => handleExportImage('svg')}
-                  disabled={!canExport}
-                  style={exportBtn(canExport)}
-                >
-                  SVG
-                </button>
-                <button
-                  onClick={() => handleExportDocs('md')}
-                  disabled={!canExport}
-                  style={exportBtn(canExport)}
-                >
-                  MD
-                </button>
-                <button
-                  onClick={() => handleExportDocs('yaml')}
-                  disabled={!canExport}
-                  style={exportBtn(canExport)}
-                >
-                  YAML
-                </button>
-                <button
-                  onClick={() => handleExportDocs('json')}
-                  disabled={!canExport}
-                  style={exportBtn(canExport)}
-                >
-                  JSON
-                </button>
+                <div style={styles.exportHeader}>
+                  <span style={styles.exportLabel}>Export</span>
+                  {exportScope && <span style={styles.exportScopeTag}>selection only</span>}
+                </div>
+
+                <div style={styles.exportRow}>
+                  <span style={styles.exportGroupTag}>Image</span>
+                  <button onClick={() => handleExportImage('png')} disabled={!canExport} style={exportBtn(canExport)}>
+                    PNG
+                  </button>
+                  <button onClick={() => handleExportImage('svg')} disabled={!canExport} style={exportBtn(canExport)}>
+                    SVG
+                  </button>
+                </div>
+
+                <div style={styles.exportRow}>
+                  <span style={styles.exportGroupTag}>Docs</span>
+                  <button onClick={() => handleExportDocs('md')} disabled={!canExport} style={exportBtn(canExport)}>
+                    MD
+                  </button>
+                  <button onClick={() => handleExportDocs('yaml')} disabled={!canExport} style={exportBtn(canExport)}>
+                    YAML
+                  </button>
+                  <button onClick={() => handleExportDocs('json')} disabled={!canExport} style={exportBtn(canExport)}>
+                    JSON
+                  </button>
+                </div>
+
+                <div style={styles.exportRow}>
+                  <span style={styles.exportGroupTag}>Model</span>
+                  <select
+                    value={erStudioDialect}
+                    onChange={(e) => setErStudioDialect(e.target.value as Dialect)}
+                    disabled={!canExport}
+                    style={exportDialectSelect(canExport)}
+                  >
+                    <option value="sqlserver">SQL Server</option>
+                    <option value="oracle">Oracle</option>
+                  </select>
+                  <button
+                    onClick={handleExportErStudio}
+                    disabled={!canExport}
+                    style={{ ...exportBtn(canExport), flex: 1 }}
+                    title="DDL + column metadata, for ER/Studio's reverse-engineer-from-DDL import"
+                  >
+                    ER/Studio
+                  </button>
+                </div>
               </div>
             </Panel>
           </ReactFlow>
@@ -642,21 +671,40 @@ function exportBtn(enabled: boolean): CSSProperties {
     fontWeight: 600,
     padding: '4px 8px',
     cursor: enabled ? 'pointer' : 'default',
+    whiteSpace: 'nowrap',
+  }
+}
+
+function exportDialectSelect(enabled: boolean): CSSProperties {
+  return {
+    border: '1px solid var(--border, #e4e7ec)',
+    borderRadius: 6,
+    background: '#fff',
+    color: enabled ? 'var(--text)' : '#c0c5cd',
+    fontSize: 11,
+    fontWeight: 600,
+    padding: '4px 6px',
+    cursor: enabled ? 'pointer' : 'default',
   }
 }
 
 const styles: Record<string, CSSProperties> = {
   exportPanel: {
     display: 'flex',
-    flexWrap: 'wrap',
-    alignItems: 'center',
+    flexDirection: 'column',
     gap: 6,
-    maxWidth: 260,
+    width: 236,
     background: '#fff',
     border: '1px solid #e4e7ec',
     borderRadius: 8,
-    padding: '6px 8px',
+    padding: '8px',
     boxShadow: '0 1px 2px rgba(16,24,40,0.06), 0 1px 3px rgba(16,24,40,0.1)',
+  },
+  exportHeader: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 2,
   },
   exportLabel: {
     fontSize: 10.5,
@@ -664,7 +712,26 @@ const styles: Record<string, CSSProperties> = {
     color: '#98a2b3',
     textTransform: 'uppercase',
     letterSpacing: 0.4,
-    marginRight: 2,
+  },
+  exportScopeTag: {
+    fontSize: 9.5,
+    fontWeight: 600,
+    color: 'var(--db-blue)',
+    background: 'var(--db-blue-soft)',
+    borderRadius: 4,
+    padding: '1px 6px',
+  },
+  exportRow: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 5,
+  },
+  exportGroupTag: {
+    width: 38,
+    flexShrink: 0,
+    fontSize: 10,
+    fontWeight: 600,
+    color: '#98a2b3',
   },
   app: {
     width: '100vw',

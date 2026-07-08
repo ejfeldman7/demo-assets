@@ -3,38 +3,48 @@ export interface ColorPair {
   soft: string
 }
 
-// A palette of visually distinct, brand-adjacent colors assigned to catalogs -- not
-// schemas, since a real deployment scopes many schemas under one catalog and the useful
-// visual grouping for a multi-catalog customer is "which catalog is this table in,"
-// not "which schema." Deliberately more entries than the 2-schema megacorp demo needed,
-// since customers with "a variety of catalogs" need this to hold up past just 2-3.
-//
-// Hues are spaced exactly 45° apart around the color wheel (0/45/90/.../315) rather than
-// picked ad hoc -- an earlier version had two hues only 13° apart (a muted red and a
-// muted orange), which any two catalogs whose names happened to hash into those two
-// buckets would render in near-identical colors, defeating the entire point of
-// color-by-catalog. A fixed 45° minimum separation guarantees every pair in the palette
-// stays visually distinguishable no matter which two a given set of catalog names hash to.
-const CATALOG_PALETTE: ColorPair[] = [
-  { bar: '#b81414', soft: '#fbe9e9' }, // red (0°)
-  { bar: '#b88f14', soft: '#fbf7e9' }, // gold (45°)
-  { bar: '#66b814', soft: '#f2fbe9' }, // lime (90°)
-  { bar: '#14b83d', soft: '#e9fbee' }, // green (135°)
-  { bar: '#14b8b8', soft: '#e9fbfb' }, // teal (180°)
-  { bar: '#143db8', soft: '#e9eefb' }, // blue (225°)
-  { bar: '#6614b8', soft: '#f2e9fb' }, // purple (270°)
-  { bar: '#b8148f', soft: '#fbe9f7' }, // pink (315°)
-]
+const FALLBACK: ColorPair = { bar: '#475467', soft: '#f2f4f7' }
 
-function hashString(s: string): number {
-  let hash = 0
-  for (let i = 0; i < s.length; i++) hash = (hash * 31 + s.charCodeAt(i)) >>> 0
-  return hash
+function hslToHex(h: number, s: number, l: number): string {
+  const a = s * Math.min(l, 1 - l)
+  const f = (n: number) => {
+    const k = (n + h / 30) % 12
+    const color = l - a * Math.max(-1, Math.min(k - 3, 9 - k, 1))
+    return Math.round(255 * color)
+      .toString(16)
+      .padStart(2, '0')
+  }
+  return `#${f(0)}${f(8)}${f(4)}`
 }
 
-/** Deterministic catalog -> color mapping, stable across renders/reloads for the same
- * catalog name. Hash-based (not index-based) so it doesn't require every node to know
- * the full set of catalogs in the current graph just to pick a color. */
-export function catalogColor(catalog: string): ColorPair {
-  return CATALOG_PALETTE[hashString(catalog) % CATALOG_PALETTE.length]
+/**
+ * Assign each catalog currently in view a color, spacing hues evenly around the wheel
+ * based on how many distinct catalogs are actually present -- not a fixed lookup table
+ * keyed by catalog name. A static hash-to-palette mapping (the previous approach) is
+ * only ever *coincidentally* well-separated for whichever specific catalogs a customer
+ * happens to have: two arbitrary catalog names can always hash into adjacent palette
+ * slots and render in near-identical colors. Computing hues on the fly for exactly the
+ * N catalogs on screen guarantees every pair is separated by 360/N degrees -- the most
+ * distinguishable arrangement possible for that view. The tradeoff: a catalog's color
+ * can shift if the set of catalogs in view changes (e.g. narrowing the picker selection
+ * down to one catalog) -- deliberate, since in-view distinguishability matters more here
+ * than a catalog keeping one fixed color across every possible view.
+ */
+export function buildCatalogColorMap(catalogs: string[]): Map<string, ColorPair> {
+  const sorted = Array.from(new Set(catalogs)).sort()
+  const map = new Map<string, ColorPair>()
+  const n = sorted.length
+  if (n === 0) return map
+  sorted.forEach((catalog, i) => {
+    const hue = (360 / n) * i
+    map.set(catalog, {
+      bar: hslToHex(hue, 0.62, 0.38),
+      soft: hslToHex(hue, 0.62, 0.95),
+    })
+  })
+  return map
+}
+
+export function lookupCatalogColor(map: Map<string, ColorPair>, catalog: string): ColorPair {
+  return map.get(catalog) ?? FALLBACK
 }
