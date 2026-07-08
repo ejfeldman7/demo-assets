@@ -35,9 +35,10 @@ npm-debug.log*
 # OS
 .DS_Store
 
-# Internal build-history record, not meant for public consumption (see DEMO.md for the
-# public-facing architecture/design writeup instead).
+# Internal build-history / scope-negotiation records, not meant for public consumption --
+# README.md is the public-facing architecture/design writeup instead.
 TASKS.md
+DEMO.md
 
 # NOTE: frontend/dist/ is intentionally NOT ignored -- the built React SPA is what the
 # FastAPI backend serves, and `databricks bundle deploy` respects .gitignore when syncing

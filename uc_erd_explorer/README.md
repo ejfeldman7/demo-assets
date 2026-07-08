@@ -67,6 +67,8 @@ asking schema questions in plain English.
 
 ![Inferred relationships](docs/screenshots/erd-inferred-relationships.png)
 
+![Export panel](docs/screenshots/erd-export-panel.png)
+
 ![Genie chat](docs/screenshots/genie-chat.png)
 
 ## Why the Genie scoping matters
@@ -477,6 +479,9 @@ erd-explorer/
 ├── notebooks/
 │   └── install.py                # Route 2: notebook-based install (calls the same
 │                                    setup/ functions as Route 1's DAB job)
-├── databricks.yml                # Route 1: Databricks Asset Bundle (app + setup job)
-└── DEMO.md                       # build history / design decisions (internal record)
+└── databricks.yml                # Route 1: Databricks Asset Bundle (app + setup job)
 ```
+
+An internal `DEMO.md` (build history / scope-negotiation notes) exists locally alongside
+this README but is gitignored on purpose -- it's a working record for whoever's building
+this out, not meant for public consumption.
