@@ -1,12 +1,16 @@
 """Unit tests for the setup/ scripts' idempotency-relevant logic: statement building for
 create_scoped_views.py and create_genie_space.py (re-running with the same config must
 produce equivalent output, not drift or duplicate), the catalog-name substitution in
-create_megacorp_demo.py, and the branching logic in grant_catalog_access.py. All pure
-functions / mocked I/O -- no real warehouse or Databricks credentials needed.
+create_megacorp_demo.py and create_logistics_demo.py, and the branching logic in
+grant_catalog_access.py. All pure functions / mocked I/O -- no real warehouse or
+Databricks credentials needed.
 """
+import re
+
 import pytest
 
 import create_genie_space
+import create_logistics_demo
 import create_megacorp_demo
 import create_scoped_views
 import grant_catalog_access
@@ -163,6 +167,60 @@ class TestSubstituteCatalog:
 
     def test_default_catalog_name_is_a_no_op(self):
         result = create_megacorp_demo.substitute_catalog(self.SAMPLE_SQL, "megacorp", include_create_catalog=True)
+        assert result == self.SAMPLE_SQL
+
+
+class TestSubstituteCatalogsForLogistics:
+    SAMPLE_SQL = (
+        "CREATE CATALOG IF NOT EXISTS logistics COMMENT 'demo';\n"
+        "CREATE SCHEMA IF NOT EXISTS logistics.shipping;\n"
+        "CREATE TABLE IF NOT EXISTS logistics.shipping.shipments (\n"
+        "  sales_order_id BIGINT,\n"
+        "  CONSTRAINT shipments_sales_order_id_fk FOREIGN KEY (sales_order_id) REFERENCES megacorp.erp.sales_orders (sales_order_id)\n"
+        ");\n"
+    )
+
+    def test_replaces_both_qualifiers_independently(self):
+        result = create_logistics_demo.substitute_catalogs(
+            self.SAMPLE_SQL, "my_logistics", "my_megacorp", include_create_catalog=True
+        )
+        # Word-boundary check, not a bare substring check -- "my_logistics.shipping"
+        # legitimately contains "logistics.shipping" as a substring.
+        assert not re.search(r"(?<![\w])logistics\.", result)
+        assert not re.search(r"(?<![\w])megacorp\.", result)
+        assert "my_logistics.shipping.shipments" in result
+        assert "my_megacorp.erp.sales_orders" in result
+
+    def test_replaces_create_catalog_statement(self):
+        result = create_logistics_demo.substitute_catalogs(
+            self.SAMPLE_SQL, "my_logistics", "megacorp", include_create_catalog=True
+        )
+        assert "CREATE CATALOG IF NOT EXISTS my_logistics COMMENT 'demo';" in result
+
+    def test_drops_create_catalog_statement_when_catalog_already_exists(self):
+        result = create_logistics_demo.substitute_catalogs(
+            self.SAMPLE_SQL, "my_logistics", "megacorp", include_create_catalog=False
+        )
+        assert "CREATE CATALOG" not in result
+        assert "CREATE SCHEMA IF NOT EXISTS my_logistics.shipping;" in result
+
+    def test_test_environment_pairing_never_cross_wires_prod(self):
+        # The exact scenario this exists for: logistics_ts must reference megacorp_ts,
+        # never the prod megacorp catalog.
+        result = create_logistics_demo.substitute_catalogs(
+            self.SAMPLE_SQL, "logistics_ts", "megacorp_ts", include_create_catalog=True
+        )
+        assert "megacorp_ts.erp.sales_orders" in result
+        assert "logistics_ts.shipping.shipments" in result
+        # Neither bare prod name should survive as its own qualifier (only as a prefix
+        # of the _ts-suffixed one).
+        assert not re.search(r"(?<![\w])logistics\.", result)
+        assert not re.search(r"(?<![\w])megacorp\.", result)
+
+    def test_default_catalog_names_are_a_no_op(self):
+        result = create_logistics_demo.substitute_catalogs(
+            self.SAMPLE_SQL, "logistics", "megacorp", include_create_catalog=True
+        )
         assert result == self.SAMPLE_SQL
 
 

@@ -177,11 +177,17 @@ uv run --with databricks-sdk python setup/create_megacorp_demo.py --warehouse-id
 #     demo the comment/tag surfacing feature. Skip for bare structure only.
 uv run --with databricks-sdk python setup/create_megacorp_demo.py --warehouse-id <your-warehouse-id> --profile <your-profile> [--catalog <name>] --metadata-only
 
+# 1c. (optional -- skip if you only want one catalog) A second catalog cross-linked to
+#     megacorp by a real foreign key, so multi-catalog rendering has something real to
+#     show. --megacorp-catalog must match the catalog name used in step 1.
+uv run --with databricks-sdk python setup/create_logistics_demo.py --warehouse-id <your-warehouse-id> --profile <your-profile> [--catalog <name>] [--megacorp-catalog <name>]
+
 # 2. Grant the app's service principal access to it (see "Permissions" below for details --
-#    this looks up the service principal for you, no copy/paste needed)
+#    this looks up the service principal for you, no copy/paste needed). List every
+#    catalog from steps 1/1c.
 uv run --with databricks-sdk python setup/grant_catalog_access.py \
     --warehouse-id <your-warehouse-id> --profile <your-profile> \
-    --app-name erd-explorer-dev --catalogs megacorp --metadata-location megacorp.erd_meta
+    --app-name erd-explorer-dev --catalogs megacorp,logistics --metadata-location megacorp.erd_meta
 
 # 3. Create the scoped metadata views + Genie Space (idempotent, safe to re-run)
 databricks bundle run setup_genie_space -t dev -p <your-profile>
@@ -191,6 +197,13 @@ databricks bundle run erd_explorer_app -t dev -p <your-profile>
 ```
 
 Open the URL printed by step 4.
+
+**Setting up the Prod/Test toggle's test catalogs** (optional): repeat steps 1/1c/2 once
+more, using the test-suffixed catalog names throughout (e.g. `--catalog megacorp_ts`,
+then `--catalog logistics_ts --megacorp-catalog megacorp_ts`, then
+`--catalogs megacorp_ts,logistics_ts` for the grant step) -- these are real, separate
+Unity Catalog catalogs, not an alias, so they need their own data and their own grants.
+See "Prod/Test catalog toggle" below.
 
 **Deploying against your own catalog(s)** instead of (or in addition to) the demo data:
 
@@ -246,7 +259,7 @@ front door onto the same automation, not a separate implementation to maintain.
 | Bundle variable | Env var (equivalent) | Default | What it controls |
 |---|---|---|---|
 | `warehouse_id` | `DATABRICKS_WAREHOUSE_ID` | **required, no default** | SQL warehouse used for all `information_schema` queries |
-| `erd_catalogs` | `ERD_CATALOGS` (comma-separated) | `megacorp` (packaged demo default) | The catalog allow-list — scopes **both** the ERD graph and the Genie Space. Set to an empty string for unscoped mode, see below |
+| `erd_catalogs` | `ERD_CATALOGS` (comma-separated) | `megacorp,logistics` (packaged demo default) | The catalog allow-list — scopes **both** the ERD graph and the Genie Space. Set to an empty string for unscoped mode, see below |
 | `erd_metadata_location` | `ERD_METADATA_LOCATION` (`"catalog.schema"`) | `megacorp.erd_meta` | Where the scoped Genie metadata views live. **Required** if `erd_catalogs` is empty (no catalog to default from) |
 | `genie_space_id` | `GENIE_SPACE_ID` | (set after first setup run) | Which Genie Space the chat panel talks to |
 | `erd_cache_ttl_seconds` | `ERD_CACHE_TTL_SECONDS` | `300` | How long `/api/graph` results are cached in-memory before re-querying `information_schema` |
@@ -267,6 +280,11 @@ catalog list to derive a test name from, so the toggle is disabled there. The Ge
 is **not** affected by this toggle — it stays scoped to whatever `erd_catalogs`/
 `erd_metadata_location` were configured at setup time, since it's a static, pre-built
 resource rather than a live per-request filter.
+
+The test-suffixed catalogs (e.g. `megacorp_ts`) are real, separate Unity Catalog
+catalogs — `grant_catalog_access.py` (or a catalog admin) needs to grant the app's
+service principal access to them too, same as the prod ones, or Test mode will just show
+an empty graph. See "Setting up the Prod/Test toggle's test catalogs" above.
 
 **One asymmetry worth knowing**: the ERD graph is queried live, so changing
 `erd_catalogs` and redeploying takes effect immediately. The Genie Space's views and
@@ -387,6 +405,14 @@ to avoid needing a Databricks service-principal secret in this repo.
   format, or you asked for a catalog outside this deployment's `erd_catalogs` allow-list.
   Both are intentional: the app rejects invalid/out-of-scope requests clearly instead of
   silently widening back to "everything."
+- **Changed `erd_catalogs` (or another bundle variable) but the running app still shows
+  the old value** — restart it with `databricks bundle run erd_explorer_app -t dev -p
+  <your-profile>` (step 4 in Route 1), not a raw `databricks apps deploy
+  --source-code-path ...`. Only `bundle run` regenerates the deployed `app.yaml`'s env
+  values from your `--var` substitutions; a direct `apps deploy` just runs whatever's
+  literally checked into `app.yaml`, `--var` flags and all, silently ignored. Pass every
+  variable you've customized (e.g. `--var="genie_space_id=<id>"`) each time, or an
+  unspecified one reverts to its `databricks.yml` default.
 
 ## Caveats
 
@@ -421,6 +447,9 @@ erd-explorer/
 │   ├── megacorp_schema.sql, create_megacorp_demo.py   # optional: creates the demo data
 │   │                                                     (in any target catalog)
 │   ├── megacorp_demo_metadata.sql            # optional: illustrative comments/tags for the demo
+│   ├── logistics_schema.sql, create_logistics_demo.py  # optional: a second demo catalog
+│   │                                                      cross-linked to megacorp by a
+│   │                                                      real FK, for multi-catalog demos
 │   ├── run_ddl.py                            # generic one-off .sql file executor
 │   ├── create_scoped_views.py                # Genie's hard-scoped data source
 │   └── create_genie_space.py                 # Genie Space create/update + ACL grant

@@ -23,8 +23,12 @@ variables:
       shipped on purpose (a warehouse id from this project's original workspace would
       silently fail in yours). Pass --var="warehouse_id=<your-warehouse-id>".
   erd_catalogs:
-    description: "Comma-separated catalog allow-list for the ERD graph"
-    default: "megacorp"
+    description: >-
+      Comma-separated catalog allow-list for the ERD graph. The packaged demo ships two
+      catalogs cross-linked by a real foreign key (logistics.shipping.shipments ->
+      megacorp.erp.sales_orders, see setup/create_logistics_demo.py) so multi-catalog
+      rendering has something real to show -- not just multiple schemas in one catalog.
+    default: "megacorp,logistics"
   erd_metadata_location:
     description: >-
       "catalog.schema" where the scoped ERD metadata views (Genie's actual data
@@ -71,7 +75,7 @@ resources:
   apps:
     erd_explorer_app:
       name: "erd-explorer-${bundle.target}"
-      description: "Interactive Unity Catalog ERD viewer (megacorp)"
+      description: "Interactive Unity Catalog ERD viewer (megacorp, logistics)"
       source_code_path: ./
       # ERD_CATALOGS is templated from the SAME var.erd_catalogs the setup job below
       # uses for the Genie Space -- one variable, two consumers, never drifts.
