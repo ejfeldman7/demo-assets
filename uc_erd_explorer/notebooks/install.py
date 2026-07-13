@@ -6,11 +6,17 @@
 # MAGIC (see the repo README for that route). Use this if you don't have local CLI access,
 # MAGIC or you'd rather configure and deploy entirely from inside the workspace.
 # MAGIC
-# MAGIC **How to use:** add this repo as a Databricks Git folder (Workspace ▸ Git Folders ▸
-# MAGIC Add repo), open this notebook from inside that folder, fill in the widgets above
+# MAGIC **How to use:** add the `demo-assets` repo as a Databricks Git folder (Workspace ▸
+# MAGIC Git Folders ▸ Add repo), open this notebook from inside
+# MAGIC `<that git folder>/uc_erd_explorer/notebooks/install.py`, fill in the widgets above
 # MAGIC (click "Run all" once, the widgets will appear; set them, then "Run all" again), and
 # MAGIC run all cells top to bottom. Safe to re-run — every step is idempotent, same as the
 # MAGIC CLI/DAB path.
+# MAGIC
+# MAGIC **`repo_root` gotcha:** `demo-assets` is a monorepo of several demos, and this app
+# MAGIC is one subfolder in it (`uc_erd_explorer/`). The `repo_root` widget below must point
+# MAGIC at that subfolder -- one level *in* from the git checkout root, not the checkout
+# MAGIC root itself.
 # MAGIC
 # MAGIC This notebook does exactly what `databricks bundle deploy` + `databricks bundle run
 # MAGIC setup_genie_space` + `databricks bundle run <app>` do together, just via the
@@ -25,7 +31,7 @@
 
 # COMMAND ----------
 
-dbutils.widgets.text("repo_root", "", "Workspace path to this repo's root (required -- e.g. /Workspace/Users/you@company.com/erd-explorer). Right-click the folder in the workspace browser and choose \"Copy path\" if unsure.")
+dbutils.widgets.text("repo_root", "", "Workspace path to the uc_erd_explorer FOLDER (required). If you added the demo-assets repo via Git Folders, this is one level IN from that checkout -- e.g. /Workspace/Users/you@company.com/demo-assets/uc_erd_explorer, not /Workspace/Users/you@company.com/demo-assets. Right-click the uc_erd_explorer folder in the workspace browser and choose \"Copy path\" if unsure.")
 dbutils.widgets.text("app_name", "erd-explorer", "Databricks App name")
 dbutils.widgets.text("warehouse_id", "", "SQL warehouse id (required)")
 dbutils.widgets.text("erd_catalogs", "megacorp", "Catalogs to visualize (comma-separated; leave BLANK for unscoped -- every catalog visible to this deployment, including Genie)")
@@ -33,6 +39,15 @@ dbutils.widgets.text("erd_metadata_location", "", "Genie metadata views location
 dbutils.widgets.dropdown("create_demo_data", "no", ["yes", "no"], "Create the synthetic megacorp schemas/tables? Works whether demo_catalog already exists (e.g. you don't have CREATE CATALOG permission -- only schemas/tables get added to it) or not (it gets created too)")
 dbutils.widgets.text("demo_catalog", "", "Catalog to create the demo data in (only used if create_demo_data=yes). Blank = reuse the first erd_catalogs entry, so you don't have to type the same catalog name twice; falls back to \"megacorp\" if erd_catalogs is also blank.")
 dbutils.widgets.dropdown("add_demo_metadata", "no", ["yes", "no"], "Also add illustrative COMMENTs/tags to the demo data? (separate opt-in -- most real deployments won't want fabricated metadata layered onto their own catalogs, and even demo users may want the bare structure only)")
+
+# COMMAND ----------
+
+# MAGIC %md ## 1b. Read the widgets and validate them
+# MAGIC Split into its own cell (rather than reading in the cell above) so that after the
+# MAGIC first "Run all" renders the widgets, you can edit their values in place and re-run
+# MAGIC from here without also re-declaring the widgets themselves.
+
+# COMMAND ----------
 
 repo_root_widget = dbutils.widgets.get("repo_root").strip()
 app_name = dbutils.widgets.get("app_name").strip()
@@ -43,7 +58,7 @@ create_demo_data = dbutils.widgets.get("create_demo_data") == "yes"
 demo_catalog_raw = dbutils.widgets.get("demo_catalog").strip()
 add_demo_metadata = dbutils.widgets.get("add_demo_metadata") == "yes"
 
-assert repo_root_widget, "repo_root widget is required -- the Workspace path to this repo's checkout"
+assert repo_root_widget, "repo_root widget is required -- the Workspace path to the uc_erd_explorer folder (one level in from the demo-assets git checkout)"
 assert app_name, "app_name widget is required"
 assert warehouse_id, "warehouse_id widget is required -- pick any SQL warehouse id from your workspace"
 # erd_catalogs is intentionally NOT required -- leaving it blank is a deliberate "unscoped"
@@ -100,7 +115,7 @@ import sys
 
 REPO_ROOT = repo_root_widget.rstrip("/")
 SETUP_DIR = os.path.join(REPO_ROOT, "setup")
-assert os.path.isdir(SETUP_DIR), f"Could not find setup/ under repo_root={REPO_ROOT} (looked in {SETUP_DIR}) -- double check the repo_root widget points at this repo's checkout."
+assert os.path.isdir(SETUP_DIR), f"Could not find setup/ under repo_root={REPO_ROOT} (looked in {SETUP_DIR}) -- double check the repo_root widget points at the uc_erd_explorer folder itself, not the demo-assets checkout it lives in."
 
 sys.path.insert(0, SETUP_DIR)
 import create_scoped_views

@@ -19,6 +19,7 @@ import { TableNode } from './TableNode'
 import { SchemaNode } from './SchemaNode'
 import { RelationshipEdge } from './RelationshipEdge'
 import { GeniePanel } from './GeniePanel'
+import { InfoPanel } from './InfoPanel'
 import { CatalogSchemaPicker } from './CatalogSchemaPicker'
 import { connectedComponent, directNeighbors, layoutGraph } from './graphUtils'
 import {
@@ -349,6 +350,7 @@ function ErdCanvas() {
             {workspaceName}
           </div>
         )}
+        <InfoPanel />
         <div style={styles.avatar}>EF</div>
       </header>
 

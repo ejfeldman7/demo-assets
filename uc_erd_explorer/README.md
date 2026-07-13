@@ -255,15 +255,15 @@ variable each, consumed by both the app and the Genie setup job — they can't d
 For teams without local CLI/terminal access, or who'd rather configure and deploy
 entirely from inside the workspace UI.
 
-1. In the Databricks workspace UI: **Workspace ▸ Git Folders ▸ Add repo**, paste this
-   repo's URL.
-2. Open `notebooks/install.py` from inside that folder.
+1. In the Databricks workspace UI: **Workspace ▸ Git Folders ▸ Add repo**, paste the
+   `demo-assets` repo's URL.
+2. Open `uc_erd_explorer/notebooks/install.py` from inside that folder.
 3. Click **Run all** once — this renders the configuration widgets at the top of the
    notebook (they take the place of the CLI route's `--var` bundle variables):
 
    | Widget | Required | What it controls |
    |---|---|---|
-   | `repo_root` | yes | Workspace path to this repo's checkout, e.g. `/Workspace/Users/you@company.com/erd-explorer` (right-click the folder → "Copy path" if unsure) |
+   | `repo_root` | yes | Workspace path to the **`uc_erd_explorer` folder** -- one level in from the `demo-assets` git checkout, e.g. `/Workspace/Users/you@company.com/demo-assets/uc_erd_explorer` (right-click the `uc_erd_explorer` folder → "Copy path" if unsure). Do **not** point this at the `demo-assets` checkout root -- `demo-assets` is a monorepo of several demos and this app is one subfolder in it. |
    | `warehouse_id` | yes | SQL warehouse id |
    | `app_name` | no (default `erd-explorer`) | Databricks App name |
    | `erd_catalogs` | no (default `megacorp`) | Comma-separated catalog allow-list. Clear it entirely for unscoped mode (every catalog visible to this deployment — see "Unscoped mode" below) |
@@ -286,6 +286,43 @@ The notebook is idempotent (safe to "Run all" repeatedly, e.g. after changing wi
 values) and calls the identical `setup/create_scoped_views.py` /
 `setup/create_genie_space.py` functions the CLI route's job does — it's a different
 front door onto the same automation, not a separate implementation to maintain.
+
+## Adding a new catalog after you've already deployed
+
+Both routes are idempotent, so widening scope later is the same deploy flow you used
+initially, not a separate procedure. There is intentionally no in-app "add a catalog"
+button — the app's own service principal only holds read access to its configured
+catalogs, and doing this from inside the running app would mean giving it grant-issuing
+UC permissions and the ability to redeploy itself, a much bigger permission footprint
+than an ERD viewer needs. Adding a catalog stays a deploy-time (CLI or notebook) action:
+
+**Via the CLI/DAB route:**
+```bash
+# 1. Redeploy with the catalog added to erd_catalogs -- the ERD graph picks this up
+#    immediately, since /api/graph queries information_schema live.
+databricks bundle deploy -t dev -p <your-profile> \
+    --var="erd_catalogs=sales,inventory,newcatalog" \
+    --var="erd_metadata_location=sales.erd_meta" \
+    --var="warehouse_id=<your-warehouse-id>"
+
+# 2. Grant the app's service principal access to the FULL list (existing + new --
+#    idempotent, only issues GRANTs, so re-listing already-granted catalogs is harmless).
+uv run --with databricks-sdk python setup/grant_catalog_access.py \
+    --warehouse-id <your-warehouse-id> --profile <your-profile> \
+    --app-name erd-explorer-dev --catalogs sales,inventory,newcatalog --metadata-location sales.erd_meta
+
+# 3. Resync the Genie Space -- its view/table list is saved config, not live like the
+#    graph, so it won't see the new catalog until this runs.
+databricks bundle run setup_genie_space -t dev -p <your-profile>
+```
+
+**Via the notebook route:** re-run `notebooks/install.py` — update the `erd_catalogs`
+widget to include the new catalog(s) and click **Run all** again. It performs the
+equivalent of all three steps above (redeploy, grant, Genie resync) in one pass.
+
+Either way, remember the asymmetry from "One asymmetry worth knowing" above: the graph
+updates the moment you redeploy, but the Genie Space needs its explicit resync step (or
+the notebook re-run) to catch up.
 
 ## Configuration reference
 
