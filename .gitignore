@@ -216,3 +216,9 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# uc_erd_explorer commits its built frontend on purpose (its notebook/Git-folder deploy
+# route has no local npm/node build step) -- the blanket "dist/" rule above (meant for
+# Python packaging) would otherwise also match its frontend build output.
+!uc_erd_explorer/frontend/dist/
+!uc_erd_explorer/frontend/dist/**

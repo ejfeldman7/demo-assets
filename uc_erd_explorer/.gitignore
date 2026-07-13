@@ -1,0 +1,48 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+wheels/
+*.egg-info
+
+# uv.lock is intentionally NOT committed here. This repo was originally developed on a
+# machine whose uv is globally configured to resolve packages through a Databricks-
+# internal PyPI proxy (pypi-proxy.dev.databricks.com) rather than public pypi.org --
+# every uv.lock generated there records that proxy as the package source, which is
+# unreachable from outside Databricks' network. A public demo repo's checked-in lockfile
+# pinning an unreachable internal registry would break `uv sync`/`uv run` for every
+# external user (and did break it, silently, for this whole project's history, until a
+# CI job actually exercised `uv sync` from outside that network). Leaving it uncommitted
+# means each environment resolves fresh against whatever index it's actually configured
+# for -- correct urls, just without commit-pinned exact versions.
+uv.lock
+
+# Virtual environments
+.venv
+venv/
+
+# Node
+node_modules/
+npm-debug.log*
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# Databricks
+.databricks/
+
+# OS
+.DS_Store
+
+# Internal build-history / scope-negotiation records, not meant for public consumption --
+# README.md is the public-facing architecture/design writeup instead.
+TASKS.md
+DEMO.md
+
+# NOTE: frontend/dist/ is intentionally NOT ignored -- the built React SPA is what the
+# FastAPI backend serves, and `databricks bundle deploy` respects .gitignore when syncing
+# source files. An earlier unscoped "dist/"/"build/" pattern here (meant for Python
+# packaging, which this project doesn't use) was silently also matching frontend/dist/
+# and frontend build/, so the deployed app served the "frontend not built" fallback even
+# though npm run build had been run locally. Do not re-add a bare "dist/"/"build/" pattern.

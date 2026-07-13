@@ -1,0 +1,42 @@
+name: Frontend dist drift check
+
+# frontend/dist/ is intentionally committed -- the notebook install route (Route 2) has
+# no local build step and just copies whatever's there. If someone edits frontend/src/
+# and forgets to rebuild before committing, Route 2 silently ships a stale/broken UI with
+# no error signal. This job rebuilds from source and fails if the result differs from
+# what's committed, so that's caught in CI instead of by someone noticing later.
+
+on:
+  push:
+    paths:
+      - "uc_erd_explorer/frontend/**"
+      - ".github/workflows/uc-erd-explorer-frontend-dist-check.yml"
+  pull_request:
+    paths:
+      - "uc_erd_explorer/frontend/**"
+      - ".github/workflows/uc-erd-explorer-frontend-dist-check.yml"
+
+jobs:
+  check-dist:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: uc_erd_explorer/frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: uc_erd_explorer/frontend/package-lock.json
+
+      - run: npm ci
+      - run: npm run build
+
+      - name: Fail if the built dist/ differs from what's committed
+        run: |
+          if ! git diff --exit-code -- dist; then
+            echo "::error::frontend/dist/ is out of date. Run 'cd uc_erd_explorer/frontend && npm run build' and commit the result."
+            exit 1
+          fi

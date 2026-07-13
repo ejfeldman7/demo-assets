@@ -1,0 +1,39 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+dist-ssr
+*.local
+
+# NOTE: dist/ is intentionally NOT ignored (unlike most Vite projects). This app supports
+# a notebook/Git-folder deploy route with no local npm/node available -- if dist/ isn't
+# committed, a fresh Git folder clone has no way to produce it. Run `npm run build` and
+# commit the updated frontend/dist/ after any change to frontend/src/.
+
+# NOTE: package-lock.json IS committed (unlike uv.lock at the repo root -- see that
+# file's own note). This project was originally developed on a machine whose npm is
+# globally configured to resolve packages through a Databricks-internal registry proxy
+# (npm-proxy.dev.databricks.com), which mirrors the public npm registry 1:1 (identical
+# package tarball paths/hashes -- npm registry proxies of this kind always do, unlike
+# PyPI's split index-vs-file-host architecture). The committed lockfile has its registry
+# URLs rewritten to the real public registry (registry.npmjs.org) so it resolves outside
+# Databricks' network too. If you regenerate this file on a similarly-configured
+# machine, re-run: sed -i '' 's|https://npm-proxy\.dev\.databricks\.com/|https://registry.npmjs.org/|g' package-lock.json
+# and confirm `npm ci` still succeeds before committing.
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
