@@ -29,10 +29,25 @@ live, but these views and the Genie Space's table list are saved configuration, 
 import argparse
 import json
 import os
+import re
 from uuid import uuid4
 
 from databricks.sdk import WorkspaceClient
 from genie_space_builder import GenieSpaceBuilder
+
+# Same identifier check as create_scoped_views.py -- catalogs/metadata location flow
+# into f-string-built SQL below (sql_snippets_for_views, example_sql_for_views,
+# benchmarks_for_views) that gets stored in the Genie Space and later executed against
+# the warehouse when a matching question is asked, so an unvalidated value here is a
+# real SQL-injection surface, not just a cosmetic concern.
+_IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9_]+$")
+
+
+def _validate_identifiers(values, kind):
+    bad = [v for v in values if not _IDENTIFIER_RE.match(v)]
+    if bad:
+        raise ValueError(f"Invalid {kind} name(s): {bad}")
+    return values
 
 # The 3 denormalized views curated into the space -- deliberately narrow per Databricks
 # guidance that Genie Spaces perform best when small/focused. The 5 "scoped_*" raw
@@ -406,6 +421,11 @@ def resolve_metadata_location(arg_value: str, catalogs: list) -> str:
 
 
 def build_serialized_space(catalogs: list, loc: str, warehouse_id: str) -> GenieSpaceBuilder:
+    # Validated here (not just in main()) so both entry points -- this script's CLI and
+    # notebooks/install.py, which calls build_serialized_space() directly -- are covered.
+    _validate_identifiers(catalogs, "catalog")
+    _validate_identifiers(loc.split(".", 1), "metadata catalog/schema")
+
     catalog_list = ", ".join(catalogs) if catalogs else "ALL catalogs visible to this deployment"
     builder = GenieSpaceBuilder(
         title=f"ERD Schema Assistant ({catalog_list})",

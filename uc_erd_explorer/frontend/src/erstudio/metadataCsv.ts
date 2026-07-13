@@ -14,8 +14,14 @@ const HEADER = [
   'source_system',
 ]
 
+// Column comments/tags come from Unity Catalog metadata -- anyone with COMMENT
+// privilege on a table can set them -- and this file is explicitly an Excel-targeted
+// export (see the docstring below). A field starting with =/+/-/@ is interpreted by
+// Excel/Sheets as a formula, so a comment like `=cmd|'/c calc'!A1` would execute on open.
+// Prefixing a leading apostrophe forces it to render as literal text instead.
 function csvEscape(value: string): string {
-  return /[",\n]/.test(value) ? `"${value.replace(/"/g, '""')}"` : value
+  const guarded = /^[=+\-@]/.test(value) ? `'${value}` : value
+  return /[",\n]/.test(guarded) ? `"${guarded.replace(/"/g, '""')}"` : guarded
 }
 
 /**

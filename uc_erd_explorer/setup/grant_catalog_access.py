@@ -26,8 +26,21 @@ Usage:
       --app-name erd-explorer-dev --catalogs megacorp --metadata-location megacorp.erd_meta
 """
 import argparse
+import re
 
 from databricks.sdk import WorkspaceClient
+
+# Same identifier check as create_scoped_views.py/create_genie_space.py -- catalogs and
+# the metadata catalog/schema flow straight into f-string GRANT statements below, so an
+# unvalidated value here is a real SQL-injection surface, not just a cosmetic concern.
+_IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9_]+$")
+
+
+def _validate_identifiers(values, kind):
+    bad = [v for v in values if not _IDENTIFIER_RE.match(v)]
+    if bad:
+        raise ValueError(f"Invalid {kind} name(s): {bad}")
+    return values
 
 
 def _run_grant(w: WorkspaceClient, warehouse_id: str, statement: str) -> None:
@@ -67,6 +80,9 @@ def grant_catalog_access(
     metadata-location grant is NOT skipped in that case, though: Genie's scoped views
     live at a specific (metadata_catalog, metadata_schema) regardless of whether the
     main graph is scoped or unscoped, and always need their own grant."""
+    _validate_identifiers(catalogs, "catalog")
+    _validate_identifiers([metadata_catalog, metadata_schema], "metadata catalog/schema")
+
     if catalogs:
         for cat in catalogs:
             _run_grant(w, warehouse_id, f"GRANT USE CATALOG ON CATALOG {cat} TO `{sp_client_id}`")

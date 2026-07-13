@@ -40,7 +40,7 @@ app.include_router(graph.router, prefix="/api")
 app.include_router(genie.router, prefix="/api")
 
 # --- serve the built React frontend (frontend/dist) ---
-frontend_dir = os.path.join(os.path.dirname(__file__), "frontend", "dist")
+frontend_dir = os.path.realpath(os.path.join(os.path.dirname(__file__), "frontend", "dist"))
 assets_dir = os.path.join(frontend_dir, "assets")
 if os.path.exists(assets_dir):
     app.mount("/assets", StaticFiles(directory=assets_dir), name="assets")
@@ -48,10 +48,15 @@ if os.path.exists(assets_dir):
 
 @app.get("/{full_path:path}")
 async def serve_spa(full_path: str):
-    """Serve the React SPA (with client-side routing fallback)."""
+    """Serve the React SPA (with client-side routing fallback).
+
+    full_path is FastAPI's raw catch-all -- it is NOT traversal-sanitized, so a request
+    like /../../server/config.py must be rejected here rather than trusted to resolve
+    safely under frontend_dir.
+    """
     if full_path:
-        file_path = os.path.join(frontend_dir, full_path)
-        if os.path.isfile(file_path):
+        file_path = os.path.realpath(os.path.join(frontend_dir, full_path))
+        if file_path.startswith(frontend_dir + os.sep) and os.path.isfile(file_path):
             return FileResponse(file_path)
     index_path = os.path.join(frontend_dir, "index.html")
     if os.path.exists(index_path):

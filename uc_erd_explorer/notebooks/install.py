@@ -32,7 +32,7 @@
 # COMMAND ----------
 
 dbutils.widgets.text("repo_root", "", "Workspace path to the uc_erd_explorer FOLDER (required). If you added the demo-assets repo via Git Folders, this is one level IN from that checkout -- e.g. /Workspace/Users/you@company.com/demo-assets/uc_erd_explorer, not /Workspace/Users/you@company.com/demo-assets. Right-click the uc_erd_explorer folder in the workspace browser and choose \"Copy path\" if unsure.")
-dbutils.widgets.text("app_name", "erd-explorer", "Databricks App name")
+dbutils.widgets.text("app_name", "erd-explorer", "Databricks App name (lowercase letters, numbers, and hyphens only; must be unique in this workspace)")
 dbutils.widgets.text("warehouse_id", "", "SQL warehouse id (required)")
 dbutils.widgets.text("erd_catalogs", "megacorp", "Catalogs to visualize (comma-separated; leave BLANK for unscoped -- every catalog visible to this deployment, including Genie)")
 dbutils.widgets.text("erd_metadata_location", "", "Genie metadata views location \"catalog.schema\" (blank = <first erd_catalogs entry>.erd_meta; REQUIRED if erd_catalogs is blank)")
@@ -49,6 +49,8 @@ dbutils.widgets.dropdown("add_demo_metadata", "no", ["yes", "no"], "Also add ill
 
 # COMMAND ----------
 
+import re
+
 repo_root_widget = dbutils.widgets.get("repo_root").strip()
 app_name = dbutils.widgets.get("app_name").strip()
 warehouse_id = dbutils.widgets.get("warehouse_id").strip()
@@ -60,6 +62,12 @@ add_demo_metadata = dbutils.widgets.get("add_demo_metadata") == "yes"
 
 assert repo_root_widget, "repo_root widget is required -- the Workspace path to the uc_erd_explorer folder (one level in from the demo-assets git checkout)"
 assert app_name, "app_name widget is required"
+# Validated before it's ever used to build a filesystem path (see the deploy-folder
+# staging cell below, which shutil.rmtree()s a path built from this value) -- a stray
+# "../" typo here must fail loudly now, not turn into a surprise recursive delete later.
+# Also matches the Apps platform's own naming rule (lowercase letters, numbers, hyphens;
+# unique per workspace), so an invalid app_name fails here instead of later at the Apps API.
+assert re.match(r"^[a-z0-9-]+$", app_name), f"app_name must contain only lowercase letters, numbers, and hyphens, got: {app_name!r}"
 assert warehouse_id, "warehouse_id widget is required -- pick any SQL warehouse id from your workspace"
 # erd_catalogs is intentionally NOT required -- leaving it blank is a deliberate "unscoped"
 # mode (every catalog visible to this deployment's credentials), matching server/config.py.

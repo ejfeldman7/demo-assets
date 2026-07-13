@@ -78,12 +78,19 @@ function ErdCanvas() {
   // Load the catalog/schema tree whenever the Prod/Test environment changes, to
   // populate the picker with that environment's actual (possibly _ts-suffixed) catalogs.
   useEffect(() => {
+    let cancelled = false
     fetchSchemaTree(env)
       .then((t) => {
+        if (cancelled) return
         setTree(t.catalogs)
         setTreeUnscoped(t.unscoped)
       })
-      .catch((e) => setError((e as Error).message))
+      .catch((e) => {
+        if (!cancelled) setError((e as Error).message)
+      })
+    return () => {
+      cancelled = true
+    }
   }, [env])
 
   // Load the deployment's workspace name + Prod/Test toggle availability once.

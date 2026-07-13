@@ -12,11 +12,12 @@ see setup/create_scoped_views.py + setup/create_genie_space.py for the actual da
 model / access boundary. This proxy is just plumbing; it has no bearing on Genie's scope.
 """
 import asyncio
+import re
 import time
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 from ..config import get_genie_space_id, get_workspace_client
 
@@ -25,10 +26,22 @@ router = APIRouter(prefix="/genie", tags=["genie"])
 _POLL_INTERVAL_SECONDS = 2
 _POLL_TIMEOUT_SECONDS = 60
 
+# Genie always issues UUID-shaped conversation ids -- enforcing that shape here closes
+# off a client from injecting extra path segments into the f-string-built REST path
+# below, which is called with this app's own service-principal credentials.
+_UUID_RE = re.compile(r"^[0-9a-fA-F-]{1,64}$")
+
 
 class AskRequest(BaseModel):
     message: str
     conversation_id: Optional[str] = None
+
+    @field_validator("conversation_id")
+    @classmethod
+    def _validate_conversation_id(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None and not _UUID_RE.match(v):
+            raise ValueError("conversation_id must be a UUID-shaped identifier")
+        return v
 
 
 def _extract_answer(message: dict) -> str:
