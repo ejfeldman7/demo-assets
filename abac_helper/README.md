@@ -187,6 +187,32 @@ Permission Explorer additionally requires the app/job service principal to be a
 Without workspace-admin scope the snapshot is silently partial — the same
 completeness gap the earlier live-API design had.
 
+Wiring the deployed app's SP to Lakebase (one-time):
+1. Attach the `database` resource to the app so the SP gets a mapped Postgres
+   credential on the instance:
+   `databricks apps update abac-helper --json '{"name":"abac-helper","resources":[{"name":"lakebase","database":{"instance_name":"abac-helper","database_name":"databricks_postgres","permission":"CAN_CONNECT_AND_CREATE"}}]}'`
+   (also declared in `app.yaml`; the `apps update` form is the reliable path).
+2. Register the SP as a Databricks-federated instance role. **Do NOT** create it with a
+   raw `CREATE ROLE` — a plain Postgres role is not federated, so the SP's OAuth token
+   fails with `password authentication failed`. Use the SDK so Lakebase maps the identity:
+   ```python
+   from databricks.sdk import WorkspaceClient
+   from databricks.sdk.service.database import (
+       DatabaseInstanceRole, DatabaseInstanceRoleIdentityType)
+   w = WorkspaceClient()
+   w.database.create_database_instance_role(
+       instance_name="abac-helper",
+       database_instance_role=DatabaseInstanceRole(
+           name="<sp-client-id>",
+           identity_type=DatabaseInstanceRoleIdentityType.SERVICE_PRINCIPAL))
+   ```
+3. Grant that role read on the snapshot schema (run as the instance owner):
+   ```sql
+   GRANT USAGE ON SCHEMA abac TO "<sp-client-id>";
+   GRANT SELECT ON ALL TABLES IN SCHEMA abac TO "<sp-client-id>";
+   ALTER DEFAULT PRIVILEGES IN SCHEMA abac GRANT SELECT ON TABLES TO "<sp-client-id>";
+   ```
+
 Deploying with Databricks Asset Bundles
 ---------------------------------------
 From the repo root:
