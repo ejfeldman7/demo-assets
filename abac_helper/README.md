@@ -28,7 +28,10 @@ App Pages
 - RLS & ABAC Tools
   - Create access-filter UDFs
   - Create tag-based row filter policies
-  - Propagate tag values to columns based on parent tags
+  - Propagate tag values to columns based on parent tags — a manual, container-driven
+    bulk apply (stamp a column tag across every table carrying a matching parent tag).
+    This is distinct from Databricks' native **Tag Propagation** (lineage-based,
+    automatic; see "Related: native Tag Propagation" below).
 - Permission Explorer
   - Search any workspace user and see their full effective permissions across
     Unity Catalog (catalog/schema/table/volume/function/connection/etc.), jobs,
@@ -61,6 +64,28 @@ Audit & Reports — change history, access matrix, and tag coverage:
 RLS & ABAC Tools — create row-filter functions and tag-based policies:
 
 ![RLS & ABAC Tools](images/rls-abac-tools.png)
+
+Related: native Tag Propagation
+-------------------------------
+Databricks has a native **Tag Propagation** feature (Private Preview) that
+automatically applies governed tags from source tables/columns to *derived*
+objects when it detects supported lineage operations (CTAS, CLONE, CREATE VIEW,
+INSERT INTO … SELECT, MERGE) on serverless compute. That is lineage-based and
+horizontal (source → derived object), which is different from this app's tag
+propagation — a manual, container-driven bulk apply that stamps a column tag
+across every table carrying a matching parent tag, and works today on classic
+compute, custom tags, and existing (backfill) tables.
+
+The two are complementary: use the native feature to keep tags flowing forward
+through pipelines once it is enabled; use this app for backfilling existing
+objects and for cases outside the preview's current scope (classic compute,
+volumes, custom tags, synchronous application).
+
+Reference (Databricks-internal, access required): [Tag Propagation — Private
+Preview Documentation](https://docs.google.com/document/d/1881gJZTSoA-fYzm15sxyJIk-AX7DXGdAAN96H47y5r4/edit).
+Note the preview limitations (serverless-only, table securable only, governed
+tags only, asynchronous) — check the doc for the current GA status before
+relying on it.
 
 Permission Explorer architecture
 ---------------------------------
