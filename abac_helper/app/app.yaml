@@ -5,28 +5,42 @@ command: [
 ]
 env:
   - name: "DATABRICKS_HTTP_PATH"
-    value: "/sql/1.0/warehouses/<ADD WAREHOUSE ID>"
+    value: "/sql/1.0/warehouses/6a09f4ec67bb14b5"
   - name: "DATABRICKS_WAREHOUSE_ID"
-    value: "<ADD WAREHOUSE ID>"
+    value: "6a09f4ec67bb14b5"
   - name: "DATABRICKS_SERVER_HOSTNAME"
-    value: "<WORKSPACE URL>.cloud.databricks.com"
+    value: "fe-vm-ef-demo-workspace.cloud.databricks.com"
   - name: "CATALOG_NAME"
-    value: "<CATALOG>"
+    value: "demos"
   - name: "SCHEMA_NAME"
-    value: "<SCHEMA>"
+    value: "access_control"
   - name: "ACCESS_TABLE"
-    value: "<ACCESS TABLE NAME>"
+    value: "group_customer_access"
   - name: "AUDIT_TABLE"
-    value: "<AUDIT TABLE NAME>"
+    value: "access_audit_log"
   - name: "ADMIN_GROUP"
-    value: "<ADMIN GROUP>"
+    value: "access_admin"
   - name: "APP_TITLE"
     value: "Unity Catalog Access Management"
   - name: "PAGE_ICON"
     value: "UC"
+  # --- Permission Explorer snapshot (Lakebase) ---
+  - name: "LAKEBASE_INSTANCE"
+    value: "abac-helper"
+  - name: "LAKEBASE_HOST"
+    value: "ep-spring-surf-d1yujy8r.database.us-west-2.cloud.databricks.com"
+  - name: "LAKEBASE_DB"
+    value: "databricks_postgres"
+  - name: "LAKEBASE_SCHEMA"
+    value: "abac"
 
 resources:
   - name: sql_warehouse
     sql_warehouse:
-      id: <WAREHOUSE ID>
+      id: 6a09f4ec67bb14b5
       permission: CAN_USE
+  # The app SP reads the permission snapshot from this dedicated Lakebase instance.
+  - name: lakebase
+    database:
+      instance_name: abac-helper
+      permission: CAN_CONNECT_AND_CREATE

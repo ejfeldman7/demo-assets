@@ -7,12 +7,47 @@ resources:
       name: abac-helper
       description: "Unity Catalog access management app"
       source_code_path: app
-  sql_warehouses:
-    access_warehouse:
-      id: <ADD SQL WAREHOUSE ID HERE>
+      # Declared here so `bundle deploy` does not strip the runtime resource bindings.
+      # (app.yaml also declares these for local dev; the bundle definition is authoritative
+      # for deployed state.)
+      resources:
+        - name: sql_warehouse
+          sql_warehouse:
+            id: 6a09f4ec67bb14b5
+            permission: CAN_USE
+        - name: lakebase
+          database:
+            instance_name: abac-helper
+            database_name: databricks_postgres
+            permission: CAN_CONNECT_AND_CREATE
+
+  # Snapshot job — defined but UNSCHEDULED (pause_status PAUSED). The Permission
+  # Explorer snapshot is refreshed on demand (run the task manually, or locally via
+  # `python -m jobs.build_permission_snapshot`). Unpause the schedule below only if
+  # a recurring refresh is later wanted for this standalone app.
+  jobs:
+    permission_snapshot:
+      name: abac-permission-snapshot
+      description: "On-demand rebuild of the Permission Explorer snapshot in Lakebase"
+      tasks:
+        - task_key: build_snapshot
+          spark_python_task:
+            python_file: app/jobs/build_permission_snapshot.py
+          environment_key: snapshot_env
+      environments:
+        - environment_key: snapshot_env
+          spec:
+            client: "3"
+            dependencies:
+              - "psycopg[binary]"
+              - "databricks-sdk>=0.49.0"
+      schedule:
+        quartz_cron_expression: "0 0 8 * * ?"
+        timezone_id: UTC
+        pause_status: PAUSED
 
 targets:
   dev:
     mode: development
     workspace:
-      host: https://<ADD HOST URL HERE>.cloud.databricks.com
+      host: https://fe-vm-ef-demo-workspace.cloud.databricks.com

@@ -6,13 +6,13 @@ from typing import Optional
 from urllib.parse import urlparse
 
 
-DEFAULT_WORKSPACE_HOST = "<WORKSPACE URL>.cloud.databricks.com"
-DEFAULT_WAREHOUSE_ID = "<WAREHOUSE ID>"
-DEFAULT_CATALOG = "<CATALOG>"
-DEFAULT_SCHEMA = "<SCHEMA>"
-DEFAULT_ACCESS_TABLE = "<update>"
-DEFAULT_AUDIT_TABLE = "<update>"
-DEFAULT_ADMIN_GROUP = "<update>"
+DEFAULT_WORKSPACE_HOST = "fe-vm-ef-demo-workspace.cloud.databricks.com"
+DEFAULT_WAREHOUSE_ID = "6a09f4ec67bb14b5"
+DEFAULT_CATALOG = "demos"
+DEFAULT_SCHEMA = "access_control"
+DEFAULT_ACCESS_TABLE = "group_customer_access"
+DEFAULT_AUDIT_TABLE = "access_audit_log"
+DEFAULT_ADMIN_GROUP = "access_admin"
 DEFAULT_APP_TITLE = "Unity Catalog Access Management"
 DEFAULT_PAGE_ICON = "UC"
 
