@@ -88,7 +88,7 @@ def main() -> int:
     started = _now()
     log.info("Snapshot %s starting (warehouse=%s)", run_id, WAREHOUSE_ID)
 
-    with lakebase.connect(w) as conn:
+    with lakebase.connect(w, create_schema=True) as conn:
         lakebase.ensure_schema(conn)
         lakebase.record_run(conn, run_id, started, None, "running", 0, 0, 0)
 

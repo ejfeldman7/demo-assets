@@ -56,15 +56,22 @@ def _resolve_user(w: WorkspaceClient) -> str:
 
 
 @contextmanager
-def connect(w: WorkspaceClient):
-    """Yield a psycopg connection to Lakebase, search_path set to the abac schema."""
+def connect(w: WorkspaceClient, create_schema: bool = False):
+    """Yield a psycopg connection to Lakebase, search_path set to the abac schema.
+
+    create_schema=True is used only by the snapshot job (which owns the schema).
+    The app's read path leaves it False — the app SP has read-only grants and no
+    CREATE privilege, so issuing DDL would fail with "permission denied".
+    """
     conn = psycopg.connect(
         host=HOST, port=5432, dbname=DB,
         user=_resolve_user(w), password=_pg_password(w),
         sslmode="require", connect_timeout=30,
     )
     try:
-        conn.execute(f"CREATE SCHEMA IF NOT EXISTS {SCHEMA}")
+        if create_schema:
+            conn.execute(f"CREATE SCHEMA IF NOT EXISTS {SCHEMA}")
+            conn.commit()
         conn.execute(f"SET search_path TO {SCHEMA}")
         conn.commit()
         yield conn

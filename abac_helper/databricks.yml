@@ -7,6 +7,19 @@ resources:
       name: abac-helper
       description: "Unity Catalog access management app"
       source_code_path: app
+      # Declared here so `bundle deploy` does not strip the runtime resource bindings.
+      # (app.yaml also declares these for local dev; the bundle definition is authoritative
+      # for deployed state.)
+      resources:
+        - name: sql_warehouse
+          sql_warehouse:
+            id: 6a09f4ec67bb14b5
+            permission: CAN_USE
+        - name: lakebase
+          database:
+            instance_name: abac-helper
+            database_name: databricks_postgres
+            permission: CAN_CONNECT_AND_CREATE
 
   # Snapshot job — defined but UNSCHEDULED (pause_status PAUSED). The Permission
   # Explorer snapshot is refreshed on demand (run the task manually, or locally via

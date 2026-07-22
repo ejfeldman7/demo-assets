@@ -34,8 +34,33 @@ App Pages
     Unity Catalog (catalog/schema/table/volume/function/connection/etc.), jobs,
     pipelines, SQL warehouses, dashboards, apps, Genie spaces, clusters, and
     cluster policies — both Direct and Inherited (via full transitive group nesting)
-  - Backed by a nightly snapshot in Lakebase for sub-second, complete lookups
+  - Backed by an on-demand snapshot in Lakebase for sub-second, complete lookups
     (see "Permission Explorer architecture" below)
+
+Screenshots
+-----------
+Permission Explorer — search a user, see full effective permissions (Direct and
+Inherited) across every object type, with transitive group memberships and the
+snapshot freshness timestamp:
+
+![Permission Explorer](images/permission-explorer.png)
+
+Group Access Management — INCLUDE/EXCLUDE access rules with effective/expiration dates:
+
+![Group Access Management](images/group-access.png)
+
+Tag Management — browse catalogs/schemas/tables and apply/remove governed table
+and column tags:
+
+![Tag Management](images/tag-management.png)
+
+Audit & Reports — change history, access matrix, and tag coverage:
+
+![Audit & Reports](images/audit-reports.png)
+
+RLS & ABAC Tools — create row-filter functions and tag-based policies:
+
+![RLS & ABAC Tools](images/rls-abac-tools.png)
 
 Permission Explorer architecture
 ---------------------------------
