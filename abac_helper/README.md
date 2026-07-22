@@ -81,11 +81,10 @@ through pipelines once it is enabled; use this app for backfilling existing
 objects and for cases outside the preview's current scope (classic compute,
 volumes, custom tags, synchronous application).
 
-Reference (Databricks-internal, access required): [Tag Propagation — Private
-Preview Documentation](https://docs.google.com/document/d/1881gJZTSoA-fYzm15sxyJIk-AX7DXGdAAN96H47y5r4/edit).
-Note the preview limitations (serverless-only, table securable only, governed
-tags only, asynchronous) — check the doc for the current GA status before
-relying on it.
+Note the native feature's preview limitations (serverless-only, table securable
+only, governed tags only, asynchronous) and check its current GA status before
+relying on it — Databricks account teams can share the Private Preview
+documentation.
 
 Permission Explorer architecture
 ---------------------------------
