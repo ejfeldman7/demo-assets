@@ -29,6 +29,52 @@ App Pages
   - Create access-filter UDFs
   - Create tag-based row filter policies
   - Propagate tag values to columns based on parent tags
+- Permission Explorer
+  - Search any workspace user and see their full effective permissions across
+    Unity Catalog (catalog/schema/table/volume/function/connection/etc.), jobs,
+    pipelines, SQL warehouses, dashboards, apps, Genie spaces, clusters, and
+    cluster policies — both Direct and Inherited (via full transitive group nesting)
+  - Backed by a nightly snapshot in Lakebase for sub-second, complete lookups
+    (see "Permission Explorer architecture" below)
+
+Permission Explorer architecture
+---------------------------------
+Earlier the Explorer resolved a user's permissions live: it called SCIM to list
+every group, then made one Permissions/UC-grants API call per object, parallelised
+only a few ways. That was slow (thousands of API calls per user click) and
+incomplete — UC grants were only enumerated to schema level (table/volume grants
+were hidden behind a manual drill-down), workspace objects were limited to those
+the app SP could `CAN_MANAGE`, and group nesting was resolved only one level deep.
+
+The current design pre-computes a denormalised snapshot in **Lakebase (Postgres)**
+and the Explorer reads it with a single indexed query:
+
+- **UC grants** come from `system.information_schema.*_privileges` in one bulk
+  SELECT per securable level — complete (all levels, no drill-down) and fast.
+- **Workspace-object ACLs** (jobs/pipelines/warehouses/dashboards/apps/genies/
+  clusters/policies) come from the Permissions REST API — no system table exposes
+  these, so they are collected in the background job, not at request time.
+- **Group membership** is resolved once, fully transitively (any nesting depth),
+  and flattened to `(principal -> all groups)` edges. This also resolves the
+  opaque group UUIDs that appear as `grantee` in the privilege tables.
+
+The snapshot is rebuilt by `app/jobs/build_permission_snapshot.py`, scheduled as a
+nightly Databricks job. Data is as fresh as the last successful run (shown in the
+Explorer header). Lakebase tables (schema `abac`):
+- `perm_object_acls` — flat ACL rows across every object type
+- `perm_identity_groups` — transitive (principal -> group) edges
+- `perm_group_uuid_map` — group UUID -> display name
+- `perm_snapshot_runs` — run bookkeeping / freshness badge
+
+Run the snapshot manually (local, against ef-temp-demo):
+
+```
+cd app
+DATABRICKS_CONFIG_PROFILE=ef-temp-demo \
+LAKEBASE_USER='you@databricks.com' \
+DATABRICKS_WAREHOUSE_ID=6a09f4ec67bb14b5 \
+python -m jobs.build_permission_snapshot
+```
 
 Configuration
 -------------
@@ -40,6 +86,13 @@ Runtime configuration is set via `app/app.yaml`:
 - `ACCESS_TABLE`
 - `AUDIT_TABLE`
 - `ADMIN_GROUP`
+
+Permission Explorer (Lakebase snapshot):
+- `LAKEBASE_INSTANCE` (default `account-intel-board`)
+- `LAKEBASE_HOST` — Postgres endpoint host for the instance
+- `LAKEBASE_DB` (default `databricks_postgres`)
+- `LAKEBASE_SCHEMA` (default `abac`)
+- `LAKEBASE_USER` — optional; defaults to the running identity's login
 
 Defaults are defined in `app/config/settings.py`.
 
@@ -108,6 +161,23 @@ The app runs as the app service principal. Ensure:
 If your workspace has stricter requirements, you may also need `OWNERSHIP`
 or `MANAGE` privileges on the target schema/tables to create policies and
 apply governed tags.
+
+Permission Explorer additionally requires the app/job service principal to be a
+**workspace admin** so it can:
+- read all users and groups via SCIM (list users, list groups with members),
+- read every object's ACL via the Permissions API (jobs, pipelines, warehouses,
+  dashboards, apps, Genie spaces, clusters, cluster policies),
+- `SELECT` on `system.information_schema.*_privileges`
+  (`catalog_privileges`, `schema_privileges`, `table_privileges`,
+  `volume_privileges`, `routine_privileges`, `connection_privileges`,
+  `external_location_privileges`, `storage_credential_privileges`,
+  `metastore_privileges`),
+- connect to the Lakebase instance and create the `abac` schema/tables
+  (`CAN_CONNECT_AND_CREATE` on the database resource; Postgres privileges on the
+  `abac` schema tables are self-created on first run).
+
+Without workspace-admin scope the snapshot is silently partial — the same
+completeness gap the earlier live-API design had.
 
 Deploying with Databricks Asset Bundles
 ---------------------------------------

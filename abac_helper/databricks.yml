@@ -7,12 +7,31 @@ resources:
       name: abac-helper
       description: "Unity Catalog access management app"
       source_code_path: app
-  sql_warehouses:
-    access_warehouse:
-      id: <ADD SQL WAREHOUSE ID HERE>
+
+  jobs:
+    permission_snapshot:
+      name: abac-permission-snapshot
+      description: "Nightly rebuild of the Permission Explorer snapshot in Lakebase"
+      tasks:
+        - task_key: build_snapshot
+          spark_python_task:
+            python_file: app/jobs/build_permission_snapshot.py
+          environment_key: snapshot_env
+      environments:
+        - environment_key: snapshot_env
+          spec:
+            client: "3"
+            dependencies:
+              - "psycopg[binary]"
+              - "databricks-sdk>=0.49.0"
+      schedule:
+        # 08:00 UTC nightly
+        quartz_cron_expression: "0 0 8 * * ?"
+        timezone_id: UTC
+        pause_status: UNPAUSED
 
 targets:
   dev:
     mode: development
     workspace:
-      host: https://<ADD HOST URL HERE>.cloud.databricks.com
+      host: https://fe-vm-ef-demo-workspace.cloud.databricks.com

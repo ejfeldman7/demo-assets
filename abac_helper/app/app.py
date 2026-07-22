@@ -59,6 +59,7 @@ def main() -> None:
         - Manage group access to customer data
         - Apply and remove governed tags
         - Review audit logs and compliance reporting
+        - Explore user permissions across all workspace objects
         """
     )
     _render_metrics()

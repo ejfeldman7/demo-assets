@@ -1,0 +1,283 @@
+# Databricks notebook source
+# MAGIC %md
+# MAGIC ## Widget Inputs
+# MAGIC The cell below will create a few input widgets at the top of the notebook. This will only really apply to the tag propogation steps later in the notebook.
+# MAGIC
+# MAGIC Provide your target_catalog and target_schema values. If dry_run is true, the intended columns to apply will print but no DDL statements will run. If false, then the tags will be applied as determined
+
+# COMMAND ----------
+
+dbutils.widgets.dropdown("DRY_RUN", "False", ["True", "False"], "Dry Run")
+DRY_RUN = dbutils.widgets.get("DRY_RUN") == "True"
+
+dbutils.widgets.text("TARGET_CATALOG", "demos", "Target Catalog")
+dbutils.widgets.text("TARGET_SCHEMA", "", "Target Schema")
+TARGET_CATALOG = dbutils.widgets.get("TARGET_CATALOG") or None
+TARGET_SCHEMA = dbutils.widgets.get("TARGET_SCHEMA") or None
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Create a lookup table
+# MAGIC The table below assigns allowed customers to groups
+
+# COMMAND ----------
+
+# MAGIC %sql
+# MAGIC CREATE TABLE IF NOT EXISTS demos.clean_harbors.group_customer_access (
+# MAGIC   group_name STRING,
+# MAGIC   customer_ids ARRAY<INT> COMMENT 'NULL or empty array means ALL customers',
+# MAGIC   access_type STRING COMMENT 'INCLUDE or EXCLUDE',
+# MAGIC   effective_date DATE,
+# MAGIC   expiration_date DATE,
+# MAGIC   notes STRING
+# MAGIC );
+# MAGIC
+# MAGIC -- Seed data
+# MAGIC INSERT INTO demos.clean_harbors.group_customer_access VALUES
+# MAGIC   ('Group_A', array(100, 101, 150), 'INCLUDE', current_date(), NULL, 'Marketing team'),
+# MAGIC   ('Group_B', array(102, 103, 199), 'INCLUDE', current_date(), NULL, 'Sales team'),
+# MAGIC   ('Group_C', NULL, 'INCLUDE', current_date(), NULL, 'Admin full access'),
+# MAGIC   ('Group_D', array(100, 101), 'EXCLUDE', current_date(), NULL, 'Access to all except these');
+# MAGIC
+
+# COMMAND ----------
+
+# MAGIC %sql
+# MAGIC select * from demos.clean_harbors.group_customer_access
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Goverened Tags
+# MAGIC Outside of this notebook, define a [governed tag](https://learn.microsoft.com/en-us/azure/databricks/admin/governed-tags/) from the Databricks Catalog UI. 
+# MAGIC
+# MAGIC ![image_1770328333022.png](./image_1770328333022.png "image_1770328333022.png")
+# MAGIC
+# MAGIC In this case the tag has a key of 'secure_contracts' and the allowed values are 'true' and 'false'
+# MAGIC
+# MAGIC ![image_1770328392057.png](./image_1770328392057.png "image_1770328392057.png")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Create a function and policy for Row-Level Security
+# MAGIC This function below checks customer_ids against the lookup table and the user's group membership.
+# MAGIC
+# MAGIC That function is then applied in a ABAC Policy as the ROW FILTER on any column which the tag key secure_contracts and value of true.
+# MAGIC
+# MAGIC **More on ABAC policies [found here](https://learn.microsoft.com/en-us/azure/databricks/data-governance/unity-catalog/abac/) with a step by step guide (similar to this notebook) [here](https://learn.microsoft.com/en-us/azure/databricks/data-governance/unity-catalog/abac/tutorial)**
+
+# COMMAND ----------
+
+# MAGIC %sql
+# MAGIC -- UDF for access
+# MAGIC CREATE OR REPLACE FUNCTION demos.clean_harbors.customer_access_filter(customer_id INT)
+# MAGIC RETURN 
+# MAGIC   EXISTS (
+# MAGIC     SELECT 1 
+# MAGIC     FROM demos.clean_harbors.group_customer_access gca
+# MAGIC     WHERE is_account_group_member(gca.group_name)
+# MAGIC       AND (gca.effective_date IS NULL OR gca.effective_date <= current_date())
+# MAGIC       AND (gca.expiration_date IS NULL OR gca.expiration_date > current_date())
+# MAGIC       AND (
+# MAGIC         (gca.customer_ids IS NULL) OR  -- Full access
+# MAGIC         (gca.access_type = 'INCLUDE' AND array_contains(gca.customer_ids, customer_id)) OR
+# MAGIC         (gca.access_type = 'EXCLUDE' AND NOT array_contains(gca.customer_ids, customer_id))
+# MAGIC       )
+# MAGIC   );
+# MAGIC
+# MAGIC -- Customer ABAC policy
+# MAGIC CREATE OR REPLACE POLICY customer_access_policy
+# MAGIC ON SCHEMA demos.clean_harbors
+# MAGIC COMMENT 'Apply customer_id row filtering to all tables with customer_id columns'
+# MAGIC ROW FILTER demos.clean_harbors.customer_access_filter
+# MAGIC TO `account users`
+# MAGIC FOR TABLES
+# MAGIC MATCH COLUMNS hasTagValue('secure_contracts', 'true') AS cust_col
+# MAGIC USING COLUMNS (cust_col);
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Propogate tags
+# MAGIC The cells below look for higher level spaces (catalogs, schemas) to see if any have been tagged with ('secure_contracts', 'true'). If they are, the mapping is used to apply the same tag to all instances of columns called customer_id
+
+# COMMAND ----------
+
+# DBTITLE 1,Cell 2
+# Define the column name -> tag mapping
+COLUMN_TAG_MAPPING = {
+    "customer_id": {
+        "tag_name": "secure_contracts",
+        "tag_value": "true",
+        "required_parent_tag": "true"  # Must match catalog/schema/table rls_type tag
+    },
+}
+
+# Step 1: Find all catalogs/schemas/tables with rls_type tags
+print("=== Finding Tagged Catalogs/Schemas/Tables ===\n")
+
+# Get catalog tags
+catalog_tags = spark.sql(f"""
+    SELECT 
+        catalog_name as object_name,
+        'catalog' as object_type,
+        tag_value as rls_types
+    FROM system.information_schema.catalog_tags
+    WHERE tag_name = 'secure_contracts'
+    {f"AND catalog_name = '{TARGET_CATALOG}'" if TARGET_CATALOG else ""}
+""")
+
+# Get schema tags
+schema_tags = spark.sql(f"""
+    SELECT 
+        CONCAT(catalog_name, '.', schema_name) as object_name,
+        'schema' as object_type,
+        catalog_name,
+        schema_name,
+        tag_value as rls_types
+    FROM system.information_schema.schema_tags
+    WHERE tag_name = 'secure_contracts'
+    {f"AND catalog_name = '{TARGET_CATALOG}'" if TARGET_CATALOG else ""}
+""")
+
+# Get table tags
+table_tags = spark.sql(f"""
+    SELECT 
+        CONCAT(catalog_name, '.', schema_name, '.', table_name) as object_name,
+        'table' as object_type,
+        catalog_name,
+        schema_name,
+        table_name,
+        tag_value as rls_types
+    FROM system.information_schema.table_tags
+    WHERE tag_name = 'secure_contracts'
+    {f"AND catalog_name = '{TARGET_CATALOG}'" if TARGET_CATALOG else ""}
+""")
+
+print("Catalogs with rls_type tag:")
+catalog_tags.show(truncate=False)
+print("\nSchemas with rls_type tag:")
+schema_tags.show(truncate=False)
+print("\nTables with rls_type tag:")
+table_tags.show(truncate=False)
+
+# COMMAND ----------
+
+# Step 2: Build a set of tables to process
+# Tables inherit tags from catalog -> schema -> table
+tables_to_process = {}
+
+# From catalog tags - all tables in that catalog
+for row in catalog_tags.collect():
+    catalog = row.object_name
+    rls_types = row.rls_types.split(',')  # Handle comma-separated values
+    
+    tables = spark.sql(f"""
+        SELECT DISTINCT table_catalog, table_schema, table_name
+        FROM system.information_schema.columns
+        WHERE table_catalog = '{catalog}'
+    """)
+    
+    for table_row in tables.collect():
+        table_key = f"{table_row.table_catalog}.{table_row.table_schema}.{table_row.table_name}"
+        if table_key not in tables_to_process:
+            tables_to_process[table_key] = set()
+        tables_to_process[table_key].update([t.strip() for t in rls_types])
+
+# From schema tags
+for row in schema_tags.collect():
+    catalog = row.catalog_name
+    schema = row.schema_name
+    rls_types = row.rls_types.split(',')
+    
+    tables = spark.sql(f"""
+        SELECT DISTINCT table_catalog, table_schema, table_name
+        FROM system.information_schema.columns
+        WHERE table_catalog = '{catalog}'
+          AND table_schema = '{schema}'
+    """)
+    
+    for table_row in tables.collect():
+        table_key = f"{table_row.table_catalog}.{table_row.table_schema}.{table_row.table_name}"
+        if table_key not in tables_to_process:
+            tables_to_process[table_key] = set()
+        tables_to_process[table_key].update([t.strip() for t in rls_types])
+
+# From table tags
+for row in table_tags.collect():
+    table_key = row.object_name
+    rls_types = row.rls_types.split(',')
+    if table_key not in tables_to_process:
+        tables_to_process[table_key] = set()
+    tables_to_process[table_key].update([t.strip() for t in rls_types])
+
+print(f"\n=== Found {len(tables_to_process)} tables to process ===\n")
+
+# COMMAND ----------
+
+# Step 3: For each table, find matching columns and tag them
+actions_taken = []
+
+for table_fqn, rls_types in tables_to_process.items():
+    parts = table_fqn.split('.')
+    catalog = parts[0]
+    schema = parts[1]
+    table = parts[2]
+    
+    print(f"\nProcessing {table_fqn} (rls_types: {', '.join(rls_types)})")
+    
+    # Get all columns in this table
+    columns = spark.sql(f"""
+        SELECT column_name
+        FROM system.information_schema.columns
+        WHERE table_catalog = '{catalog}'
+          AND table_schema = '{schema}'
+          AND table_name = '{table}'
+    """)
+    
+    for col_row in columns.collect():
+        col_name = col_row.column_name
+        col_name_lower = col_name.lower()
+        
+        # Check if this column name matches any of our mappings
+        if col_name_lower in COLUMN_TAG_MAPPING:
+            config = COLUMN_TAG_MAPPING[col_name_lower]
+            required_tag = config["required_parent_tag"]
+            
+            # Check if the table's rls_types include the required tag
+            if required_tag in rls_types:
+                tag_name = config["tag_name"]
+                tag_value = config["tag_value"]
+                
+                tag_sql = f"""
+                    ALTER TABLE {table_fqn}
+                    ALTER COLUMN {col_name}
+                    SET TAGS ('{tag_name}' = '{tag_value}')
+                """
+                
+                if DRY_RUN:
+                    print(f"  [DRY RUN] Would tag {col_name} with {tag_name}={tag_value}")
+                    actions_taken.append(tag_sql)
+                else:
+                    try:
+                        spark.sql(tag_sql)
+                        print(f"  ✓ Tagged {col_name} with {tag_name}={tag_value}")
+                        actions_taken.append(tag_sql)
+                    except Exception as e:
+                        print(f"  ✗ Error tagging {col_name}: {str(e)}")
+            else:
+                print(f"  ⊘ Skipping {col_name} - table rls_types {rls_types} doesn't include required '{required_tag}'")
+
+print(f"\n=== Summary ===")
+print(f"{'[DRY RUN] ' if DRY_RUN else ''}Total actions: {len(actions_taken)}")
+
+if DRY_RUN:
+    print("\nSet DRY_RUN = False to apply these changes")
+    print("\nSQL statements that would be executed:")
+    for sql in actions_taken:
+        print(f"  {sql}")
+
+# COMMAND ----------
+
