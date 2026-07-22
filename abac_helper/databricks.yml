@@ -8,10 +8,14 @@ resources:
       description: "Unity Catalog access management app"
       source_code_path: app
 
+  # Snapshot job — defined but UNSCHEDULED (pause_status PAUSED). The Permission
+  # Explorer snapshot is refreshed on demand (run the task manually, or locally via
+  # `python -m jobs.build_permission_snapshot`). Unpause the schedule below only if
+  # a recurring refresh is later wanted for this standalone app.
   jobs:
     permission_snapshot:
       name: abac-permission-snapshot
-      description: "Nightly rebuild of the Permission Explorer snapshot in Lakebase"
+      description: "On-demand rebuild of the Permission Explorer snapshot in Lakebase"
       tasks:
         - task_key: build_snapshot
           spark_python_task:
@@ -25,10 +29,9 @@ resources:
               - "psycopg[binary]"
               - "databricks-sdk>=0.49.0"
       schedule:
-        # 08:00 UTC nightly
         quartz_cron_expression: "0 0 8 * * ?"
         timezone_id: UTC
-        pause_status: UNPAUSED
+        pause_status: PAUSED
 
 targets:
   dev:

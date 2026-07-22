@@ -58,9 +58,15 @@ and the Explorer reads it with a single indexed query:
   and flattened to `(principal -> all groups)` edges. This also resolves the
   opaque group UUIDs that appear as `grantee` in the privilege tables.
 
-The snapshot is rebuilt by `app/jobs/build_permission_snapshot.py`, scheduled as a
-nightly Databricks job. Data is as fresh as the last successful run (shown in the
-Explorer header). Lakebase tables (schema `abac`):
+The snapshot is rebuilt by `app/jobs/build_permission_snapshot.py`. It is refreshed
+**on demand** — run the bundle job's `build_snapshot` task, or run it locally (see
+below). A Databricks job is defined in `databricks.yml` but its schedule is
+**PAUSED**; unpause it only if a recurring refresh is wanted. Data is as fresh as
+the last successful run (shown in the Explorer header).
+
+This app uses its **own dedicated Lakebase instance** (`abac-helper`) — it is a
+standalone project and shares no infrastructure with any other app. Lakebase tables
+(schema `abac`):
 - `perm_object_acls` — flat ACL rows across every object type
 - `perm_identity_groups` — transitive (principal -> group) edges
 - `perm_group_uuid_map` — group UUID -> display name
@@ -71,6 +77,8 @@ Run the snapshot manually (local, against ef-temp-demo):
 ```
 cd app
 DATABRICKS_CONFIG_PROFILE=ef-temp-demo \
+LAKEBASE_INSTANCE=abac-helper \
+LAKEBASE_HOST=ep-spring-surf-d1yujy8r.database.us-west-2.cloud.databricks.com \
 LAKEBASE_USER='you@databricks.com' \
 DATABRICKS_WAREHOUSE_ID=6a09f4ec67bb14b5 \
 python -m jobs.build_permission_snapshot

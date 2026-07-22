@@ -26,9 +26,9 @@ env:
     value: "UC"
   # --- Permission Explorer snapshot (Lakebase) ---
   - name: "LAKEBASE_INSTANCE"
-    value: "account-intel-board"
+    value: "abac-helper"
   - name: "LAKEBASE_HOST"
-    value: "ep-solitary-paper-d1ell5ot.database.us-west-2.cloud.databricks.com"
+    value: "ep-spring-surf-d1yujy8r.database.us-west-2.cloud.databricks.com"
   - name: "LAKEBASE_DB"
     value: "databricks_postgres"
   - name: "LAKEBASE_SCHEMA"
@@ -39,8 +39,8 @@ resources:
     sql_warehouse:
       id: 6a09f4ec67bb14b5
       permission: CAN_USE
-  # The app SP reads the permission snapshot from this Lakebase instance.
+  # The app SP reads the permission snapshot from this dedicated Lakebase instance.
   - name: lakebase
     database:
-      instance_name: account-intel-board
+      instance_name: abac-helper
       permission: CAN_CONNECT_AND_CREATE

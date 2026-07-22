@@ -29,8 +29,8 @@ from databricks.sdk import WorkspaceClient
 
 log = logging.getLogger(__name__)
 
-INSTANCE = os.environ.get("LAKEBASE_INSTANCE", "account-intel-board")
-HOST = os.environ.get("LAKEBASE_HOST", "ep-solitary-paper-d1ell5ot.database.us-west-2.cloud.databricks.com")
+INSTANCE = os.environ.get("LAKEBASE_INSTANCE", "abac-helper")
+HOST = os.environ.get("LAKEBASE_HOST", "ep-spring-surf-d1yujy8r.database.us-west-2.cloud.databricks.com")
 DB = os.environ.get("LAKEBASE_DB", "databricks_postgres")
 USER = os.environ.get("LAKEBASE_USER", "")   # resolved at runtime if empty
 SCHEMA = os.environ.get("LAKEBASE_SCHEMA", "abac")
