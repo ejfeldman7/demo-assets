@@ -12,6 +12,8 @@ Unity Catalog row-level security normally keys off the identity running the quer
 
 OAuth Custom Identity Claims fixes this. A single SP mints a short-lived token per request, each carrying an opaque `custom_claim` value. The claim rides through to the SQL warehouse and is readable in SQL through `current_oauth_custom_identity_claim()`, which a view or row filter can use like a bind parameter.
 
+This applies only to users who have no Databricks identity. If your users are real Databricks principals, use standard row-level security or ABAC instead and skip this guide. See [scope this to external users only](#scope-this-to-external-users-only).
+
 ## How it works
 
 ```
@@ -48,7 +50,7 @@ You have two audiences for the same data. Internal users, notebooks, jobs, and p
 
 Three rules make this a security boundary instead of a decoration. All three are required:
 
-1. **Leave the base table unfiltered.** Do not attach a claim-based row filter to it. A row filter there locks out every caller that has no claim, which includes you, the table owner, every account admin, and every batch job. See [no admin bypass exists](#no-admin-bypass-exists).
+1. **Keep claims off the base table.** Do not attach a *claim-based* row filter to it. A claim-based filter there locks out every caller that has no claim, which includes you, the table owner, every account admin, and every batch job. See [no admin bypass exists](#no-admin-bypass-exists). Ordinary RLS or ABAC on the base table is fine and expected, since those evaluate against a real Databricks identity; "unfiltered" throughout this guide means free of claim-based filters, not ungoverned.
 2. **The view owner must not be the SP that Genie runs as.** Unity Catalog resolves a view's underlying tables using the *view owner's* privileges. If the SP owns the view, its own privileges reach the base table and the view restricts nothing. Own the views with a separate publisher identity: your own user for a proof of concept, a dedicated publisher SP in production.
 3. **Grant the runtime SP `SELECT` on the view only.** Watch for inherited grants. A schema-level `SELECT` silently reaches every table in the schema, which is the most common way this boundary fails in practice.
 
@@ -68,6 +70,34 @@ GRANT SELECT ON VIEW main.gold.orders_tenant_scoped TO `<runtime-sp-client-id>`;
 Two things make this work, both confirmed by testing. The claim is evaluated against the *querying* session's token, not the view owner's identity, so a view owned by a claim-less publisher still filters correctly by the runtime SP's claim. And once the runtime SP has no grant on the base table, Genie cannot read that table even if someone points the space at it by mistake: Unity Catalog refuses the query. The boundary does not depend on the Genie space staying configured correctly.
 
 The tradeoff compared to a row filter on the base table: enforcement now rests on grants rather than being unconditional at the table. A row filter cannot be bypassed by querying somewhere else; this pattern can, if you grant the runtime SP more than the view. For a multi-tenant Genie deployment that trade is almost always worth it, because the alternative makes the table unusable for everyone else.
+
+## Scope this to external users only
+
+Custom Identity Claims exists to solve one problem: end users who are not Databricks principals and never will be. Do not reach for it anywhere else.
+
+Internal users already have real Databricks identities, so they get standard Unity Catalog row-level security keyed on `current_user()` and `is_account_group_member()`, or ABAC policies. That machinery is GA, works in every surface including notebooks and the SQL editor, supports admin bypass, and needs none of the token minting or bootstrap DDL described here. Claims add cost and constraints that buy you nothing when the caller has an identity UC can see.
+
+So the assets in this guide are purpose-built for external traffic, and they sit alongside your normal governance rather than replacing it:
+
+| Audience | Identity | Enforcement | Genie surface |
+|---|---|---|---|
+| Internal analysts | Real Databricks user | Standard RLS or ABAC on the base table | Genie UI, notebooks, dashboards |
+| External end users | One shared SP, claim per request | Claim-enforced view | Conversation API, called by your backend |
+
+### That means two Genie spaces, not one
+
+A single space cannot serve both, because the Genie UI has no way to carry a claim. Browser sessions authenticate as your own user, so any space pointed at a claim-enforced view fails in the UI with `22KD2`, including its sample-data preview. That is by design and not fixable from your side.
+
+Run two spaces over the same underlying table:
+
+- **An internal space** over the unfiltered base table. Works normally in the UI. Governed by whatever RLS or ABAC you already apply to that table.
+- **An external space** over the claim-enforced view. Reachable only through the Conversation API with a claim-bearing token.
+
+Both were confirmed working side by side in testing. The internal space answered a claim-less UI-style call over the base table, and the external space isolated correctly per claim, at the same time over the same data.
+
+The grant model keeps them apart in both directions. The runtime SP holds `SELECT` on the view only, so it cannot use the internal space even if someone hands it the space id. Your analysts read the base table, so they are unaffected by the claim plumbing entirely. Separation comes from Unity Catalog grants rather than from either space staying configured the way you left it.
+
+Two things to plan for. You now tune two spaces instead of one: instructions, example SQL, and column metadata all need maintaining in both places, and they will drift unless you generate them from one source. And the internal space sees every tenant's rows by definition, so its own ACL is the only thing standing between a careless share and cross-tenant exposure. Grant `CAN_RUN` on it narrowly.
 
 ## Before you start
 
@@ -285,7 +315,7 @@ The same warning applies to any intermediary that re-mints or exchanges credenti
 
 **Beta and allowlist-gated**, with no committed GA date.
 
-**The Genie UI will error**, including the chat interface and the sample-data preview, because browser sessions carry no claim. This pattern only works when your backend calls the Conversation API directly. Expect the sample-data preview to show `22KD2` for any claim-enforced view; that is cosmetic and does not affect API calls.
+**The Genie UI will error**, including the chat interface and the sample-data preview, because browser sessions carry no claim. This pattern only works when your backend calls the Conversation API directly. Expect the sample-data preview to show `22KD2` for any claim-enforced view; that is cosmetic and does not affect API calls. If your internal users need a working Genie UI over the same data, run [a second space over the unfiltered base table](#that-means-two-genie-spaces-not-one).
 
 **Setup DDL requires OAuth client-credentials access to the SP**, so a PAT-based migration runner or IaC pipeline cannot complete it. Check this against your deployment tooling early.
 
@@ -310,6 +340,7 @@ Claim propagation and filtering:
 | Genie Conversation API, both claims, against a row-filtered table | Correctly isolated per claim |
 | Genie Conversation API, both claims, against a claim-enforced view | Correctly isolated per claim |
 | Genie Conversation API as a claim-less caller | Message reached `FAILED` with `22KD2` |
+| A second space over the unfiltered base table, claim-less caller | Answered normally with all rows, confirming the two-space pattern |
 
 Analysis-time evaluation:
 
