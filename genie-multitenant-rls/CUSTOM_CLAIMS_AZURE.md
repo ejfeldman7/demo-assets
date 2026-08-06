@@ -2,6 +2,8 @@
 
 **Status:** Empirically validated on Azure (2026-07-06) against the Genie Conversation API directly. Not an officially documented or supported mechanism for Genie specifically — treat as "works today, technically proven, at-your-own-risk" until a formal feature request materializes. See caveats at the end before committing to this in production.
 
+**Updated 2026-08-06:** the analysis-time evaluation behavior of `current_oauth_custom_identity_claim()` and its two practical consequences — the DDL bootstrap requirement and the absence of any admin bypass — were re-tested directly and confirmed by Databricks engineering as intended behavior. Both are now documented in [step 2](#2-design-the-row-filter-function-around-the-claim). If your `CREATE FUNCTION` is failing, start there.
+
 ## The problem this solves
 
 You want a single Genie space (optionally wrapped in a supervisor agent) to serve thousands of external end users, where each user must only see their own org/tenant/site's data — without provisioning a Databricks service principal per user or per tenant. Unity Catalog row-level security normally keys off the identity actually executing the query (`current_user()`), which doesn't help when every request runs as the same shared SP.
@@ -75,11 +77,80 @@ Row filters can call other Unity Catalog functions, including ones that issue ou
 - [Row filters and column masks](https://docs.databricks.com/aws/en/data-governance/unity-catalog/filters-and-masks/) — public UC row-filter mechanics
 - [`http_request` SQL function](https://docs.databricks.com/aws/en/sql/language-manual/functions/http_request) — note documented rate limits; designed for interactive/agent-style use, not high-volume batch
 
-**Important:** `current_oauth_custom_identity_claim()` appears to be evaluated eagerly (likely constant-folded) even at `CREATE FUNCTION` time, not only when the function is later queried. This means the statement that *creates* the function must also run under a token that carries a valid claim — a personal access token or any claim-less token will fail immediately with `OAUTH_CUSTOM_IDENTITY_CLAIM_NOT_PROVIDED`, even for pure DDL.
+> ### ⚠️ Read this before running any of the DDL above
+>
+> `current_oauth_custom_identity_claim()` is resolved **at query-analysis time, not at runtime**. Internally it is an unevaluable expression that gets inlined during analysis, so it never survives to per-row evaluation. Two consequences trip up nearly everyone on their first attempt, and neither is a bug — both are the documented, intended behavior of the function:
+>
+> 1. **The DDL that references it must itself run under a claim-bearing token** (see [Bootstrapping the DDL](#bootstrapping-the-ddl-the-first-wall-everyone-hits) below).
+> 2. **You cannot write an admin/bypass predicate around it** (see [No admin bypass exists](#no-admin-bypass-exists-design-around-it) below).
+
+#### Bootstrapping the DDL: the first wall everyone hits
+
+Because the function is resolved during analysis, *any* statement that so much as mentions it — including pure DDL — fails under a claim-less token:
+
+```
+[OAUTH_CUSTOM_IDENTITY_CLAIM_NOT_PROVIDED] No custom identity claim was provided. SQLSTATE: 22KD2
+```
+
+This affects `CREATE FUNCTION` **and** `CREATE VIEW` equally, and it fires from a PAT, the SQL Editor, or a notebook cell — all of which are out-of-scope surfaces for identity claims by design.
+
+**The fix:** run the setup DDL through the SQL Statement Execution API (or JDBC) authenticated with an OAuth token that carries *any* claim value. The claim is execution context, not part of the function definition, so a throwaway bootstrap value works — the function you create is identical either way:
+
+```bash
+# 1. Mint a bootstrap token from the same account-level SP. The value is arbitrary.
+TOKEN=$(curl -s --request POST \
+  --url "https://accounts.azuredatabricks.net/oidc/accounts/<ACCOUNT_ID>/v1/token" \
+  --header "authorization: Basic $(echo -n CLIENT_ID:CLIENT_SECRET | base64)" \
+  --header 'content-type: application/x-www-form-urlencoded' \
+  --data 'grant_type=client_credentials&scope=all-apis&custom_claim=ddl-bootstrap' \
+  | jq -r .access_token)
+
+# 2. Run the CREATE FUNCTION / CREATE VIEW / ALTER TABLE statements with that token.
+curl -s --request POST \
+  --url "https://<workspace-host>/api/2.0/sql/statements" \
+  --header "Authorization: Bearer $TOKEN" \
+  --header 'content-type: application/json' \
+  --data '{
+    "warehouse_id": "<warehouse_id>",
+    "statement": "CREATE OR REPLACE FUNCTION catalog.schema.filter_by_claim(tenant_id STRING) RETURN IF(tenant_id = current_oauth_custom_identity_claim(), true, false)"
+  }'
+```
+
+The `ALTER TABLE ... SET ROW FILTER` statement does *not* reference the claim function directly and succeeds under an ordinary PAT — but it's simplest to run the whole setup sequence with the bootstrap token.
+
+Workarounds that look like they should defer evaluation **do not work** — `coalesce()`, `try_cast()`, and pushing the reference into an `EXISTS` subquery all fail with the same error. There is no way to create these objects from a claim-less session today.
+
+#### No admin bypass exists — design around it
+
+Since the function can't participate in runtime short-circuiting, a privileged-group bypass is **not achievable today**. All of these throw rather than short-circuit:
+
+```sql
+-- All of these FAIL with OAUTH_CUSTOM_IDENTITY_CLAIM_NOT_PROVIDED when the
+-- caller has no claim, even though the first branch is true. The RETURN lines
+-- are function-body fragments (the body of a CREATE FUNCTION), not standalone SQL.
+SELECT TRUE OR current_oauth_custom_identity_claim() = 'x';
+RETURN is_account_group_member('admins') OR tenant_id = current_oauth_custom_identity_claim();
+RETURN CASE WHEN is_account_group_member('admins') THEN true
+            ELSE tenant_id = current_oauth_custom_identity_claim() END;
+```
+
+**Why this matters operationally:** if you attach a claim-based row filter directly to a base table, every claim-less caller — including you, the table owner, and any account admin — is locked out of that table entirely. Not filtered to zero rows: hard error on every query. Batch jobs and Lakeflow/DLT pipelines reading that table break too, since those are also unsupported surfaces.
+
+**Recommended shape:** leave the base table unfiltered and put the claim in a **view**, then point Genie at the view.
+
+```sql
+-- Base table keeps normal UC grants; internal users and jobs read it directly.
+-- Claim enforcement lives in the view, which is what the Genie space points at.
+CREATE OR REPLACE VIEW catalog.schema.some_table_tenant_scoped AS
+  SELECT * FROM catalog.schema.some_table
+  WHERE tenant_id = current_oauth_custom_identity_claim();
+```
+
+Note that this addresses the *lockout* problem, not the DDL-bootstrap problem — `CREATE VIEW` still needs a claim-bearing token. Also note the tradeoff: enforcement now depends on the Genie space (and every other consumer) being pointed at the view, rather than being unconditional at the table. Grant end-user-facing access only to the view, and don't grant the shared SP `SELECT` on the underlying base table.
 
 ### 3. Build the Genie space over the protected tables/views
 
-Point the Genie space at the row-filtered table(s) as you normally would — no special Genie-side configuration is needed for the claim to take effect, since enforcement happens in Unity Catalog, not in Genie itself.
+Point the Genie space at the claim-enforced object(s) as you normally would — no special Genie-side configuration is needed for the claim to take effect, since enforcement happens in Unity Catalog, not in Genie itself. Per [step 2](#no-admin-bypass-exists-design-around-it), prefer pointing it at the tenant-scoped **views** rather than at row-filtered base tables, so internal users and batch jobs retain access to the underlying tables.
 
 - [Genie Conversation API](https://docs.databricks.com/aws/en/genie/conversation-api) — space/conversation/message structure
 
@@ -148,6 +219,8 @@ The host differs by cloud:
 - **Not officially documented or supported for Genie specifically.** It works because Genie's execution rides on the same SQL Warehouse plumbing that Custom Identity Claims is documented for (JDBC + SQL Warehouse, JDBC + interactive cluster, SQL Statement Execution API) — but Genie itself is not on that supported-surfaces list. This is empirically proven, not a committed contract.
 - **Custom Identity Claims is Beta / allowlist-gated**, with no committed GA date as of this writing.
 - **The Genie UI (chat interface, sample-data preview) is not a supported surface and will error** — this only works when the Genie Conversation API is called directly by your own backend, not through the native chat UI.
+- **No admin or break-glass bypass is possible today**, and claim-based row filters on a base table lock out every claim-less caller including the table owner. Batch jobs and Lakeflow/DLT pipelines are also unsupported surfaces and will fail against such a table. Plan the view-based shape in [step 2](#no-admin-bypass-exists-design-around-it) up front — retrofitting it after a filter is already attached to a production base table is painful. A feature request to fold a missing claim to `NULL` (so `COALESCE`/`OR` logic could handle it) has been raised with the Auth Platform team but is not committed.
+- **Setup DDL requires a claim-bearing token**, so your provisioning/IaC path needs OAuth client-credentials access to the shared SP — a PAT-based migration runner will not work. Worth checking against the customer's deployment tooling early.
 - **The supervisor-wrapping workaround above has not been independently tested as a combined pattern** — direct Genie API calls with claims are confirmed working, and the framework's OBO tool is confirmed broken, but "host service calls Genie API directly, feeds result into a supervisor" specifically has not been tested end-to-end by us.
 - The written first-party guide for Custom Identity Claims states the Databricks account must be AWS-only — **this is empirically incorrect**; it was directly tested and confirmed working on Azure (same mechanism: one SP, `custom_claim` varying per token, row filter enforced correctly, verified both at the raw SQL Warehouse level and through the Genie Conversation API itself). GCP has not been tested.
 
