@@ -1,186 +1,199 @@
-# Running a Multi-Tenant Genie Space with One Service Principal (OAuth Custom Identity Claims)
+# Running a multi-tenant Genie space with one service principal (OAuth Custom Identity Claims)
 
-**Status:** Empirically validated on Azure (2026-07-06) against the Genie Conversation API directly. Not an officially documented or supported mechanism for Genie specifically — treat as "works today, technically proven, at-your-own-risk" until a formal feature request materializes. See caveats at the end before committing to this in production.
+**Status:** Validated end to end on Azure, most recently 2026-08-06. See the [validation record](#validation-record) for exactly what was tested. This is not an officially documented or supported mechanism for Genie, so treat it as "works today, proven by testing, at your own risk" until the feature request lands. Read the [caveats](#caveats-before-using-this-in-production) before committing to it in production.
 
-**Updated 2026-08-06:** the analysis-time evaluation behavior of `current_oauth_custom_identity_claim()` and its two practical consequences — the DDL bootstrap requirement and the absence of any admin bypass — were re-tested directly and confirmed by Databricks engineering as intended behavior. Both are now documented in [step 2](#2-design-the-row-filter-function-around-the-claim). If your `CREATE FUNCTION` is failing, start there.
+**Hitting `OAUTH_CUSTOM_IDENTITY_CLAIM_NOT_PROVIDED`?** Jump to [Two behaviors that will surprise you](#two-behaviors-that-will-surprise-you). That error is expected behavior rather than a misconfiguration, and the fix is specific.
 
 ## The problem this solves
 
-You want a single Genie space (optionally wrapped in a supervisor agent) to serve thousands of external end users, where each user must only see their own org/tenant/site's data — without provisioning a Databricks service principal per user or per tenant. Unity Catalog row-level security normally keys off the identity actually executing the query (`current_user()`), which doesn't help when every request runs as the same shared SP.
+You want one Genie space to serve thousands of external end users, where each user sees only their own org, tenant, or site data, without creating a Databricks service principal per user or per tenant.
 
-**OAuth Custom Identity Claims** solves this by letting a single SP mint a different, short-lived OAuth token per request, each carrying an opaque `custom_claim` value. That value is passed through to the SQL Warehouse and readable in SQL via `current_oauth_custom_identity_claim()` — which a Unity Catalog row filter function can use exactly like a bind parameter.
+Unity Catalog row-level security normally keys off the identity running the query via `current_user()`. That does not help when every request runs as the same shared service principal, because `current_user()` returns the SP every time.
 
-## Architecture
+OAuth Custom Identity Claims fixes this. A single SP mints a short-lived token per request, each carrying an opaque `custom_claim` value. The claim rides through to the SQL warehouse and is readable in SQL through `current_oauth_custom_identity_claim()`, which a view or row filter can use like a bind parameter.
+
+## How it works
 
 ```
 External end user
-      │  (however your app authenticates them — SSO, your own IDP, etc.)
+      │  (however your app authenticates them: SSO, your own IDP, etc.)
       ▼
-Your backend / supervisor agent's host service
-      │  1. Resolves the user to a claim value (org/tenant/site id,
-      │     or an opaque external id you'll look up downstream)
-      │  2. Mints a fresh OAuth token from the ONE shared service
-      │     principal, embedding that value as custom_claim
+Your backend
+      │  1. Resolves the user to a claim value (org/tenant/site id, or an
+      │     opaque external id you look up downstream)
+      │  2. Mints a fresh OAuth token from the ONE shared service principal,
+      │     embedding that value as custom_claim
       ▼
 Genie Conversation API  (called directly, with that token as bearer auth)
-      │  Genie generates and executes SQL against the SQL Warehouse
+      │  Genie generates and executes SQL against the SQL warehouse
       ▼
-SQL Warehouse → Unity Catalog row filter reads
-current_oauth_custom_identity_claim() → filters the query
+SQL warehouse → Unity Catalog reads current_oauth_custom_identity_claim()
+      │          and filters to that claim's rows
       ▼
-Filtered results flow back through Genie → your backend → the end user
+Filtered results flow back through Genie to your backend and the end user
 ```
 
-One SP total, regardless of how many end users or tenants you have. The SP never changes; only the claim value in each minted token changes.
+One SP total, no matter how many tenants you have. The SP never changes. Only the claim value inside each minted token changes.
 
-## Step-by-step setup
+## The object model: unfiltered tables, claim-enforced views
 
-### 1. Create one account-level service principal
+Get this part right before you write any SQL, because retrofitting it onto a production table is painful.
 
-Custom Identity Claims requires an **account-level** SP (not a workspace-local one) with a generated OAuth client secret.
+You have two audiences for the same data. Internal users, notebooks, jobs, and pipelines need normal access. External end users, arriving through Genie, need to be restricted to their own tenant. Serve them with two objects over one copy of the data:
 
-- [Service principal OAuth M2M authentication](https://docs.databricks.com/aws/en/dev-tools/auth/oauth-m2m) — general SP + OAuth secret setup (public docs; does not cover the custom-claims parameter specifically, which is not yet publicly documented)
+| Object | Claim? | Who reads it |
+|---|---|---|
+| Base table | No row filter | Internal users, notebooks, jobs, DLT pipelines, dashboards |
+| View over that table | `WHERE tenant_id = current_oauth_custom_identity_claim()` | The runtime SP only, through Genie |
 
-Grant this one SP whatever it needs on the underlying resources: `USE CATALOG` / `USE SCHEMA` / `SELECT` / `EXECUTE` on the relevant catalog and schema, and `CAN_USE` on the SQL Warehouse the Genie space will use.
+Three rules make this a security boundary instead of a decoration. All three are required:
 
-### 2. Design the row filter function around the claim
-
-If you already have a row-filter pattern that takes an external value and looks up org/tenant/site via an HTTP call (e.g. the pattern used for [AI/BI dashboard external embedding](https://docs.databricks.com/aws/en/dashboards/share/embedding/external-embed#-securely-present-dashboards-to-individual-users)), reuse it almost unchanged — just swap the input source:
+1. **Leave the base table unfiltered.** Do not attach a claim-based row filter to it. A row filter there locks out every caller that has no claim, which includes you, the table owner, every account admin, and every batch job. See [no admin bypass exists](#no-admin-bypass-exists).
+2. **The view owner must not be the SP that Genie runs as.** Unity Catalog resolves a view's underlying tables using the *view owner's* privileges. If the SP owns the view, its own privileges reach the base table and the view restricts nothing. Own the views with a separate publisher identity: your own user for a proof of concept, a dedicated publisher SP in production.
+3. **Grant the runtime SP `SELECT` on the view only.** Watch for inherited grants. A schema-level `SELECT` silently reaches every table in the schema, which is the most common way this boundary fails in practice.
 
 ```sql
--- Before (dashboard external-embed pattern):
--- uses :aibi_external_value as the input to the HTTP lookup
+-- Publisher identity (owns the view, can read the base table)
+CREATE OR REPLACE VIEW main.gold.orders_tenant_scoped AS
+  SELECT * FROM main.gold.orders
+  WHERE tenant_id = current_oauth_custom_identity_claim();
 
--- After (Genie / Custom Identity Claims pattern):
-CREATE OR REPLACE FUNCTION gold_schema.claim_entitlement_filter(org STRING, tenant STRING, site STRING)
-  RETURN EXISTS (
-    SELECT 1 FROM TABLE(customer_http_entitlements(current_oauth_custom_identity_claim())) e
-    WHERE e.org = org AND e.tenant = tenant AND e.site = site
-  );
+ALTER VIEW main.gold.orders_tenant_scoped OWNER TO `publisher-sp-or-your-user`;
 
-ALTER TABLE gold.some_table
-  SET ROW FILTER gold_schema.claim_entitlement_filter ON (org, tenant, site);
+-- Runtime SP: view only, and make sure nothing inherits table access
+REVOKE SELECT ON SCHEMA main.gold FROM `<runtime-sp-client-id>`;
+GRANT SELECT ON VIEW main.gold.orders_tenant_scoped TO `<runtime-sp-client-id>`;
 ```
 
-For a simpler single-value case (one claim maps directly to one filterable column), it's just:
+Two things make this work, both confirmed by testing. The claim is evaluated against the *querying* session's token, not the view owner's identity, so a view owned by a claim-less publisher still filters correctly by the runtime SP's claim. And once the runtime SP has no grant on the base table, Genie cannot read that table even if someone points the space at it by mistake: Unity Catalog refuses the query. The boundary does not depend on the Genie space staying configured correctly.
 
-```sql
-CREATE OR REPLACE FUNCTION catalog.schema.filter_by_claim(tenant_id STRING)
-  RETURN IF(tenant_id = current_oauth_custom_identity_claim(), true, false);
+The tradeoff compared to a row filter on the base table: enforcement now rests on grants rather than being unconditional at the table. A row filter cannot be bypassed by querying somewhere else; this pattern can, if you grant the runtime SP more than the view. For a multi-tenant Genie deployment that trade is almost always worth it, because the alternative makes the table unusable for everyone else.
 
-ALTER TABLE catalog.schema.some_table
-  SET ROW FILTER catalog.schema.filter_by_claim ON (tenant_id);
-```
+## Before you start
 
-Row filters can call other Unity Catalog functions, including ones that issue outbound HTTP requests:
+- An **account-level** service principal, not a workspace-local one, with a generated OAuth client secret. This is the runtime SP that Genie will use.
+- Custom Identity Claims enabled for your account. It is Beta and allowlist-gated, and enablement is also per-workspace. See the [caveats](#caveats-before-using-this-in-production).
+- A way to run SQL under an OAuth token: the SQL Statement Execution API or JDBC. You cannot complete the setup from a notebook or the SQL editor.
 
-- [Row filters and column masks](https://docs.databricks.com/aws/en/data-governance/unity-catalog/filters-and-masks/) — public UC row-filter mechanics
-- [`http_request` SQL function](https://docs.databricks.com/aws/en/sql/language-manual/functions/http_request) — note documented rate limits; designed for interactive/agent-style use, not high-volume batch
+Reference: [Service principal OAuth M2M authentication](https://docs.databricks.com/aws/en/dev-tools/auth/oauth-m2m). It covers SP and secret setup but not the `custom_claim` parameter, which is not yet publicly documented.
 
-> ### ⚠️ Read this before running any of the DDL above
->
-> `current_oauth_custom_identity_claim()` is resolved **at query-analysis time, not at runtime**. Internally it is an unevaluable expression that gets inlined during analysis, so it never survives to per-row evaluation. Two consequences trip up nearly everyone on their first attempt, and neither is a bug — both are the documented, intended behavior of the function:
->
-> 1. **The DDL that references it must itself run under a claim-bearing token** (see [Bootstrapping the DDL](#bootstrapping-the-ddl-the-first-wall-everyone-hits) below).
-> 2. **You cannot write an admin/bypass predicate around it** (see [No admin bypass exists](#no-admin-bypass-exists-design-around-it) below).
+## Implementation
 
-#### Bootstrapping the DDL: the first wall everyone hits
+### 1. Grant the runtime SP its baseline access
 
-Because the function is resolved during analysis, *any* statement that so much as mentions it — including pure DDL — fails under a claim-less token:
+The SP needs `USE CATALOG` on the catalog and `USE SCHEMA` on the schema, plus `CAN_USE` on the SQL warehouse the Genie space will use.
 
-```
-[OAUTH_CUSTOM_IDENTITY_CLAIM_NOT_PROVIDED] No custom identity claim was provided. SQLSTATE: 22KD2
-```
+Do not grant it `SELECT` at the catalog or schema level. That inherits down to your base tables and breaks rule 3 above. Grant `SELECT` on views individually, in step 3.
 
-This affects `CREATE FUNCTION` **and** `CREATE VIEW` equally, and it fires from a PAT, the SQL Editor, or a notebook cell — all of which are out-of-scope surfaces for identity claims by design.
+### 2. Mint a bootstrap token
 
-**The fix:** run the setup DDL through the SQL Statement Execution API (or JDBC) authenticated with an OAuth token that carries *any* claim value. The claim is execution context, not part of the function definition, so a throwaway bootstrap value works — the function you create is identical either way:
+Any statement that references `current_oauth_custom_identity_claim()` needs a claim present, including the DDL that creates your views. The value is arbitrary for setup, so use a throwaway:
 
 ```bash
-# 1. Mint a bootstrap token from the same account-level SP. The value is arbitrary.
 TOKEN=$(curl -s --request POST \
   --url "https://accounts.azuredatabricks.net/oidc/accounts/<ACCOUNT_ID>/v1/token" \
   --header "authorization: Basic $(echo -n CLIENT_ID:CLIENT_SECRET | base64)" \
   --header 'content-type: application/x-www-form-urlencoded' \
   --data 'grant_type=client_credentials&scope=all-apis&custom_claim=ddl-bootstrap' \
   | jq -r .access_token)
+```
 
-# 2. Run the CREATE FUNCTION / CREATE VIEW / ALTER TABLE statements with that token.
+The claim is execution context, not part of the object definition. A view created under `custom_claim=ddl-bootstrap` is byte-identical to one created under any other value.
+
+To confirm the claim is embedded, decode the JWT payload. It appears nested rather than at the top level:
+
+```json
+"custom": { "claim": "ddl-bootstrap" }
+```
+
+### 3. Create the claim-enforced view
+
+Run this through the Statement Execution API with the bootstrap token:
+
+```bash
 curl -s --request POST \
   --url "https://<workspace-host>/api/2.0/sql/statements" \
   --header "Authorization: Bearer $TOKEN" \
   --header 'content-type: application/json' \
   --data '{
     "warehouse_id": "<warehouse_id>",
-    "statement": "CREATE OR REPLACE FUNCTION catalog.schema.filter_by_claim(tenant_id STRING) RETURN IF(tenant_id = current_oauth_custom_identity_claim(), true, false)"
+    "statement": "CREATE OR REPLACE VIEW main.gold.orders_tenant_scoped AS SELECT * FROM main.gold.orders WHERE tenant_id = current_oauth_custom_identity_claim()"
   }'
 ```
 
-The `ALTER TABLE ... SET ROW FILTER` statement does *not* reference the claim function directly and succeeds under an ordinary PAT — but it's simplest to run the whole setup sequence with the bootstrap token.
+Then transfer ownership away from the runtime SP and grant it read access to the view alone, per the [three rules](#the-object-model-unfiltered-tables-claim-enforced-views). `ALTER VIEW ... OWNER TO`, `REVOKE`, and `GRANT` do not reference the claim function, so you can run those with your normal credentials.
 
-Workarounds that look like they should defer evaluation **do not work** — `coalesce()`, `try_cast()`, and pushing the reference into an `EXISTS` subquery all fail with the same error. There is no way to create these objects from a claim-less session today.
-
-#### No admin bypass exists — design around it
-
-Since the function can't participate in runtime short-circuiting, a privileged-group bypass is **not achievable today**. All of these throw rather than short-circuit:
+If your existing entitlement logic lives in an HTTP lookup, as it does in the [AI/BI dashboard external embedding](https://docs.databricks.com/aws/en/dashboards/share/embedding/external-embed#-securely-present-dashboards-to-individual-users) pattern, reuse it and swap only the input source. Replace `:aibi_external_value` with `current_oauth_custom_identity_claim()`:
 
 ```sql
--- All of these FAIL with OAUTH_CUSTOM_IDENTITY_CLAIM_NOT_PROVIDED when the
--- caller has no claim, even though the first branch is true. The RETURN lines
--- are function-body fragments (the body of a CREATE FUNCTION), not standalone SQL.
-SELECT TRUE OR current_oauth_custom_identity_claim() = 'x';
-RETURN is_account_group_member('admins') OR tenant_id = current_oauth_custom_identity_claim();
-RETURN CASE WHEN is_account_group_member('admins') THEN true
-            ELSE tenant_id = current_oauth_custom_identity_claim() END;
+CREATE OR REPLACE VIEW main.gold.orders_tenant_scoped AS
+  SELECT o.* FROM main.gold.orders o
+  WHERE EXISTS (
+    SELECT 1 FROM TABLE(customer_http_entitlements(current_oauth_custom_identity_claim())) e
+    WHERE e.org = o.org AND e.tenant = o.tenant AND e.site = o.site
+  );
 ```
 
-**Why this matters operationally:** if you attach a claim-based row filter directly to a base table, every claim-less caller — including you, the table owner, and any account admin — is locked out of that table entirely. Not filtered to zero rows: hard error on every query. Batch jobs and Lakeflow/DLT pipelines reading that table break too, since those are also unsupported surfaces.
+Views can call other Unity Catalog functions, including ones that make outbound HTTP calls. Note the [`http_request`](https://docs.databricks.com/aws/en/sql/language-manual/functions/http_request) rate limits: it is built for interactive and agent traffic, not high-volume batch. Genie may issue several queries per conversation turn, so load-test this before committing to it at scale.
 
-**Recommended shape:** leave the base table unfiltered and put the claim in a **view**, then point Genie at the view.
+### 4. Verify the boundary before wiring up Genie
+
+Four checks, and all four should pass:
 
 ```sql
--- Base table keeps normal UC grants; internal users and jobs read it directly.
--- Claim enforcement lives in the view, which is what the Genie space points at.
-CREATE OR REPLACE VIEW catalog.schema.some_table_tenant_scoped AS
-  SELECT * FROM catalog.schema.some_table
-  WHERE tenant_id = current_oauth_custom_identity_claim();
+-- 1. Two different claims see different rows (run each under its own token)
+SELECT * FROM main.gold.orders_tenant_scoped;
+
+-- 2. The runtime SP cannot reach the base table.
+--    Expect INSUFFICIENT_PERMISSIONS / 42501.
+SELECT * FROM main.gold.orders;
+
+-- 3. You, with no claim, read the base table normally
+SELECT * FROM main.gold.orders;
+
+-- 4. A claim-less caller gets 22KD2 on the view, not an empty result
+SELECT * FROM main.gold.orders_tenant_scoped;
 ```
 
-Note that this addresses the *lockout* problem, not the DDL-bootstrap problem — `CREATE VIEW` still needs a claim-bearing token. Also note the tradeoff: enforcement now depends on the Genie space (and every other consumer) being pointed at the view, rather than being unconditional at the table. Grant end-user-facing access only to the view, and don't grant the shared SP `SELECT` on the underlying base table.
+Check 2 is the one people skip, and it is the one that catches an inherited schema-level grant.
 
-### 3. Build the Genie space over the protected tables/views
+### 5. Point the Genie space at the view
 
-Point the Genie space at the claim-enforced object(s) as you normally would — no special Genie-side configuration is needed for the claim to take effect, since enforcement happens in Unity Catalog, not in Genie itself. Per [step 2](#no-admin-bypass-exists-design-around-it), prefer pointing it at the tenant-scoped **views** rather than at row-filtered base tables, so internal users and batch jobs retain access to the underlying tables.
+Build the space over the tenant-scoped views, not the base tables. No Genie-side configuration is needed for the claim to work, because enforcement happens in Unity Catalog.
 
-- [Genie Conversation API](https://docs.databricks.com/aws/en/genie/conversation-api) — space/conversation/message structure
+Confirm what the space actually references, since a stale table identifier is easy to miss:
 
-### 4. Grant the SP access to the Genie space itself
+```bash
+databricks api get "/api/2.0/data-rooms/<space_id>" | jq .table_identifiers
+```
 
-This is a separate permission from the Unity Catalog grants in step 1 — it's the Genie space's own ACL:
+Reference: [Genie Conversation API](https://docs.databricks.com/aws/en/genie/conversation-api).
+
+### 6. Grant the SP access to the space
+
+Separate from the Unity Catalog grants. This is the space's own ACL:
 
 ```bash
 databricks api put "/api/2.0/permissions/genie/<space_id>" --json '{
   "access_control_list": [
-    {"service_principal_name": "<sp-client-id>", "permission_level": "CAN_RUN"}
+    {"service_principal_name": "<runtime-sp-client-id>", "permission_level": "CAN_RUN"}
   ]
 }'
 ```
 
-### 5. Per-request flow: mint a token, call Genie directly
+### 7. Wire up the per-request flow
 
-For each end-user request, your backend mints a fresh token from the one SP, with that request's claim value:
+For each end-user request, your backend mints a fresh token carrying that user's claim, then calls Genie with it:
 
 ```bash
+# Mint per-request (same call as step 2, real claim value this time)
 curl --request POST \
   --url "https://accounts.azuredatabricks.net/oidc/accounts/<ACCOUNT_ID>/v1/token" \
   --header "authorization: Basic $(echo -n CLIENT_ID:CLIENT_SECRET | base64)" \
   --header 'content-type: application/x-www-form-urlencoded' \
   --data 'grant_type=client_credentials&scope=all-apis&custom_claim=<per-request-value>'
-```
 
-Then call the Genie Conversation API with that token as bearer auth:
-
-```bash
+# Start a conversation
 curl --request POST \
   --url "https://<workspace-host>/api/2.0/genie/spaces/<space_id>/start-conversation" \
   --header "Authorization: Bearer <token>" \
@@ -188,49 +201,152 @@ curl --request POST \
   --data '{"content": "<user question>"}'
 ```
 
-Poll for completion and read the result:
+Poll until the message finishes:
 
 ```
 GET /api/2.0/genie/spaces/<space_id>/conversations/<conversation_id>/messages/<message_id>
 ```
 
-The message's `status` moves through `SUBMITTED` → `ASKING_AI` → `COMPLETED` (or `FAILED`). Once `COMPLETED`, the `attachments` array contains the generated SQL (`query.query`), the row count actually returned (`query.query_result_metadata.row_count`), and Genie's natural-language answer — all of which reflect the row filter, not just the raw table contents.
+`status` moves through `SUBMITTED`, `ASKING_AI`, `PENDING_WAREHOUSE`, then `COMPLETED` or `FAILED`. On `COMPLETED`, the `attachments` array holds the generated SQL in `query.query`, the row count in `query.query_result_metadata.row_count`, and Genie's natural-language answer. All of it reflects the filtered view rather than the raw table.
 
-### 6. Note on the account-level token endpoint host
+The end user never issues SQL. They ask a question; Genie writes the SQL and runs it under the claim token. That indirection is what makes the pattern safe, and it is why prompt injection cannot widen access: the filter is applied by Unity Catalog after Genie has written whatever query it chose.
 
-The host differs by cloud:
+### Token endpoint host by cloud
 
 | Cloud | Account-level OIDC token endpoint |
 |---|---|
 | AWS | `https://accounts.cloud.databricks.com/oidc/accounts/<account_id>/v1/token` |
 | Azure | `https://accounts.azuredatabricks.net/oidc/accounts/<account_id>/v1/token` |
-| GCP | Not tested as part of this work — verify before relying on it |
+| GCP | Untested. Verify before relying on it. |
 
-## If wrapping Genie in a supervisor agent
+## Two behaviors that will surprise you
 
-**Do not use the Mosaic AI Agent Framework's built-in on-behalf-of-user (OBO) Genie tool for this.** That framework's OBO downscoping flow strips the custom claim before it reaches Genie, reproducibly throwing `OAUTH_CUSTOM_IDENTITY_CLAIM_NOT_PROVIDED`. OBO and Custom Identity Claims solve different problems that sound similar: OBO authenticates as the *end user's own real Databricks identity* (which requires the external user to already be a Databricks principal — the exact thing this whole approach is trying to avoid), while Custom Identity Claims authenticates as the one shared SP and carries the user context in the token instead.
+`current_oauth_custom_identity_claim()` is resolved at query-analysis time, not at runtime. Internally it is an unevaluable expression that gets inlined during analysis, so it never survives to per-row evaluation. Two consequences follow, and both are intended behavior rather than bugs.
 
-- [User authorization (on-behalf-of) for agents](https://docs.databricks.com/aws/en/generative-ai/agent-framework/authenticate-on-behalf-of-user) — public docs confirming OBO is Public Preview and lists Genie Space as a supported resource type; does not mention custom claims, consistent with these being separate mechanisms
+### Setup DDL needs a claim-bearing token
 
-**Workaround:** have the supervisor's host service mint the custom-claim token itself and call the Genie Conversation API directly as a plain REST call (steps 5 above), then feed the result back into the supervisor's own orchestration — rather than relying on the framework's native Genie tool wrapper.
+Any statement mentioning the function fails without a claim, including pure DDL:
+
+```
+[OAUTH_CUSTOM_IDENTITY_CLAIM_NOT_PROVIDED] No custom identity claim was provided. SQLSTATE: 22KD2
+```
+
+This hits `CREATE VIEW` and `CREATE FUNCTION` equally, and it fires from a PAT, the SQL editor, or a notebook cell. Those are all claim-less surfaces by design, so the failure is the specification, not your SQL.
+
+The fix is [step 2](#2-mint-a-bootstrap-token): run the DDL through the Statement Execution API or JDBC under a token carrying any claim value.
+
+Wrappers that look like they should defer evaluation do not work. `coalesce()`, `try_cast()`, and pushing the reference into an `EXISTS` subquery all fail the same way. There is no route to creating these objects from a claim-less session.
+
+`ALTER VIEW`, `GRANT`, `REVOKE`, and `ALTER TABLE ... SET ROW FILTER` do not reference the function and work with ordinary credentials.
+
+### No admin bypass exists
+
+The function cannot participate in runtime short-circuiting, so a privileged-group bypass is impossible today. All of these throw instead of short-circuiting when the caller has no claim, even though the first branch is true:
+
+```sql
+-- The RETURN lines are function-body fragments, not standalone statements.
+SELECT TRUE OR current_oauth_custom_identity_claim() = 'x';
+RETURN is_account_group_member('admins') OR tenant_id = current_oauth_custom_identity_claim();
+RETURN CASE WHEN is_account_group_member('admins') THEN true
+            ELSE tenant_id = current_oauth_custom_identity_claim() END;
+```
+
+This is why rule 1 of the [object model](#the-object-model-unfiltered-tables-claim-enforced-views) says to keep base tables unfiltered. A claim-based row filter on a base table produces a hard error for every claim-less caller rather than an empty result, and no group membership can override it. If you have already attached one and need direct access back, `ALTER TABLE ... DROP ROW FILTER` removes it.
+
+A feature request to fold a missing claim to `NULL`, so `COALESCE` and `OR` logic could handle it, sits with the Auth Platform team. It is not committed.
+
+### Can I give my own user a default claim instead?
+
+No, and the restriction is doing you a favor.
+
+Claims are minted through the `client_credentials` service principal flow. User identities authenticate by a different path with no `custom_claim` parameter, there is no user-level default claim setting, and there is no session override: `SET custom_claim = ...` returns `CONFIG_NOT_AVAILABLE`. A value the caller could set in their own session would not be a security boundary.
+
+Even if it existed, a standing claim on your own identity would pin every query you run, in every notebook and dashboard, to one tenant's slice of the data, and the results would look normal instead of raising an error. A loud failure beats a silent wrong answer.
+
+To inspect data as yourself, read the unfiltered base table. That is what the object model is for.
+
+## If you wrap Genie in a supervisor agent
+
+Do not use the Mosaic AI Agent Framework's built-in on-behalf-of-user Genie tool. Its OBO downscoping flow strips the custom claim before it reaches Genie and throws `OAUTH_CUSTOM_IDENTITY_CLAIM_NOT_PROVIDED` reproducibly.
+
+OBO and Custom Identity Claims solve problems that sound alike but are not. OBO authenticates as the end user's own real Databricks identity, which requires that user to already be a Databricks principal, exactly what this approach exists to avoid. Custom Identity Claims authenticates as one shared SP and carries the user context inside the token.
+
+Reference: [User authorization (on-behalf-of) for agents](https://docs.databricks.com/aws/en/generative-ai/agent-framework/authenticate-on-behalf-of-user). The public docs confirm OBO is Public Preview and list Genie Space as a supported resource type, and say nothing about custom claims, consistent with these being separate mechanisms.
+
+Instead, have the supervisor's host service mint the claim token itself and call the Genie Conversation API as a plain REST call, per [step 7](#7-wire-up-the-per-request-flow), then feed the result back into the supervisor's orchestration.
+
+The same warning applies to any intermediary that re-mints or exchanges credentials on your behalf, including hosted MCP servers. If a layer between your backend and Genie issues its own token, assume the claim is dropped until you have tested otherwise.
 
 ## Caveats before using this in production
 
-- **Not officially documented or supported for Genie specifically.** It works because Genie's execution rides on the same SQL Warehouse plumbing that Custom Identity Claims is documented for (JDBC + SQL Warehouse, JDBC + interactive cluster, SQL Statement Execution API) — but Genie itself is not on that supported-surfaces list. This is empirically proven, not a committed contract.
-- **Custom Identity Claims is Beta / allowlist-gated**, with no committed GA date as of this writing.
-- **The Genie UI (chat interface, sample-data preview) is not a supported surface and will error** — this only works when the Genie Conversation API is called directly by your own backend, not through the native chat UI.
-- **No admin or break-glass bypass is possible today**, and claim-based row filters on a base table lock out every claim-less caller including the table owner. Batch jobs and Lakeflow/DLT pipelines are also unsupported surfaces and will fail against such a table. Plan the view-based shape in [step 2](#no-admin-bypass-exists-design-around-it) up front — retrofitting it after a filter is already attached to a production base table is painful. A feature request to fold a missing claim to `NULL` (so `COALESCE`/`OR` logic could handle it) has been raised with the Auth Platform team but is not committed.
-- **Setup DDL requires a claim-bearing token**, so your provisioning/IaC path needs OAuth client-credentials access to the shared SP — a PAT-based migration runner will not work. Worth checking against the customer's deployment tooling early.
-- **The supervisor-wrapping workaround above has not been independently tested as a combined pattern** — direct Genie API calls with claims are confirmed working, and the framework's OBO tool is confirmed broken, but "host service calls Genie API directly, feeds result into a supervisor" specifically has not been tested end-to-end by us.
-- The written first-party guide for Custom Identity Claims states the Databricks account must be AWS-only — **this is empirically incorrect**; it was directly tested and confirmed working on Azure (same mechanism: one SP, `custom_claim` varying per token, row filter enforced correctly, verified both at the raw SQL Warehouse level and through the Genie Conversation API itself). GCP has not been tested.
+**Not officially supported for Genie.** It works because Genie's execution rides the same SQL warehouse plumbing that Custom Identity Claims does support (JDBC plus warehouse, JDBC plus interactive cluster, Statement Execution API). Genie is not on that supported-surfaces list. Testing confirms it works on Azure today, but "works when tested" and "supported" are different claims and only the first is established here. A future change to Genie's execution path could break it without notice.
+
+**Enablement is per-workspace and can silently strip the claim.** Beyond account-level preview enrollment, claim propagation depends on a workspace-scoped header allowlist. A token can mint successfully with the claim embedded and still arrive at SQL execution without it, producing the same `22KD2` error a claim-less token produces. If setup fails in a workspace where you believe claims are enabled, rule this out before hunting for a mistake in your SQL. It needs a support ticket, not a code change.
+
+**Beta and allowlist-gated**, with no committed GA date.
+
+**The Genie UI will error**, including the chat interface and the sample-data preview, because browser sessions carry no claim. This pattern only works when your backend calls the Conversation API directly. Expect the sample-data preview to show `22KD2` for any claim-enforced view; that is cosmetic and does not affect API calls.
+
+**Setup DDL requires OAuth client-credentials access to the SP**, so a PAT-based migration runner or IaC pipeline cannot complete it. Check this against your deployment tooling early.
+
+**No break-glass path exists** for a claim-based row filter on a base table. Plan the view-based object model up front.
+
+**The supervisor-wrapping workaround is untested as a combined pattern.** Direct Genie API calls with claims are confirmed working and the framework's OBO tool is confirmed broken, but "host service calls the Genie API directly, then feeds the result into a supervisor" has not been tested end to end.
+
+**The first-party guide's AWS-only prerequisite is wrong.** It states the Databricks account must be AWS. Direct testing on Azure contradicts that. GCP remains untested.
+
+## Validation record
+
+Everything here about the claim mechanism comes from direct testing, not public documentation. What was actually exercised, so you can weigh each claim:
+
+**2026-08-06, Azure workspace `field-eng-east`, catalog `ef_claims_test`.** One account-level SP, two claim values (`market_a` and `market_b`) over a two-row table.
+
+Claim propagation and filtering:
+
+| Tested | Result |
+|---|---|
+| Token minting with `custom_claim` | Claim embedded in the JWT as nested `"custom": {"claim": "..."}` |
+| Statement Execution API, both claims | Each token saw only its own row, and the claim read back correctly |
+| Genie Conversation API, both claims, against a row-filtered table | Correctly isolated per claim |
+| Genie Conversation API, both claims, against a claim-enforced view | Correctly isolated per claim |
+| Genie Conversation API as a claim-less caller | Message reached `FAILED` with `22KD2` |
+
+Analysis-time evaluation:
+
+| Tested | Result |
+|---|---|
+| `CREATE FUNCTION` and `CREATE VIEW` under a claim-bearing token | Both succeeded, including with the throwaway value `ddl-bootstrap` |
+| Same DDL under a claim-less token | Failed with `22KD2` |
+| `coalesce()`, `try_cast()`, `EXISTS`-subquery wrappers | All failed identically; none defer evaluation |
+| `is_account_group_member('admins') OR <claim predicate>` | Threw rather than short-circuiting, with `EXECUTE` granted |
+| `SET custom_claim = ...` from a user session | `CONFIG_NOT_AVAILABLE` |
+| `SELECT` on a row-filtered base table as its owner | Failed with `22KD2`, so the lockout is real |
+
+The object model:
+
+| Tested | Result |
+|---|---|
+| Claim filtering through a view owned by a *different* principal than the caller | Worked. The claim comes from the querying session, not the view owner |
+| Runtime SP reading the base table while holding schema-level `SELECT` | Returned all rows, so the view was not a boundary |
+| Runtime SP reading the base table after revoking schema `SELECT` | `INSUFFICIENT_PERMISSIONS` / `42501` |
+| Genie pointed at the base table with the SP's table access revoked | Query refused, no data returned |
+| Internal user reading the unfiltered base table with no claim | All rows, as normal |
+
+Two results are worth dwelling on.
+
+Genie generated unconstrained SQL every time and the filter still held. One caller got a bare `SELECT *`; another got a `COUNT(*)` aggregate with no `WHERE` clause, which returned 1 rather than 2. Enforcement lives in Unity Catalog and does not depend on the model writing safe SQL, which is the property to demonstrate to a security team.
+
+The schema-level grant is the failure everyone should expect to hit. A view over a base table looks like a boundary and behaves like one in casual testing, right up until you check whether the SP can read the table directly. It could, through an inherited schema grant, with no explicit grant on the table itself.
+
+Not covered: GCP on any date, the supervisor-wrapping pattern, hosted MCP as an intermediary, and behavior at realistic tenant counts or query volume.
 
 ## References
 
-- [AI/BI dashboard external embedding — securely present dashboards to individual users](https://docs.databricks.com/aws/en/dashboards/share/embedding/external-embed#-securely-present-dashboards-to-individual-users)
 - [Row filters and column masks](https://docs.databricks.com/aws/en/data-governance/unity-catalog/filters-and-masks/)
 - [Genie Conversation API](https://docs.databricks.com/aws/en/genie/conversation-api)
+- [AI/BI dashboard external embedding](https://docs.databricks.com/aws/en/dashboards/share/embedding/external-embed#-securely-present-dashboards-to-individual-users)
 - [User authorization (on-behalf-of) for agents](https://docs.databricks.com/aws/en/generative-ai/agent-framework/authenticate-on-behalf-of-user)
 - [Service principal OAuth M2M authentication](https://docs.databricks.com/aws/en/dev-tools/auth/oauth-m2m)
 - [`http_request` SQL function](https://docs.databricks.com/aws/en/sql/language-manual/functions/http_request)
 
-No public documentation exists yet for `current_oauth_custom_identity_claim()` or the `custom_claim` OAuth token parameter — everything above describing that specific mechanism is based on direct empirical testing (2026-07-06, Azure workspace `field-eng-east`) plus an internal first-party user guide, not a public Databricks reference.
+No public documentation exists for `current_oauth_custom_identity_claim()` or the `custom_claim` token parameter. Everything above describing that mechanism rests on the [validation record](#validation-record) plus an internal first-party user guide.
