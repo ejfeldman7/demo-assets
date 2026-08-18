@@ -70,6 +70,11 @@ function ErdCanvas() {
   // Heuristic undeclared-relationship edges are always fetched but hidden by default,
   // so first load renders identically to before this feature existed.
   const [showInferred, setShowInferred] = useState(false)
+  // "Keys only" collapses each table to just its PK/FK columns -- purely a client-side
+  // view filter (the backend always returns every column, flagged is_pk/is_fk), so
+  // toggling is instant and never re-queries. A table with no declared PK/FK renders as
+  // a header-only card (no columns); that's expected and called out in the sidebar hint.
+  const [keysOnly, setKeysOnly] = useState(false)
   const [erStudioDialect, setErStudioDialect] = useState<Dialect>('sqlserver')
 
   const { fitView, setCenter, getNode } = useReactFlow()
@@ -163,11 +168,40 @@ function ErdCanvas() {
       return { baseNodes: [] as Node<TableNodeData | SchemaNodeData>[], baseEdges: [] as Edge[] }
     }
 
+    // "Keys only" filters each table's columns to PK/FK before layout, so node heights
+    // (and therefore the layout) reflect the collapsed view. Only applies to the detail
+    // view -- schema-summary nodes have no columns. Tables with no PK/FK keep an empty
+    // columns array and render as header-only cards.
+    const keysOnlyActive = keysOnly && graph.view === 'detail'
+
+    // Source columns of currently-VISIBLE inferred edges, keyed by source node id.
+    // In keys-only mode these are revealed alongside real PK/FK columns, so a shown
+    // dashed inferred edge isn't left pointing at a table with no visible column. This
+    // reads from scopedGraphEdges (not graph.edges), which already excludes inferred
+    // edges when "Show inferred edges" is off -- so when it's off this map is empty and
+    // keys-only stays strictly PK/FK, matching the declared-only behavior.
+    const inferredFkColsByNode: Record<string, Set<string>> = {}
+    if (keysOnlyActive) {
+      for (const e of scopedGraphEdges) {
+        if (!e.inferred) continue
+        const set = (inferredFkColsByNode[e.source] ??= new Set())
+        for (const col of e.fk_columns) set.add(col)
+      }
+    }
+
     const rawNodes: Node<TableNodeData | SchemaNodeData>[] = graph.nodes.map((n) => ({
       id: n.id,
       type: graph.view === 'schema_summary' ? 'schema' : 'table',
       position: { x: 0, y: 0 },
-      data: n,
+      data:
+        keysOnlyActive && 'columns' in n
+          ? {
+              ...n,
+              columns: n.columns.filter(
+                (c) => c.is_pk || c.is_fk || inferredFkColsByNode[n.id]?.has(c.name),
+              ),
+            }
+          : n,
     }))
 
     const edges: Edge[] = scopedGraphEdges.map((e) => ({
@@ -201,7 +235,7 @@ function ErdCanvas() {
     const laidOut = layoutGraph(rawNodes, edges)
     laidOutRef.current = laidOut
     return { baseNodes: laidOut, baseEdges: edges }
-  }, [graph, scopedGraphEdges])
+  }, [graph, scopedGraphEdges, keysOnly])
 
   // Compute the currently-visible set based on selection + mode.
   const visibleSet = useMemo<Set<string> | null>(() => {
@@ -340,6 +374,15 @@ function ErdCanvas() {
   const inferredCount = graph ? graph.edges.filter((e) => e.inferred).length : 0
   const declaredCount = graph ? graph.edges.filter((e) => !e.inferred).length : 0
 
+  // How many tables have no declared PK/FK -- these render as header-only (no columns)
+  // in "keys only" mode, so we surface the count in the hint to explain the empty cards.
+  const keylessTableCount = useMemo(() => {
+    if (!graph || graph.view !== 'detail') return 0
+    return graph.nodes.filter(
+      (n) => 'columns' in n && !n.columns.some((c) => c.is_pk || c.is_fk),
+    ).length
+  }, [graph])
+
   return (
     <div style={styles.app}>
       {/* Top bar */}
@@ -443,6 +486,24 @@ function ErdCanvas() {
             >
               Reset view
             </button>
+          </div>
+
+          <SectionLabel>Columns</SectionLabel>
+          <div style={styles.card}>
+            <Switch
+              label="Keys only (PK / FK)"
+              checked={keysOnly}
+              onChange={() => setKeysOnly((v) => !v)}
+            />
+            <div style={styles.hint}>
+              {keysOnly
+                ? `Showing only primary- and foreign-key columns to keep wide tables readable.${
+                    keylessTableCount > 0
+                      ? ` ${keylessTableCount} table${keylessTableCount === 1 ? '' : 's'} have no declared PK/FK, so ${keylessTableCount === 1 ? 'it appears' : 'they appear'} with no columns — that's expected.`
+                      : ''
+                  }`
+                : 'Collapse wide tables to just their key columns. Tables without a declared PK/FK will appear with no columns.'}
+            </div>
           </div>
 
           <SectionLabel>Undeclared relationships</SectionLabel>

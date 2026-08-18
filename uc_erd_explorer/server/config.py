@@ -85,8 +85,17 @@ def get_warehouse_id() -> Optional[str]:
 
 def get_genie_space_id() -> Optional[str]:
     """Resolve the Genie Space id from GENIE_SPACE_ID env var, set by the DAB/notebook
-    deploy flow once setup/create_genie_space.py has run (see README.md)."""
-    return os.environ.get("GENIE_SPACE_ID") or None
+    deploy flow once setup/create_genie_space.py has run (see README.md).
+
+    Returns None (chat shows a friendly "not configured" message) when unset OR set to
+    the "not-configured" sentinel. The sentinel exists because the Databricks Apps API
+    rejects an env var whose value renders empty ("Must specify environment variable
+    source using either `value` or `valueFrom`") -- so the DAB ships a non-empty
+    placeholder rather than "", and this treats that placeholder as unset."""
+    raw = os.environ.get("GENIE_SPACE_ID")
+    if not raw or raw == "not-configured":
+        return None
+    return raw
 
 
 def get_cache_ttl_seconds() -> int:
