@@ -67,6 +67,29 @@ variables:
       set to Test (e.g. edp_customer -> edp_customer_ts) -- two distinct real Unity
       Catalog catalogs, not an alias. Only meaningful when erd_catalogs is set.
     default: "_ts"
+  auth_mode:
+    description: >-
+      Which identity the ERD metadata queries run as. "service_principal" (default) queries
+      system.information_schema as the app's own service principal, bounded by erd_catalogs
+      -- the original behavior. "on_behalf_of_user" instead queries as the LOGGED-IN USER
+      (via the token Databricks Apps forward in x-forwarded-access-token), so each user sees
+      only the catalogs/schemas/tables THEY have UC privileges on, intersected with
+      erd_catalogs. OBO additionally requires granting the app the "sql" user authorization
+      scope (UI: app > Edit > User authorization > Add scope; or `databricks apps update
+      <app> --json '{"user_api_scopes":["sql","iam.access-control:read","iam.current-user:read"]}'`),
+      and each user needs CAN_USE on the SQL warehouse. Deploy OBO with
+      --var="auth_mode=on_behalf_of_user".
+    default: "service_principal"
+  user_api_scopes:
+    description: >-
+      User authorization scopes the app requests on behalf of the logged-in user (OBO).
+      MUST be declared here rather than set out-of-band via `apps update`: `bundle deploy`
+      regenerates the app resource from this file and would otherwise reset the scopes
+      back to default, silently stripping them. Empty by default (service_principal mode
+      needs none). For OBO, deploy with --var='user_api_scopes=["sql"]' so the forwarded
+      user token can call the SQL Statement Execution API.
+    type: complex
+    default: []
 
 targets:
   dev:
@@ -75,16 +98,21 @@ targets:
   prod:
     mode: production
 
-  # AWS FEVM internal workspace for live testing of the app (fevm-ef-internal).
-  # No `mode` on purpose: `development` prefixes the app name with "[dev <user>]",
-  # which overflows the 30-char app-name limit and injects characters an app name
-  # can't contain. Host is explicit here (one-off internal target); warehouse id and
-  # this workspace's own catalogs come from deploy-time --var overrides, since the
-  # packaged megacorp/logistics defaults don't exist here. Target key is hyphen-free
-  # so `erd-explorer-${bundle.target}` stays a valid app name.
-  efinternal:
-    workspace:
-      host: https://fevm-ef-internal.cloud.databricks.com
+  # Example on-behalf-of-user (OBO) target. OBO needs a complex `user_api_scopes` value,
+  # which the CLI can't set via --var, so auth_mode + the scope list are set here at the
+  # target level. Declaring the scope in the bundle (rather than out-of-band via
+  # `apps update`) is what makes it survive `bundle deploy`, which regenerates the app
+  # resource. No `host` (picked from your --profile, like dev/prod) and no `mode`
+  # (`development` would prefix the app name with "[dev <user>]"). The OBO app's own
+  # service principal needs no data-catalog grants (the ERD queries run as the logged-in
+  # user); it still needs the Genie metadata-location grant, and each end user needs
+  # CAN_USE on the warehouse plus their own catalog privileges. Deploy with:
+  #   databricks bundle deploy -t obo -p <profile> --var="warehouse_id=..." --var="erd_catalogs=..."
+  #   databricks bundle run erd_explorer_app -t obo -p <profile> --var="warehouse_id=..." --var="erd_catalogs=..."
+  obo:
+    variables:
+      auth_mode: "on_behalf_of_user"
+      user_api_scopes: ["sql"]
 
 resources:
   apps:
@@ -92,6 +120,10 @@ resources:
       name: "erd-explorer-${bundle.target}"
       description: "Interactive Unity Catalog ERD viewer (megacorp, logistics)"
       source_code_path: ./
+      # User authorization scopes for on-behalf-of-user mode. Declared here so
+      # `bundle deploy` sets them (and doesn't reset them) -- see var.user_api_scopes.
+      # Empty in service_principal mode; ["sql"] for OBO.
+      user_api_scopes: ${var.user_api_scopes}
       # ERD_CATALOGS is templated from the SAME var.erd_catalogs the setup job below
       # uses for the Genie Space -- one variable, two consumers, never drifts.
       config:
@@ -117,6 +149,8 @@ resources:
             value: ${var.erd_schema_collapse_threshold}
           - name: "ERD_TEST_CATALOG_SUFFIX"
             value: ${var.erd_test_catalog_suffix}
+          - name: "ERD_AUTH_MODE"
+            value: ${var.auth_mode}
       resources:
         - name: sql-warehouse
           description: "Warehouse for information_schema metadata queries"

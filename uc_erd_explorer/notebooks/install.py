@@ -39,6 +39,7 @@ dbutils.widgets.text("erd_metadata_location", "", "Genie metadata views location
 dbutils.widgets.dropdown("create_demo_data", "no", ["yes", "no"], "Create the synthetic megacorp schemas/tables? Works whether demo_catalog already exists (e.g. you don't have CREATE CATALOG permission -- only schemas/tables get added to it) or not (it gets created too)")
 dbutils.widgets.text("demo_catalog", "", "Catalog to create the demo data in (only used if create_demo_data=yes). Blank = reuse the first erd_catalogs entry, so you don't have to type the same catalog name twice; falls back to \"megacorp\" if erd_catalogs is also blank.")
 dbutils.widgets.dropdown("add_demo_metadata", "no", ["yes", "no"], "Also add illustrative COMMENTs/tags to the demo data? (separate opt-in -- most real deployments won't want fabricated metadata layered onto their own catalogs, and even demo users may want the bare structure only)")
+dbutils.widgets.dropdown("auth_mode", "service_principal", ["service_principal", "on_behalf_of_user"], "Which identity the ERD queries run as. service_principal (default) = the app queries as its own SP, bounded by erd_catalogs. on_behalf_of_user = queries as the LOGGED-IN USER (filtered by their own UC privileges); grants the app the 'sql' user scope and grants the SP only the Genie metadata location (no data-catalog grants). In OBO each end user needs their own catalog privileges + CAN_USE on the warehouse.")
 
 # COMMAND ----------
 
@@ -59,6 +60,8 @@ erd_metadata_location_raw = dbutils.widgets.get("erd_metadata_location").strip()
 create_demo_data = dbutils.widgets.get("create_demo_data") == "yes"
 demo_catalog_raw = dbutils.widgets.get("demo_catalog").strip()
 add_demo_metadata = dbutils.widgets.get("add_demo_metadata") == "yes"
+auth_mode = dbutils.widgets.get("auth_mode").strip() or "service_principal"
+obo = auth_mode == "on_behalf_of_user"
 
 assert repo_root_widget, "repo_root widget is required -- the Workspace path to the uc_erd_explorer folder (one level in from the demo-assets git checkout)"
 assert app_name, "app_name widget is required"
@@ -103,6 +106,7 @@ print(f"catalogs={catalogs}")
 print(f"metadata_location={metadata_location}")
 print(f"create_demo_data={create_demo_data}")
 print(f"demo_catalog={demo_catalog}")
+print(f"auth_mode={auth_mode}")
 print(f"add_demo_metadata={add_demo_metadata}")
 
 # COMMAND ----------
@@ -297,16 +301,38 @@ def start_app(name: str) -> dict:
     return _wait_for_app_active(name)
 
 
+def ensure_user_api_scopes(name: str, scopes: list) -> None:
+    """Set the app's user authorization scopes (on-behalf-of-user mode). Idempotent, so
+    it's safe on re-run and on an already-existing app (get_or_create_app returns an
+    existing app untouched). Unlike the DAB route -- where `bundle deploy` regenerates the
+    app resource and would reset scopes set out-of-band -- this notebook manages the app
+    via raw REST, so a scope set here persists. The app is (re)started below, which is
+    what makes newly-added scopes take effect."""
+    w.api_client.do(
+        method="PATCH",
+        path=f"/api/2.0/apps/{name}",
+        query={"update_mask": "user_api_scopes"},
+        body={"user_api_scopes": scopes},
+    )
+    print(f"Set user_api_scopes={scopes} on {name}.")
+
+
 app = get_or_create_app(app_name, warehouse_id)
 app_sp_client_id = app["service_principal_client_id"]
 print(f"App: {app['name']} (service_principal_client_id={app_sp_client_id})")
+
+# On-behalf-of-user mode needs the app to hold the "sql" user authorization scope so the
+# forwarded user token can call the SQL Statement Execution API; set before deploy/start
+# so the restart applies it. Left untouched in service-principal mode.
+if obo:
+    ensure_user_api_scopes(app_name, ["sql"])
 
 # First deploy: GENIE_SPACE_ID isn't known yet (created in the next step) -- deploy once
 # without it, the chat will show a friendly "not configured" message until step 8 redeploys.
 deploy_app(
     app_name,
     deploy_local_path,
-    {"DATABRICKS_WAREHOUSE_ID": warehouse_id, "ERD_CATALOGS": ",".join(catalogs)},
+    {"DATABRICKS_WAREHOUSE_ID": warehouse_id, "ERD_CATALOGS": ",".join(catalogs), "ERD_AUTH_MODE": auth_mode},
 )
 print("Initial deployment complete.")
 
@@ -375,6 +401,7 @@ deploy_app(
         "DATABRICKS_WAREHOUSE_ID": warehouse_id,
         "ERD_CATALOGS": ",".join(catalogs),
         "GENIE_SPACE_ID": genie_space_id,
+        "ERD_AUTH_MODE": auth_mode,
     },
 )
 start_app(app_name)
@@ -400,4 +427,13 @@ print(f"\nApp is live: {app['url']}")
 
 # COMMAND ----------
 
-grant_catalog_access.grant_catalog_access(w, warehouse_id, catalogs, metadata_catalog, metadata_schema, app_sp_client_id)
+# In on-behalf-of-user mode the ERD queries run as the logged-in user, so the app's
+# service principal needs NO data-catalog grants -- passing catalogs=[] grants only the
+# Genie metadata location (Genie still runs as the SP and needs its scoped views). Each
+# end user must have their own USE CATALOG/SELECT on the data + CAN_USE on the warehouse.
+# In service-principal mode the SP is the querying identity, so it gets the full grants.
+grant_catalogs = [] if obo else catalogs
+if obo:
+    print("OBO mode: granting the SP only the Genie metadata location (queries run as the "
+          "logged-in user; end users need their own catalog privileges + warehouse CAN_USE).")
+grant_catalog_access.grant_catalog_access(w, warehouse_id, grant_catalogs, metadata_catalog, metadata_schema, app_sp_client_id)

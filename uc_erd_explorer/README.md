@@ -35,6 +35,14 @@ asking schema questions in plain English.
   no formal constraint declared) and renders them as dashed, distinctly colored edges,
   clearly labeled "inferred" — off by default, one click to show, never presented as
   equivalent to a real constraint.
+- **Keys-only column view**: a sidebar toggle that collapses every table to just its
+  primary- and foreign-key columns, so wide tables (dozens of columns) stay readable. A
+  table with no declared PK/FK renders as a header-only card — expected, and called out
+  in the toggle's hint along with a count of the affected tables. Purely client-side (the
+  graph already carries per-column PK/FK flags), so toggling is instant and never
+  re-queries. When "inferred relationships" are also shown, the column backing each
+  visible inferred edge is revealed too, so a dashed edge is never left pointing at a
+  table with no visible column.
 - **Scales to large catalogs**: `/api/graph` results are cached in-memory, and catalogs
   above a configurable table-count threshold default to one node per schema instead of
   one per table — click a schema node to expand it to full table-level detail (the same
@@ -271,6 +279,7 @@ entirely from inside the workspace UI.
    | `create_demo_data` | no (default `no`) | Set to `yes` to create the synthetic megacorp schemas/tables in `demo_catalog`. Works whether `demo_catalog` already exists (e.g. you don't have CREATE CATALOG permission -- only schemas/tables get added to it) or not (it gets created too) |
    | `demo_catalog` | no (default blank) | Catalog to create the demo data in, only used if `create_demo_data=yes`. Blank reuses the first `erd_catalogs` entry, so the common case (demo data + app pointed at the same catalog) only needs `erd_catalogs` filled in; falls back to `megacorp` if `erd_catalogs` is also blank |
    | `add_demo_metadata` | no (default `no`) | Independent of `create_demo_data` -- set to `yes` to also layer illustrative comments/tags onto the demo data, for demoing the comment/tag surfacing feature |
+   | `auth_mode` | no (default `service_principal`) | Query identity: `service_principal` (the app's own SP, bounded by `erd_catalogs`) or `on_behalf_of_user` (queries as the logged-in user — see "On-behalf-of-user authorization"). OBO also grants the app the `sql` user scope and skips the SP's data-catalog grants (granting only the Genie metadata location) |
 
 4. Fill in the widgets, then **Run all** again. The notebook will, in order: optionally
    create the demo data, create the scoped Genie metadata views, stage an isolated
@@ -335,6 +344,8 @@ the notebook re-run) to catch up.
 | `erd_cache_ttl_seconds` | `ERD_CACHE_TTL_SECONDS` | `300` | How long `/api/graph` results are cached in-memory before re-querying `information_schema` |
 | `erd_schema_collapse_threshold` | `ERD_SCHEMA_COLLAPSE_THRESHOLD` | `80` | Table count above which the ERD defaults to one node per schema (click to expand); `0` always renders full detail |
 | `erd_test_catalog_suffix` | `ERD_TEST_CATALOG_SUFFIX` | `_ts` | Suffix appended to each `erd_catalogs` entry when the frontend's Prod/Test toggle is set to Test (e.g. `edp_customer` → `edp_customer_ts`) |
+| `auth_mode` | `ERD_AUTH_MODE` | `service_principal` | Which identity the ERD queries run as. `service_principal` (default) queries as the app's own SP, bounded by `erd_catalogs`. `on_behalf_of_user` queries as the **logged-in user**, filtered by their own UC privileges — see "On-behalf-of-user authorization" below |
+| `user_api_scopes` | *(app config, not an env var)* | `[]` | User authorization scopes the app requests for OBO; set to `["sql"]` for `on_behalf_of_user`. A **complex** (list) value the CLI can't set via `--var`, so it's declared at the bundle **target** level — see below |
 
 ### Prod/Test catalog toggle
 
@@ -388,6 +399,58 @@ instead of unscoped mode.
 in the list to default the metadata views into) and can point at any catalog you like,
 including one not otherwise shown in the graph.
 
+### On-behalf-of-user (OBO) authorization
+
+By default the ERD queries `information_schema` as the app's **own service principal**,
+bounded by `erd_catalogs` — every user sees the same graph. Set `auth_mode` /
+`ERD_AUTH_MODE` to `on_behalf_of_user` to instead run every metadata query as the
+**logged-in user**, via the token Databricks Apps forward in the `x-forwarded-access-token`
+header. The graph is then filtered by that user's own Unity Catalog privileges,
+intersected with `erd_catalogs` (which still applies as the upper-bound allow-list).
+Different users can see different diagrams, and the app's service principal no longer needs
+broad data grants. The default (`service_principal`) is unchanged, so nothing switches to
+OBO unless you deploy with the flag.
+
+OBO needs three things:
+
+1. **`ERD_AUTH_MODE=on_behalf_of_user`** on the app.
+2. **The `sql` user authorization scope** granted to the app, so the forwarded user token
+   can call the SQL Statement Execution API. This is declared as `user_api_scopes: ["sql"]`
+   and **must** be part of the deploy config — not set out-of-band via `apps update`,
+   because `bundle deploy` regenerates the app resource and would silently reset the scope
+   on the next deploy.
+3. **Each end user needs `CAN_USE` on the SQL warehouse** plus their own UC privileges on
+   the catalogs — the query runs as them, not the SP.
+
+Because `user_api_scopes` is a complex (list) value the CLI can't set via `--var`, OBO on
+the **CLI/DAB route** is expressed as a dedicated bundle **target** rather than a bare
+flag:
+
+```yaml
+targets:
+  obo:                       # deploy with: databricks bundle deploy -t obo -p <profile> ...
+    variables:
+      auth_mode: "on_behalf_of_user"
+      user_api_scopes: ["sql"]
+```
+
+```bash
+databricks bundle deploy -t obo -p <profile> \
+    --var="warehouse_id=<your-warehouse-id>" --var="erd_catalogs=<your-catalogs>"
+databricks bundle run erd_explorer_app -t obo -p <profile> \
+    --var="warehouse_id=<your-warehouse-id>" --var="erd_catalogs=<your-catalogs>"
+```
+
+On the **notebook route**, set the `auth_mode` widget to `on_behalf_of_user`. The notebook
+sets `ERD_AUTH_MODE`, applies the `sql` scope via the Apps API (which persists there, since
+the notebook manages the app directly rather than through a regenerated bundle spec), and
+grants the SP **only** the Genie metadata location — no data-catalog grants, since the ERD
+runs as the user.
+
+**Genie stays on the service principal** in both modes — the chat proxy isn't part of OBO,
+and its scoped views still need the SP granted on `erd_metadata_location` (the deploy
+handles this).
+
 ## Permissions
 
 Two things need granting. Both are automated now — you don't need to hand-craft or
@@ -418,6 +481,14 @@ to grant on; the app relies on whatever grants its service principal already has
 ACL from Unity Catalog grants. This one is also automated: `setup/create_genie_space.py`
 takes `--grant-to-app <app-name>` (already wired into the DAB job) and grants the app's
 service principal `CAN_RUN` on the space automatically every time the setup job runs.
+
+**On-behalf-of-user mode** (`auth_mode=on_behalf_of_user`): the ERD queries run as the
+logged-in user, so the app's service principal does **not** need the catalog data grants
+in (1) — each user's own UC privileges govern what they see (still bounded by
+`erd_catalogs`), and each user needs `CAN_USE` on the warehouse. The SP still needs the
+metadata-location grant in (1) and the Genie `CAN_RUN` grant in (2), since Genie keeps
+running as the SP. The notebook route grants exactly this (metadata location only) in OBO
+mode.
 
 ## Local development
 
