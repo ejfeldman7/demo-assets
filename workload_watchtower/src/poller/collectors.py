@@ -90,6 +90,15 @@ def collect_queries(w: WorkspaceClient, wh_size_cache: dict) -> list[dict]:
 # Capture the value in `SET STATEMENT_TIMEOUT = 300` or `SET statement_timeout TO 300`.
 _TIMEOUT_VAL_RE = re.compile(r"statement_timeout\s*(?:=|to)?\s*'?(\d+)", re.IGNORECASE)
 
+# A genuine session SET of statement_timeout: the statement is a SET (after any leading SQL
+# line/block comments + whitespace) that mentions statement_timeout. This flags real overrides —
+# including `-- note\nSET statement_timeout=...` — while excluding statements that merely embed the
+# text as a value (e.g. the poller's own INSERTs into alert_events), which is the false positive the
+# earlier substring match produced.
+_SET_TIMEOUT_RE = re.compile(
+    r"^\s*(?:--[^\n]*\n\s*|/\*.*?\*/\s*)*set\b[^;]*statement_timeout",
+    re.IGNORECASE | re.DOTALL)
+
 
 def collect_timeout_overrides(w: WorkspaceClient, window_minutes: int = 15) -> list[dict]:
     """Session-level `SET STATEMENT_TIMEOUT` statements from Query History — a user overriding the
@@ -102,11 +111,7 @@ def collect_timeout_overrides(w: WorkspaceClient, window_minutes: int = 15) -> l
     resp = w.query_history.list(filter_by=flt, include_metrics=False, max_results=1000)
     for q in (resp.res or []):
         text = (q.query_text or "")
-        low = text.lstrip().lower()
-        # Only a genuine session SET of statement_timeout — the statement must START with `set`
-        # (optionally `set session`). This avoids false positives from other statements that merely
-        # embed the text, e.g. the poller's own INSERTs that persist a flagged override's SQL.
-        if not low.startswith("set") or "statement_timeout" not in low:
+        if not _SET_TIMEOUT_RE.match(text):
             continue
         m = _TIMEOUT_VAL_RE.search(text)
         val = int(m.group(1)) if m else None

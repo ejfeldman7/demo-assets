@@ -117,7 +117,10 @@ def _lit(v) -> str:
         # so a non-UTC poller host doesn't shift the timestamp.
         if v.tzinfo is None:
             v = v.replace(tzinfo=timezone.utc)
-        return "TIMESTAMP '%s'" % v.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        # Emit an explicit +00:00 offset so the value is an unambiguous UTC instant regardless of
+        # the warehouse's session timezone (a zone-less literal is read in the session tz, which
+        # would offset event_ts from current_timestamp() in the alert window on non-UTC sessions).
+        return "TIMESTAMP '%s+00:00'" % v.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
     # Spark SQL treats backslash as an escape char in string literals — double it, then quotes
     return "'" + str(v).replace("\\", "\\\\").replace("'", "''") + "'"
 
