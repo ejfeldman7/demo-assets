@@ -1,0 +1,3 @@
+# Python deps for the setup/bootstrap scripts (run locally as the schema owner).
+databricks-sdk>=0.96.0
+psycopg[binary]>=3.1

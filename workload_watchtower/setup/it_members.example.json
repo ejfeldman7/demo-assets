@@ -1,0 +1,5 @@
+[
+  { "name": "Platform Admin",   "email": "platform-admin@example.com", "role": "admin" },
+  { "name": "On-call Engineer", "email": "oncall@example.com",         "role": "oncall" },
+  { "name": "Data Triager",     "email": "triager@example.com",        "role": "triager" }
+]
