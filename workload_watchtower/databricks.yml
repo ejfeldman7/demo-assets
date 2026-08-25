@@ -33,6 +33,16 @@ resources:
         quartz_cron_expression: ${var.poller_schedule}
         timezone_id: UTC
         pause_status: UNPAUSED
+      # ── Optional: native alerting (complements the app's in-app email automations) ──────────
+      # The poller is an ordinary job, so you can route its notifications through channels you
+      # already run — no SMTP in the app. Uncomment to alert on job FAILURE (pair with the
+      # opt-in --fail-on-critical parameter below so a "failure" means a new critical finding).
+      # email_notifications:
+      #   on_failure:
+      #     - platform-oncall@example.com
+      # webhook_notifications:      # IDs come from Settings → Notifications → system destinations
+      #   on_failure:               # (Slack / PagerDuty / Teams / generic webhook)
+      #     - id: <system-destination-id>
       tasks:
         - task_key: poll
           spark_python_task:
@@ -46,6 +56,9 @@ resources:
               - "--lakebase-host=${var.lakebase_host}"
               - "--lakebase-schema=${var.lakebase_schema}"
               - "--secret-scope=${var.secret_scope}"
+              # Opt-in: exit non-zero when a NEW critical finding is raised, so the job's
+              # on_failure notifications (above) fire. Off unless set true. See "Alerting options".
+              # - "--fail-on-critical=true"
           environment_key: poller_env
       environments:
         - environment_key: poller_env

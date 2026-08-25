@@ -203,12 +203,38 @@ unassigned and you assign them in the app.
 - **Schedule** — the poller runs every 5 min (`poller_schedule` in `config.env`). The app's
   **Run poll** button triggers it on demand.
 - **Rules** — thresholds, severity, action, enabled — all editable in the **Rules** tab.
-- **Email** — recipients are managed in **Actions → Distribution list**; SMTP config lives in the
-  secret scope. No SMTP = nothing is emailed (findings still appear on the board).
+- **Email (optional)** — to enable, set `CONFIGURE_SMTP="true"` and the `SMTP_*` values in
+  `config.env` before running setup (it creates the secret scope, grants the app SP `READ`, and
+  stores the creds); to add it after the fact, follow `docs/RUNBOOK.md` §4d. Recipients are managed
+  in **Actions → Distribution list**. Left off (the default), nothing is emailed — findings still
+  appear on the board.
 - **AI model** — `WT_MODEL` selects the Foundation Model; swap endpoints in `config.env` and re-run
   the app-deploy step. Calls go through the workspace serving endpoints — route via AI Gateway for
   governance/telemetry.
 - **Re-run setup** any time — it's idempotent and only creates what's missing.
+
+## Alerting options
+
+There are two complementary ways to get notified — use either or both:
+
+1. **In-app (built in)** — the rule engine + **email automations**: critical findings auto-send to
+   the distribution list, warnings draft for one-click send, and everything is triaged on the board.
+   This is per-finding and self-contained (needs the optional SMTP config above).
+
+2. **Native Databricks Job notifications** — because the poller is an ordinary Lakeflow job, you can
+   attach the platform's own notifications to it and route through channels you already run, with no
+   SMTP in the app:
+   - `email_notifications` on the job (on failure / on success / on duration-warning), and
+   - `webhook_notifications` → **system destinations** (workspace admin: *Settings → Notifications*)
+     for **Slack, PagerDuty, Microsoft Teams, or a generic webhook**.
+
+   To alert through these on a *finding* (not just an infra failure), enable the poller's opt-in
+   **fail-on-critical** mode: set `--fail-on-critical=true` on the poll task (see the commented block
+   in [`databricks.yml`](databricks.yml)). The poll still records everything to Lakebase/UC as usual,
+   then exits non-zero when it raised a **new critical** finding — so the job's `on_failure`
+   notifications fire and route to Slack/PagerDuty/email. Trade-off: alerts are per *poll run*, not
+   per finding, and a "failed" run means *"a critical workload was detected,"* so note that for
+   on-call. It's **off by default**, keeping the schedule green until you opt in.
 
 ## Local development
 

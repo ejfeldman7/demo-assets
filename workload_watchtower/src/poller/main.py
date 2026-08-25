@@ -76,6 +76,7 @@ def _config_from_args() -> None:
     setdefault("LAKEBASE_HOST", args.get("lakebase-host"))
     setdefault("LAKEBASE_SCHEMA", args.get("lakebase-schema"))
     setdefault("WT_SMTP_SCOPE", args.get("secret-scope"))
+    setdefault("WT_FAIL_ON_CRITICAL", args.get("fail-on-critical"))
     # UC snapshot/alert tables derive from a single <catalog>.<schema> for convenience.
     uc = args.get("uc-schema")
     if uc:
@@ -257,7 +258,7 @@ def poll(w: WorkspaceClient) -> dict:
             findings.append(wl)
 
     # 4/5. persist findings + cards + alerts + snapshots
-    new_ct = upd_ct = 0
+    new_ct = upd_ct = new_critical = 0
     snap_rows, alert_rows, pending_sends = [], [], []
     poll_ts = datetime.now(timezone.utc)
     rr = 0  # round-robin assignee index
@@ -290,6 +291,8 @@ def poll(w: WorkspaceClient) -> dict:
             fid, inserted = cur.fetchone()
             if inserted:
                 new_ct += 1
+                if m["rule"]["severity"] == "critical":
+                    new_critical += 1
                 # auto-create triage card (round-robin assignee) if action includes 'card'
                 if "card" in m["actions"]:
                     assignee = roster[rr % len(roster)] if roster else None
@@ -368,8 +371,8 @@ def poll(w: WorkspaceClient) -> dict:
             (dur_ms, len(workloads), Json(seen_by_type), new_ct, upd_ct, "; ".join(errors) or None))
 
     summary = {"workloads_seen": len(workloads), "seen_by_type": seen_by_type,
-               "findings": len(findings), "new": new_ct, "updated": upd_ct,
-               "errors": errors, "duration_ms": dur_ms, "list_price": price}
+               "findings": len(findings), "new": new_ct, "new_critical": new_critical,
+               "updated": upd_ct, "errors": errors, "duration_ms": dur_ms, "list_price": price}
     log.info("poll complete: %s", summary)
     return summary
 
@@ -382,7 +385,14 @@ def main() -> None:
         # A non-owner run identity (e.g. the app SP) can't (re)create indexes on tables it
         # doesn't own — that's expected; the schema is created once by the owner. Poll anyway.
         log.info("bootstrap_schema skipped (already exists / not owner): %s", exc)
-    poll(w)
+    summary = poll(w)
+    # Opt-in: fail the job run when a NEW critical finding was raised, so the job's native
+    # notifications (email / Slack / PagerDuty via webhook_notifications) fire. Off by default.
+    if os.environ.get("WT_FAIL_ON_CRITICAL", "").strip().lower() in ("1", "true", "yes") \
+            and summary.get("new_critical"):
+        raise SystemExit(
+            f"WT_FAIL_ON_CRITICAL: {summary['new_critical']} new critical finding(s) this poll "
+            f"— failing the run to trigger native job notifications (findings already recorded).")
 
 
 if __name__ == "__main__":
