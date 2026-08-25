@@ -41,6 +41,44 @@ reconciliation), fronted by a **FastAPI + React** app.
   [mohanab89/databricks-dashboard-suite](https://github.com/mohanab89/databricks-dashboard-suite);
   see [`monitoring/NOTICE.md`](monitoring/NOTICE.md).)
 
+## Screenshots
+
+_From a live deployment. The dark, left-nav shell is styled to feel native to the Databricks
+product._
+
+**Dashboard** — open findings by severity, live estimated spend, triage load, last-poll workload
+mix, and flagged spend/volume trends.
+
+![Dashboard](docs/screenshots/dashboard.png)
+
+**Triage Board** — a Kanban of flagged workloads with per-card assignee/priority/status and
+violation badges (`COST BURST`, `LONG RUNNING`, `STATEMENT TIMEOUT OVERRIDE`).
+
+![Triage Board](docs/screenshots/triage-board.png)
+
+**Triage Copilot** — per-finding "Explain": a Foundation Model diagnoses *why* a workload is
+slow/costly (grounded in its real Query History metrics) and gives ranked, Databricks-specific
+remediations plus a drafted note to the owner.
+
+![Triage Copilot](docs/screenshots/triage-copilot.png)
+
+**Ask Watchtower** — natural-language Q&A grounded in the current findings, cards, and rules.
+
+![Ask Watchtower](docs/screenshots/ask.png)
+
+**Rules** — thresholds on elapsed time / estimated cost, plus the session `SET STATEMENT_TIMEOUT`
+governance rule — all editable in-app.
+
+![Rules](docs/screenshots/rules.png)
+
+**Findings** — every open detection with owner, elapsed, estimated cost, and violation reason.
+
+![Findings](docs/screenshots/findings.png)
+
+> A **Monitoring** page also embeds the 6-page AI/BI Cost & Usage dashboard; the embed requires the
+> workspace's AI/BI dashboard-embedding policy to allow the app domain (see
+> [`docs/RUNBOOK.md`](docs/RUNBOOK.md) → *Enable the Monitoring dashboard embed*).
+
 ## Architecture
 
 ```
@@ -86,15 +124,51 @@ $EDITOR setup/config.env
 ./setup/setup.sh
 ```
 
-`setup/setup.sh` ensures the Lakebase project, creates the UC history schema + tables, bootstraps
-the Postgres schema and seeds the governance rules, creates the app (minting its service
-principal), federates + grants that SP on Lakebase / UC / the warehouse, deploys the poller job,
-optionally deploys the Monitoring dashboard and writes SMTP secrets, renders `app/app.yaml`, builds
-the frontend, and deploys the app.
+`setup/setup.sh` is idempotent and prints a plan for confirmation before making any change. In one
+pass it:
+
+1. Ensures the **Lakebase** (Autoscaling) project/branch/endpoint and discovers its host.
+2. Creates the **UC history** schema + Delta tables + reconciliation view (on the warehouse).
+3. Bootstraps the **Postgres schema** and seeds the governance **rules** (+ optional roster).
+4. Creates the **Databricks App**, minting its **service principal**.
+5. **Federates** that SP into Lakebase (`postgres create-role`) and **grants** it: Postgres schema
+   privileges, UC `USE_CATALOG` / `USE_SCHEMA` / `SELECT` / `MODIFY`, warehouse `CAN_USE`, and
+   `CAN_MANAGE_RUN` on the poller job (so the app's **Run poll** button works).
+6. Deploys the **poller job** (serverless, on the schedule in `config.env`).
+7. Optionally deploys the **Monitoring dashboard** (writing its URLs back to `config.env`) and
+   writes **SMTP** secrets.
+8. Renders `app/app.yaml`, builds the frontend, and **deploys the app** (from a staging copy, so
+   the rendered `app.yaml` is uploaded).
+
+Re-run it any time — completed steps are detected and reused.
 
 **Then read [`docs/RUNBOOK.md`](docs/RUNBOOK.md)** for the steps a script can't safely do for you:
 the account-admin grant to run the poller as the app SP, enabling AI/BI dashboard embedding, the
-app-resource / deploy UI fallbacks, and how to verify the end-to-end flow.
+app-deploy UI fallback, and how to verify the end-to-end flow.
+
+## Service principals & the poller identity
+
+Two identities matter; understanding them makes the permission model (and the runbook) clear.
+
+- **The app service principal** — auto-minted when the app is created. `setup.sh` federates it into
+  Lakebase and grants it everything the *running app* needs: Lakebase schema access, UC read/write
+  on the history schema, warehouse `CAN_USE`, and run permission on the poller job. The app mints
+  short-lived Lakebase credentials with this SP's own OAuth token (no stored password), and
+  `PGUSER` is set to the SP's client id (its federated Postgres role).
+
+- **The poller's `run_as` identity** — who the scheduled poller job runs as. It reads *all* users'
+  Query History / Jobs / Pipelines, so this identity **must be a workspace admin**.
+  - **Default: the deploying admin (you).** With no `run_as` in `databricks.yml`, the bundle runs
+    the job as whoever deploys it. Simplest, and needs no extra grant — just be a workspace admin.
+  - **Recommended for production: the app SP**, so the job isn't tied to a person. This needs one
+    **account-admin** action — granting your user the `servicePrincipal.user` role *on the app SP*
+    so the bundle can bind `run_as` to it — then a small `run_as` edit in `databricks.yml`. Full
+    steps are in [`docs/RUNBOOK.md`](docs/RUNBOOK.md) → *Run the poller as the app service
+    principal*. (The SP is already a workspace admin and Lakebase/UC/warehouse-granted from setup;
+    the app SP triggering the job via the Run-poll button works either way.)
+
+There is **no dedicated poller SP** — the app SP is reused for both roles to keep the identity and
+grant surface small.
 
 ## Configuration
 

@@ -98,8 +98,11 @@ def collect_timeout_overrides(w: WorkspaceClient, window_minutes: int = 15) -> l
     resp = w.query_history.list(filter_by=flt, include_metrics=False, max_results=1000)
     for q in (resp.res or []):
         text = (q.query_text or "")
-        low = text.lower()
-        if "statement_timeout" not in low or "set" not in low:
+        low = text.lstrip().lower()
+        # Only a genuine session SET of statement_timeout — the statement must START with `set`
+        # (optionally `set session`). This avoids false positives from other statements that merely
+        # embed the text, e.g. the poller's own INSERTs that persist a flagged override's SQL.
+        if not low.startswith("set") or "statement_timeout" not in low:
             continue
         m = _TIMEOUT_VAL_RE.search(text)
         val = int(m.group(1)) if m else None
