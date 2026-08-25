@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+
+# Node
+node_modules/
+npm-debug.log*
+frontend/node_modules/
+
+# Vite / TS build caches (but DO keep frontend/dist for deployment)
+frontend/*.tsbuildinfo
+frontend/.vite/
+# tsc -b emits these from the composite vite.config project
+frontend/vite.config.js
+frontend/vite.config.d.ts
+
+# IDE / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# Databricks
+.databricks/

@@ -1,0 +1,47 @@
+# app.yaml TEMPLATE — setup/setup.sh renders this into app/app.yaml (gitignored) by
+# substituting ${VARS} from setup/config.env. Do not edit the rendered file by hand;
+# edit this template (or config.env) and re-run setup.
+command:
+  - "python"
+  - "-m"
+  - "uvicorn"
+  - "app:app"
+  - "--host"
+  - "0.0.0.0"
+  - "--port"
+  - "8000"
+
+env:
+  # Autoscaling Lakebase endpoint (creds minted via w.postgres). PGHOST/PGUSER/PGPORT/
+  # PGDATABASE are auto-injected when the Lakebase database is attached as an app resource;
+  # LAKEBASE_HOST is a fallback for the connection host.
+  - name: ENDPOINT_NAME
+    value: "${LAKEBASE_ENDPOINT}"
+  - name: LAKEBASE_HOST
+    value: "${LAKEBASE_HOST}"
+  - name: LAKEBASE_SCHEMA
+    value: "${LAKEBASE_SCHEMA}"
+  # SQL warehouse for UC Delta reads (trends) + live list-price lookups.
+  - name: WT_WAREHOUSE_ID
+    value: "${WAREHOUSE_ID}"
+  # Fully-qualified <catalog>.<schema>.workload_snapshots for trend queries.
+  - name: WT_UC_SNAPSHOTS
+    value: "${UC_SCHEMA}.workload_snapshots"
+  # Name of the poller job (the "Run poll" admin button triggers it).
+  - name: WT_POLLER_JOB_NAME
+    value: "${POLLER_JOB_NAME}"
+  # Label shown in the top-right workspace chip / avatar.
+  - name: WT_WORKSPACE_LABEL
+    value: "${WORKSPACE_LABEL}"
+  # Secret scope holding SMTP settings (email automations). Optional — unset = no email.
+  - name: WT_SMTP_SCOPE
+    value: "${SECRET_SCOPE}"
+  # Agentic features (Triage Copilot + Ask Watchtower). Any chat serving endpoint works.
+  - name: WT_MODEL
+    value: "${WT_MODEL}"
+  # Published Lakeview "Cost & Usage Suite" dashboard for the Monitoring page (link + embed).
+  # Filled in by setup after the dashboard is deployed; leave empty to hide the Monitoring page.
+  - name: WT_DASHBOARD_URL
+    value: "${DASHBOARD_URL}"
+  - name: WT_DASHBOARD_EMBED_URL
+    value: "${DASHBOARD_EMBED_URL}"

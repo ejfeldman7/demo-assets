@@ -1,0 +1,71 @@
+bundle:
+  name: workload_watchtower
+
+# All values are supplied at deploy time from setup/config.env (setup/setup.sh passes them
+# as --var flags). No environment-specific defaults are committed here.
+variables:
+  workspace_host:
+    description: Workspace URL, e.g. https://<workspace>.cloud.databricks.com
+  warehouse_id:
+    description: SQL warehouse ID for UC Delta DDL / reads and live list-price lookups.
+  uc_schema:
+    description: Unity Catalog <catalog>.<schema> for append-only history (snapshots/alerts).
+  lakebase_endpoint:
+    description: Autoscaling Lakebase endpoint path (projects/<p>/branches/<b>/endpoints/<e>).
+  lakebase_host:
+    description: Lakebase read-write endpoint host.
+  lakebase_schema:
+    description: Postgres schema holding the app's triage state.
+    default: watchtower
+  secret_scope:
+    description: Databricks secret scope holding SMTP settings (email automations).
+    default: watchtower
+  poller_schedule:
+    description: Quartz cron for the poll interval.
+    default: "0 0/5 * * * ?"
+
+resources:
+  jobs:
+    # ── Core poller: reads live workload state on the schedule below ────────────
+    watchtower_poller:
+      name: watchtower-poller
+      description: "Polls live Databricks APIs for long-running / costly workloads."
+      # Re-pause by flipping pause_status to PAUSED and redeploying.
+      schedule:
+        quartz_cron_expression: ${var.poller_schedule}
+        timezone_id: UTC
+        pause_status: UNPAUSED
+      tasks:
+        - task_key: poll
+          spark_python_task:
+            python_file: src/poller/main.py
+            # Serverless can't set arbitrary env vars, so deployment config is passed as
+            # parameters; main.py translates these into the env vars the modules read.
+            parameters:
+              - "--warehouse-id=${var.warehouse_id}"
+              - "--uc-schema=${var.uc_schema}"
+              - "--lakebase-endpoint=${var.lakebase_endpoint}"
+              - "--lakebase-host=${var.lakebase_host}"
+              - "--lakebase-schema=${var.lakebase_schema}"
+              - "--secret-scope=${var.secret_scope}"
+          environment_key: poller_env
+      environments:
+        - environment_key: poller_env
+          spec:
+            client: "3"
+            dependencies:
+              - "psycopg[binary]"
+              # >=0.96.0 required: older SDKs on the serverless base image lack
+              # w.postgres (Lakebase credential minting), and a loose pin won't upgrade.
+              - "databricks-sdk>=0.96.0"
+
+targets:
+  default:
+    default: true
+    workspace:
+      host: ${var.workspace_host}
+    # By default the poller runs as the deploying user, who must be a workspace admin (for
+    # cross-user Query History / Jobs / Pipelines visibility). To run it as the app service
+    # principal instead — so it isn't tied to a person — see docs/RUNBOOK.md ("Run the poller
+    # as the app service principal"): grant your user `servicePrincipal.user` on the SP, then
+    # add a `run_as: { service_principal_name: <app-sp-client-id> }` block here and redeploy.
