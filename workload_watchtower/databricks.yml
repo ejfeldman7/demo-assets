@@ -21,6 +21,13 @@ variables:
   poller_schedule:
     description: Quartz cron for the poll interval.
     default: "0 0/5 * * * ?"
+  alert_window_minutes:
+    description: >-
+      Look-back window (minutes) for the "new critical findings" SQL alert. MUST be shorter than
+      the poll interval so the window empties between polls — otherwise a still-in-window critical
+      keeps the alert latched TRIGGERED and the next new critical won't re-notify. Default 4 pairs
+      with the default 5-minute poll; lower it if you poll more often.
+    default: 4
 
 resources:
   jobs:
@@ -65,6 +72,14 @@ resources:
         # ── Alert gate: evaluate the "new critical findings" SQL alert right after each poll ──
         # Runs on the poller's schedule (no separate alert schedule); succeeds whether or not it
         # fires, so it never turns the job red. Notifies via the alert's own subscriptions.
+        #
+        # This is native alerting OPTION 2 and is MUTUALLY EXCLUSIVE with option 3
+        # (--fail-on-critical): that flag fails the poll task exactly when a new critical occurs,
+        # and this task's `depends_on: poll` (default ALL_SUCCESS) would then be SKIPPED on the very
+        # runs that matter. Use one or the other, not both.
+        # To NOT use option 2 (want only in-app email, or the option-3 fallback): delete this
+        # `alert_check` task AND the `alerts.watchtower_critical` resource below — otherwise every
+        # poll runs a serverless SQL evaluation (~288/day at the 5-min default).
         - task_key: alert_check
           depends_on:
             - task_key: poll
@@ -90,13 +105,15 @@ resources:
     watchtower_critical:
       display_name: "Workload Watchtower — new critical findings"
       warehouse_id: ${var.warehouse_id}
-      # alert_events is appended ONLY when a finding first crosses a rule, so a short window is
-      # "new criticals since the last poll" (self-deduping). Widen if you lengthen poller_schedule.
+      # alert_events is appended ONLY when a finding first crosses a rule. The window MUST be
+      # shorter than the poll interval (alert_window_minutes < poller_schedule) so it empties
+      # between polls — that guarantees each new critical is a fresh OK->TRIGGERED transition
+      # (no double-notify, and no missed alert from the alert staying latched TRIGGERED).
       query_text: |
         SELECT count(*) AS n
         FROM ${var.uc_schema}.alert_events
         WHERE severity = 'critical'
-          AND event_ts >= current_timestamp() - INTERVAL 6 MINUTES
+          AND event_ts >= current_timestamp() - INTERVAL ${var.alert_window_minutes} MINUTES
       evaluation:
         comparison_operator: GREATER_THAN     # alerts trigger when the condition is TRUE (n > 0)
         source:

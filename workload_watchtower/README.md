@@ -244,6 +244,22 @@ Three complementary ways to get notified — use any combination:
    notifications fire. Trade-off: alerts are per *poll run*, and a "failed" run means *"a critical was
    detected"* — note that for on-call. Off by default.
 
+**Notes / caveats for the native paths:**
+- **Options 2 and 3 are mutually exclusive.** `--fail-on-critical` fails the poll task on a new
+  critical, which *skips* the downstream `alert_check` (it `depends_on: poll`) on exactly those runs.
+  Pick one; if you choose option 3, delete the `alert_check` task **and** the `alerts` resource.
+- **Window < poll interval.** `alert_window_minutes` (default 4) must stay shorter than the poll
+  interval so the alert's window empties between polls — otherwise a still-in-window critical keeps
+  it latched `TRIGGERED` and the *next* new critical won't re-notify. Lower it if you poll more often.
+- **Cost of option 2.** The `alert_check` task runs a serverless SQL evaluation every poll (~288/day
+  at the 5-min default). To avoid it (option 1- or 3-only), remove the `alert_check` task + `alerts`
+  resource from `databricks.yml`.
+- **Known gaps.** Option 2 depends on the UC write succeeding — if the `alert_events` append fails
+  (logged in `poll_runs.errors`), the SQL alert sees nothing that poll. And a critical that was
+  *manually resolved* and then re-crosses under the **same** `external_id` is treated as an update
+  (not a new event), so neither native path re-alerts — mostly relevant to stable-ID workload types
+  (pipelines/clusters/serving), since queries and job runs get a fresh ID per run.
+
 ## Local development
 
 ```bash
