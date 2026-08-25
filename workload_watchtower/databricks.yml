@@ -33,10 +33,12 @@ resources:
         quartz_cron_expression: ${var.poller_schedule}
         timezone_id: UTC
         pause_status: UNPAUSED
-      # ── Optional: native alerting (complements the app's in-app email automations) ──────────
-      # The poller is an ordinary job, so you can route its notifications through channels you
-      # already run — no SMTP in the app. Uncomment to alert on job FAILURE (pair with the
-      # opt-in --fail-on-critical parameter below so a "failure" means a new critical finding).
+      # ── Native alerting (complements the app's in-app email automations) ────────────────────
+      # RECOMMENDED: the `alert_check` task below evaluates the `watchtower_critical` SQL alert
+      # right after each poll and notifies on new critical findings — content-based, and the job
+      # still reports success (no failure-semantics abuse).
+      # FALLBACK (no SQL warehouse): alert on job FAILURE instead — uncomment these and the poll
+      # task's `--fail-on-critical=true` so a failed run means "a new critical was detected".
       # email_notifications:
       #   on_failure:
       #     - platform-oncall@example.com
@@ -60,6 +62,17 @@ resources:
               # on_failure notifications (above) fire. Off unless set true. See "Alerting options".
               # - "--fail-on-critical=true"
           environment_key: poller_env
+        # ── Alert gate: evaluate the "new critical findings" SQL alert right after each poll ──
+        # Runs on the poller's schedule (no separate alert schedule); succeeds whether or not it
+        # fires, so it never turns the job red. Notifies via the alert's own subscriptions.
+        - task_key: alert_check
+          depends_on:
+            - task_key: poll
+          # alert_task = the AlertV2 task (sql_task.alert is the legacy path and can't see a v2
+          # alert). Evaluates the alert and notifies its subscriptions; succeeds either way.
+          alert_task:
+            alert_id: ${resources.alerts.watchtower_critical.id}
+            warehouse_id: ${var.warehouse_id}
       environments:
         - environment_key: poller_env
           spec:
@@ -69,6 +82,42 @@ resources:
               # >=0.96.0 required: older SDKs on the serverless base image lack
               # w.postgres (Lakebase credential minting), and a loose pin won't upgrade.
               - "databricks-sdk>=0.96.0"
+
+  # ── SQL Alert (v2): "new critical findings" — evaluated by the job's alert_check task ───────
+  # Content-based native alerting over the append-only alert_events table. The task triggers this
+  # right after each poll; on trigger it notifies the subscriptions below.
+  alerts:
+    watchtower_critical:
+      display_name: "Workload Watchtower — new critical findings"
+      warehouse_id: ${var.warehouse_id}
+      # alert_events is appended ONLY when a finding first crosses a rule, so a short window is
+      # "new criticals since the last poll" (self-deduping). Widen if you lengthen poller_schedule.
+      query_text: |
+        SELECT count(*) AS n
+        FROM ${var.uc_schema}.alert_events
+        WHERE severity = 'critical'
+          AND event_ts >= current_timestamp() - INTERVAL 6 MINUTES
+      evaluation:
+        comparison_operator: GREATER_THAN     # alerts trigger when the condition is TRUE (n > 0)
+        source:
+          name: n
+          display: n
+        threshold:
+          value:
+            double_value: 0
+        notification:
+          notify_on_ok: false
+          subscriptions:
+            # Defaults to the deploying user. Add more emails, or a system destination
+            # (Settings → Notifications) to route Slack / PagerDuty / Teams / webhook.
+            - user_email: ${workspace.current_user.userName}
+            # - destination_id: <system-destination-id>
+      schedule:
+        # PAUSED on purpose — the alert runs only via the job's alert_check task (no 2nd schedule).
+        # quartz_cron_schedule + timezone_id are required by the API even when paused.
+        pause_status: PAUSED
+        quartz_cron_schedule: "0 0 0 * * ?"
+        timezone_id: UTC
 
 targets:
   default:

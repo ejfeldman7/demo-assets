@@ -215,26 +215,34 @@ unassigned and you assign them in the app.
 
 ## Alerting options
 
-There are two complementary ways to get notified — use either or both:
+Three complementary ways to get notified — use any combination:
 
-1. **In-app (built in)** — the rule engine + **email automations**: critical findings auto-send to
-   the distribution list, warnings draft for one-click send, and everything is triaged on the board.
-   This is per-finding and self-contained (needs the optional SMTP config above).
+1. **In-app email automations (built in)** — the rule engine auto-sends critical findings to the
+   distribution list, drafts warnings for one-click send, and triages everything on the board.
+   Per-finding and self-contained (needs the optional SMTP config above).
 
-2. **Native Databricks Job notifications** — because the poller is an ordinary Lakeflow job, you can
-   attach the platform's own notifications to it and route through channels you already run, with no
-   SMTP in the app:
-   - `email_notifications` on the job (on failure / on success / on duration-warning), and
-   - `webhook_notifications` → **system destinations** (workspace admin: *Settings → Notifications*)
-     for **Slack, PagerDuty, Microsoft Teams, or a generic webhook**.
+2. **SQL Alert task (recommended native path)** — the poller job ships a second task, **`alert_check`**,
+   that runs *downstream of the poll* on the same schedule (no separate alert schedule). It evaluates
+   a **Databricks SQL Alert (v2)** — `resources.alerts.watchtower_critical` in
+   [`databricks.yml`](databricks.yml) — over the append-only `alert_events` table:
+   ```sql
+   SELECT count(*) AS n FROM <catalog>.<schema>.alert_events
+   WHERE severity = 'critical' AND event_ts >= current_timestamp() - INTERVAL 6 MINUTES
+   ```
+   When new criticals landed (`n > 0`) it notifies the alert's subscribers; **the task succeeds either
+   way, so the job never turns red** (no failure-semantics abuse). Because `alert_events` is appended
+   only when a finding *first* crosses a rule, the short window is self-deduping. `setup.sh` creates
+   the alert on `bundle deploy`; it defaults to notifying the deploying user — add more `user_email`s
+   or a **`destination_id`** (workspace admin: *Settings → Notifications* system destination) to route
+   **Slack / PagerDuty / Teams / webhook**. *(Requires a serverless/pro SQL warehouse — the one
+   Watchtower already uses.)*
 
-   To alert through these on a *finding* (not just an infra failure), enable the poller's opt-in
-   **fail-on-critical** mode: set `--fail-on-critical=true` on the poll task (see the commented block
-   in [`databricks.yml`](databricks.yml)). The poll still records everything to Lakebase/UC as usual,
-   then exits non-zero when it raised a **new critical** finding — so the job's `on_failure`
-   notifications fire and route to Slack/PagerDuty/email. Trade-off: alerts are per *poll run*, not
-   per finding, and a "failed" run means *"a critical workload was detected,"* so note that for
-   on-call. It's **off by default**, keeping the schedule green until you opt in.
+3. **Job-failure fallback (`--fail-on-critical`, no SQL warehouse)** — if you'd rather not run a SQL
+   Alert, set `--fail-on-critical=true` on the poll task and attach `email_notifications` /
+   `webhook_notifications` to the job (commented scaffolds in `databricks.yml`). The poll records
+   everything, then exits non-zero when a **new critical** was raised, so the job's `on_failure`
+   notifications fire. Trade-off: alerts are per *poll run*, and a "failed" run means *"a critical was
+   detected"* — note that for on-call. Off by default.
 
 ## Local development
 
