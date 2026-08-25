@@ -203,12 +203,62 @@ unassigned and you assign them in the app.
 - **Schedule** — the poller runs every 5 min (`poller_schedule` in `config.env`). The app's
   **Run poll** button triggers it on demand.
 - **Rules** — thresholds, severity, action, enabled — all editable in the **Rules** tab.
-- **Email** — recipients are managed in **Actions → Distribution list**; SMTP config lives in the
-  secret scope. No SMTP = nothing is emailed (findings still appear on the board).
+- **Email (optional)** — to enable, set `CONFIGURE_SMTP="true"` and the `SMTP_*` values in
+  `config.env` before running setup (it creates the secret scope, grants the app SP `READ`, and
+  stores the creds); to add it after the fact, follow `docs/RUNBOOK.md` §4d. Recipients are managed
+  in **Actions → Distribution list**. Left off (the default), nothing is emailed — findings still
+  appear on the board.
 - **AI model** — `WT_MODEL` selects the Foundation Model; swap endpoints in `config.env` and re-run
   the app-deploy step. Calls go through the workspace serving endpoints — route via AI Gateway for
   governance/telemetry.
 - **Re-run setup** any time — it's idempotent and only creates what's missing.
+
+## Alerting options
+
+Three complementary ways to get notified — use any combination:
+
+1. **In-app email automations (built in)** — the rule engine auto-sends critical findings to the
+   distribution list, drafts warnings for one-click send, and triages everything on the board.
+   Per-finding and self-contained (needs the optional SMTP config above).
+
+2. **SQL Alert task (recommended native path)** — the poller job ships a second task, **`alert_check`**,
+   that runs *downstream of the poll* on the same schedule (no separate alert schedule). It evaluates
+   a **Databricks SQL Alert (v2)** — `resources.alerts.watchtower_critical` in
+   [`databricks.yml`](databricks.yml) — over the append-only `alert_events` table:
+   ```sql
+   SELECT count(*) AS n FROM <catalog>.<schema>.alert_events
+   WHERE severity = 'critical' AND event_ts >= current_timestamp() - INTERVAL 6 MINUTES
+   ```
+   When new criticals landed (`n > 0`) it notifies the alert's subscribers; **the task succeeds either
+   way, so the job never turns red** (no failure-semantics abuse). Because `alert_events` is appended
+   only when a finding *first* crosses a rule, the short window is self-deduping. `setup.sh` creates
+   the alert on `bundle deploy`; it defaults to notifying the deploying user — add more `user_email`s
+   or a **`destination_id`** (workspace admin: *Settings → Notifications* system destination) to route
+   **Slack / PagerDuty / Teams / webhook**. *(Requires a serverless/pro SQL warehouse — the one
+   Watchtower already uses.)*
+
+3. **Job-failure fallback (`--fail-on-critical`, no SQL warehouse)** — if you'd rather not run a SQL
+   Alert, set `--fail-on-critical=true` on the poll task and attach `email_notifications` /
+   `webhook_notifications` to the job (commented scaffolds in `databricks.yml`). The poll records
+   everything, then exits non-zero when a **new critical** was raised, so the job's `on_failure`
+   notifications fire. Trade-off: alerts are per *poll run*, and a "failed" run means *"a critical was
+   detected"* — note that for on-call. Off by default.
+
+**Notes / caveats for the native paths:**
+- **Options 2 and 3 are mutually exclusive.** `--fail-on-critical` fails the poll task on a new
+  critical, which *skips* the downstream `alert_check` (it `depends_on: poll`) on exactly those runs.
+  Pick one; if you choose option 3, delete the `alert_check` task **and** the `alerts` resource.
+- **Window < poll interval.** `alert_window_minutes` (default 4) must stay shorter than the poll
+  interval so the alert's window empties between polls — otherwise a still-in-window critical keeps
+  it latched `TRIGGERED` and the *next* new critical won't re-notify. Lower it if you poll more often.
+- **Cost of option 2.** The `alert_check` task runs a serverless SQL evaluation every poll (~288/day
+  at the 5-min default). To avoid it (option 1- or 3-only), remove the `alert_check` task + `alerts`
+  resource from `databricks.yml`.
+- **Known gaps.** Option 2 depends on the UC write succeeding — if the `alert_events` append fails
+  (logged in `poll_runs.errors`), the SQL alert sees nothing that poll. And a critical that was
+  *manually resolved* and then re-crosses under the **same** `external_id` is treated as an update
+  (not a new event), so neither native path re-alerts — mostly relevant to stable-ID workload types
+  (pipelines/clusters/serving), since queries and job runs get a fresh ID per run.
 
 ## Local development
 

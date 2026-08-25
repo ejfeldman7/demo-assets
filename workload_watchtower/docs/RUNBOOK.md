@@ -91,6 +91,12 @@ workspace admin alone):
 
 > The app SP must be a **workspace admin** for cross-user visibility, and `main()` tolerates a
 > non-owner SP failing to (re)create indexes — the schema is created once, by you, in step 3.
+>
+> **If you use the SQL Alert task (Alerting option 2):** the `watchtower_critical` alert is owned by
+> the deployer, so a poller running as the app SP can't evaluate it ("SQL entity could not be
+> found / not accessible"). Grant the app SP access to the alert — add a `permissions` block to the
+> `resources.alerts.watchtower_critical` resource, e.g. `- level: CAN_RUN` with
+> `service_principal_name: <APP_SP_CLIENT_ID>` — and redeploy.
 
 ### 4b. Enable the Monitoring dashboard embed
 
