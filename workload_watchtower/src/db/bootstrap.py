@@ -13,9 +13,9 @@ Postgres role here with a manual CREATE ROLE: that role is non-federated and the
 OAuth gateway rejects its token.
 
 Usage:
-  # source your config first so LAKEBASE_* / schema are set
+  # source your config first so LAKEBASE_* / schema are set, then run from src/db:
   set -a && . setup/config.env && set +a
-  python -m db.bootstrap [--members setup/it_members.json] [--skip-seed]
+  cd src/db && python bootstrap.py [--members ../../setup/it_members.json] [--skip-seed]
 """
 
 from __future__ import annotations

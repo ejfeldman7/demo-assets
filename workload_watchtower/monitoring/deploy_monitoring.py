@@ -87,15 +87,29 @@ def create_functions_and_views() -> None:
     print(f"functions + views created in {CATALOG}.{SCHEMA}")
 
 
+def _find_existing() -> str | None:
+    """Return the id of an existing (non-trashed) dashboard named DISPLAY_NAME, else None —
+    so re-running updates in place instead of failing with AlreadyExists."""
+    try:
+        for d in w.lakeview.list():
+            if d.display_name == DISPLAY_NAME and getattr(d, "lifecycle_state", None) != "TRASHED":
+                return d.dashboard_id
+    except Exception:
+        pass
+    return None
+
+
 def deploy_dashboard() -> str:
     host = w.config.host.rstrip("/")
     parent = f"/Workspace/Users/{w.current_user.me().user_name}/watchtower-monitoring"
     w.workspace.mkdirs(parent)
     data = DASH_JSON.read_text().replace("{catalog}", CATALOG).replace("{schema}", SCHEMA)
-    created = w.lakeview.create(dashboard=Dashboard(
-        display_name=DISPLAY_NAME, parent_path=parent, serialized_dashboard=data, warehouse_id=WAREHOUSE_ID))
-    did = created.dashboard_id
-    # resolve in-dashboard page links now that the id is known
+    did = _find_existing()
+    if did is None:
+        created = w.lakeview.create(dashboard=Dashboard(
+            display_name=DISPLAY_NAME, parent_path=parent, serialized_dashboard=data, warehouse_id=WAREHOUSE_ID))
+        did = created.dashboard_id
+    # resolve in-dashboard page links now that the id is known, then update + (re)publish
     linked = data.replace("__PAGE__/", f"{host}/dashboardsv3/{did}/published/pages/")
     cur = w.lakeview.get(did)
     cur.serialized_dashboard = linked

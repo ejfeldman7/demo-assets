@@ -21,6 +21,10 @@ env:
     value: "${LAKEBASE_HOST}"
   - name: LAKEBASE_SCHEMA
     value: "${LAKEBASE_SCHEMA}"
+  # Postgres user = the app SP's client id (its federated Lakebase role name). Set explicitly
+  # so the app doesn't depend on a database app-resource injecting PGUSER.
+  - name: PGUSER
+    value: "${APP_SP}"
   # SQL warehouse for UC Delta reads (trends) + live list-price lookups.
   - name: WT_WAREHOUSE_ID
     value: "${WAREHOUSE_ID}"

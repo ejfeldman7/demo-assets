@@ -4,8 +4,6 @@ bundle:
 # All values are supplied at deploy time from setup/config.env (setup/setup.sh passes them
 # as --var flags). No environment-specific defaults are committed here.
 variables:
-  workspace_host:
-    description: Workspace URL, e.g. https://<workspace>.cloud.databricks.com
   warehouse_id:
     description: SQL warehouse ID for UC Delta DDL / reads and live list-price lookups.
   uc_schema:
@@ -62,8 +60,9 @@ resources:
 targets:
   default:
     default: true
-    workspace:
-      host: ${var.workspace_host}
+    # Host + auth come from the CLI profile passed at deploy (`-p <profile>`) — do NOT set
+    # workspace.host from a variable, as it must be known before variables are resolved.
+    #
     # By default the poller runs as the deploying user, who must be a workspace admin (for
     # cross-user Query History / Jobs / Pipelines visibility). To run it as the app service
     # principal instead — so it isn't tied to a person — see docs/RUNBOOK.md ("Run the poller

@@ -104,9 +104,15 @@ ok "UC history tables ready"
 # ── 3. Lakebase schema + governance rules (as owner) ─────────────────────────
 say "Lakebase schema + seed rules"
 MEMBERS_ARG=()
-[[ -n "${SEED_MEMBERS_JSON:-}" ]] && MEMBERS_ARG=(--members "$SEED_MEMBERS_JSON")
+if [[ -n "${SEED_MEMBERS_JSON:-}" ]]; then
+  # bootstrap runs with cwd=src/db, so resolve a repo-root-relative path to absolute.
+  case "$SEED_MEMBERS_JSON" in /*) mpath="$SEED_MEMBERS_JSON";; *) mpath="$REPO_ROOT/$SEED_MEMBERS_JSON";; esac
+  MEMBERS_ARG=(--members "$mpath")
+fi
+# NB: expand the array guarded — bash 3.2 (macOS) errors on an empty array under `set -u`.
 ( cd src/db && LAKEBASE_ENDPOINT="$LAKEBASE_ENDPOINT" LAKEBASE_HOST="$LAKEBASE_HOST" \
-    LAKEBASE_SCHEMA="$LAKEBASE_SCHEMA" "$REPO_ROOT/$PY" -m db.bootstrap "${MEMBERS_ARG[@]}" )
+    LAKEBASE_SCHEMA="$LAKEBASE_SCHEMA" "$REPO_ROOT/$PY" bootstrap.py \
+    ${MEMBERS_ARG[@]+"${MEMBERS_ARG[@]}"} )
 ok "schema '$LAKEBASE_SCHEMA' + rules seeded"
 
 # ── 4. Databricks App (mints the app SP) ─────────────────────────────────────
@@ -125,7 +131,8 @@ ok "app service principal: $APP_SP"
 say "Federate app SP on Lakebase"
 ROLE_ID="$(echo "${APP_NAME}-app" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9-' '-' | sed 's/^-*//;s/-*$//')"
 if databricks postgres list-roles "$LAKEBASE_BRANCH_PATH" "${P[@]}" -o json 2>/dev/null \
-     | jq -e --arg sp "$APP_SP" '.[] | select(.spec.postgres_role == $sp)' >/dev/null; then
+     | jq -e --arg sp "$APP_SP" --arg rid "$ROLE_ID" \
+         '.[] | select(.status.postgres_role == $sp or .role_id == $rid)' >/dev/null; then
   ok "app SP already federated"
 else
   databricks postgres create-role "$LAKEBASE_BRANCH_PATH" --role-id "$ROLE_ID" \
@@ -154,7 +161,6 @@ ok "granted CAN_USE on warehouse $WAREHOUSE_ID"
 # ── 8. Deploy the poller job (bundle) ────────────────────────────────────────
 say "Deploy poller bundle"
 databricks bundle deploy -t default "${P[@]}" \
-  --var="workspace_host=$WORKSPACE_HOST" \
   --var="warehouse_id=$WAREHOUSE_ID" \
   --var="uc_schema=$UC_SCHEMA" \
   --var="lakebase_endpoint=$LAKEBASE_ENDPOINT" \
@@ -218,7 +224,7 @@ fi
 # ── 11. Render app.yaml + build frontend ─────────────────────────────────────
 say "Render app/app.yaml + build frontend"
 export LAKEBASE_ENDPOINT LAKEBASE_HOST LAKEBASE_SCHEMA WAREHOUSE_ID UC_SCHEMA POLLER_JOB_NAME \
-       WORKSPACE_LABEL SECRET_SCOPE WT_MODEL DASHBOARD_URL DASHBOARD_EMBED_URL
+       WORKSPACE_LABEL SECRET_SCOPE WT_MODEL DASHBOARD_URL DASHBOARD_EMBED_URL APP_SP
 : "${WORKSPACE_LABEL:=$APP_NAME}"; : "${WT_MODEL:=databricks-claude-sonnet-5}"
 envsubst < app/app.yaml.template > app/app.yaml
 ok "wrote app/app.yaml"
@@ -226,26 +232,27 @@ ok "wrote app/app.yaml"
 ok "frontend built (app/frontend/dist)"
 
 # ── 12. Deploy the app ───────────────────────────────────────────────────────
+# Deploy from a STAGING copy: `databricks sync` honors .gitignore (which excludes the rendered
+# app/app.yaml), so we stage with rsync (which doesn't) to guarantee app.yaml is uploaded.
+# No app "resources" are attached — the app mints Lakebase creds with its own SP token
+# (ENDPOINT_NAME + PGUSER set explicitly) and reaches the warehouse via the CAN_USE grant above.
 say "Deploy the app"
 deploy_app() {
   local src="/Workspace/Users/${ME}/${APP_NAME}-src"
-  # attach Lakebase database + warehouse as app resources (auto-injects PG* env)
-  databricks apps update "$APP_NAME" --json "$(cat <<JSON
-{"resources":[
-  {"name":"database","database":{"instance_name":"$LAKEBASE_PROJECT","database_name":"databricks_postgres","permission":"CAN_CONNECT_AND_CREATE"}},
-  {"name":"warehouse","sql_warehouse":{"id":"$WAREHOUSE_ID","permission":"CAN_USE"}}
-]}
-JSON
-  )" "${P[@]}" >/dev/null
-  databricks sync app "$src" --exclude 'frontend/src' --exclude 'frontend/node_modules' --exclude '.venv' "${P[@]}"
+  local stage; stage="$(mktemp -d)"
+  rsync -a app/ "$stage"/ \
+    --exclude 'frontend/src' --exclude 'frontend/node_modules' --exclude 'node_modules' \
+    --exclude '.venv' --exclude '__pycache__' --exclude '*.tsbuildinfo' --exclude 'app.yaml.template'
+  [[ -f "$stage/app.yaml" ]] || { echo "rendered app.yaml missing from stage"; rm -rf "$stage"; return 1; }
+  databricks sync "$stage" "$src" "${P[@]}"
   databricks apps deploy "$APP_NAME" --source-code-path "$src" "${P[@]}"
+  rm -rf "$stage"
 }
 if deploy_app; then
   APP_URL="$(databricks apps get "$APP_NAME" "${P[@]}" -o json | jq -r '.url // empty')"
   ok "app deployed${APP_URL:+: $APP_URL}"
 else
-  warn "app resource-attach / deploy needs attention — the CLI shape can vary by tier/version."
-  warn "See docs/RUNBOOK.md → 'Deploy the app' for the exact commands + the UI fallback."
+  warn "app deploy needs attention — see docs/RUNBOOK.md → 'Deploy the app' for the manual steps."
 fi
 
 echo
