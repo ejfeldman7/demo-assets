@@ -75,9 +75,11 @@ governance rule — all editable in-app.
 
 ![Findings](docs/screenshots/findings.png)
 
-> A **Monitoring** page also embeds the 6-page AI/BI Cost & Usage dashboard; the embed requires the
-> workspace's AI/BI dashboard-embedding policy to allow the app domain (see
-> [`docs/RUNBOOK.md`](docs/RUNBOOK.md) → *Enable the Monitoring dashboard embed*).
+**Monitoring** — embeds the 6-page AI/BI "Cost & Usage Suite" dashboard over system tables (with an
+in-dashboard **Ask Genie**) as the historical companion to real-time triage. Requires the workspace
+to allow dashboard embedding — see [Enabling the Monitoring embed](#enabling-the-monitoring-embed).
+
+![Monitoring](docs/screenshots/monitoring.png)
 
 ## Architecture
 
@@ -145,6 +147,21 @@ Re-run it any time — completed steps are detected and reused.
 **Then read [`docs/RUNBOOK.md`](docs/RUNBOOK.md)** for the steps a script can't safely do for you:
 the account-admin grant to run the poller as the app SP, enabling AI/BI dashboard embedding, the
 app-deploy UI fallback, and how to verify the end-to-end flow.
+
+### Enabling the Monitoring embed
+
+The **Monitoring** page embeds the AI/BI dashboard via an `/embed/dashboardsv3/<id>` URL, which the
+workspace blocks by default — until embedding is enabled you'll see *"Embedding dashboards is not
+available in this workspace."* in the page (the rest of the app is unaffected). A **workspace
+admin** enables it once, in **Settings**:
+
+1. **Embed dashboards** — Settings → Security → *AI/BI dashboard embedding*: allow all domains, or
+   add the app's domain (`*.databricksapps.com`) to the approved list.
+2. **Genie Agents** — enable if you want the dashboard's in-panel **Ask Genie** to work.
+
+The embed renders in a **direct browser tab** with **third-party cookies enabled**; otherwise use
+the page's **Open in Databricks** button. (`setup.sh` deploys and wires the dashboard either way —
+this only controls whether it renders *inside* the app.)
 
 ## Service principals & the poller identity
 

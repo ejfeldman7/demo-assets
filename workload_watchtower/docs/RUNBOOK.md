@@ -97,12 +97,15 @@ workspace admin alone):
 The Monitoring page embeds the AI/BI dashboard via an `/embed/dashboardsv3/<id>` URL (the
 `/published` console URL refuses framing). For the iframe to render:
 
-1. **Workspace admin → Settings → Security → AI/BI dashboard embedding**: set an approved-domains
-   policy that includes your app's domain (`*.databricksapps.com`), or *Allow all domains* for a
-   quick internal rollout.
-2. The embed renders in a **direct browser tab** with **third-party cookies enabled**. In the
+1. **Workspace admin → Settings → Security → AI/BI dashboard embedding** (labeled *Embed
+   dashboards*): set an approved-domains policy that includes your app's domain
+   (`*.databricksapps.com`), or *Allow all domains* for a quick internal rollout.
+2. **Genie Agents** — enable this setting too if you want the dashboard's in-panel **Ask Genie** to
+   work inside the embed.
+3. The embed renders in a **direct browser tab** with **third-party cookies enabled**. In the
    in-workspace app preview or with 3p cookies blocked, use the page's **Open in Databricks**
-   button instead.
+   button instead. (Verified live: after enabling *Embed dashboards*, reload the app tab — the
+   Monitoring page renders the 6-page suite in-app.)
 
 If the embed still refuses, open the dashboard → **Share → Embed** and copy the exact iframe `src`
 into `DASHBOARD_EMBED_URL` in `config.env`, then re-run the app-deploy step.
