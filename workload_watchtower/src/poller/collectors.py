@@ -48,9 +48,12 @@ def _parse_ts(v):
     if isinstance(v, (int, float)):
         return _from_ms(int(v))
     try:
-        return datetime.fromisoformat(str(v).replace("Z", "+00:00"))
+        dt = datetime.fromisoformat(str(v).replace("Z", "+00:00"))
     except ValueError:
         return None
+    # An ISO string without an offset parses to a naive datetime; assume UTC so downstream
+    # UC/Lakebase writes aren't shifted by the host's local timezone.
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -84,7 +87,8 @@ def collect_queries(w: WorkspaceClient, wh_size_cache: dict) -> list[dict]:
     return out
 
 
-_TIMEOUT_VAL_RE = re.compile(r"statement_timeout\s*=?\s*'?(\d+)", re.IGNORECASE)
+# Capture the value in `SET STATEMENT_TIMEOUT = 300` or `SET statement_timeout TO 300`.
+_TIMEOUT_VAL_RE = re.compile(r"statement_timeout\s*(?:=|to)?\s*'?(\d+)", re.IGNORECASE)
 
 
 def collect_timeout_overrides(w: WorkspaceClient, window_minutes: int = 15) -> list[dict]:

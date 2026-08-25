@@ -112,6 +112,10 @@ def _lit(v) -> str:
     if isinstance(v, (int, float)):
         return repr(v)
     if isinstance(v, datetime):
+        # A naive datetime would be assumed to be system-local by astimezone(); treat it as UTC
+        # so a non-UTC poller host doesn't shift the timestamp.
+        if v.tzinfo is None:
+            v = v.replace(tzinfo=timezone.utc)
         return "TIMESTAMP '%s'" % v.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
     # Spark SQL treats backslash as an escape char in string literals — double it, then quotes
     return "'" + str(v).replace("\\", "\\\\").replace("'", "''") + "'"
