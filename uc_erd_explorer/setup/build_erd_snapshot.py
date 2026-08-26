@@ -253,30 +253,37 @@ def main():
     print(f"Writing snapshot tables to: {metadata_catalog}.{metadata_schema}")
 
     w = WorkspaceClient(profile=args.profile) if args.profile else WorkspaceClient()
+    materialize(w, args.warehouse_id, catalogs, metadata_catalog, metadata_schema)
+
+
+def materialize(w, warehouse_id, catalogs, metadata_catalog, metadata_schema, *, log=print):
+    """Build/refresh the erd_snapshot_* tables in {metadata_catalog}.{metadata_schema}.
+
+    Shared by main() (the CLI / refresh_erd_snapshot job) AND notebooks/install.py's
+    no-CLI deploy path, so the two deploy routes can't drift in how the snapshot is built.
+    `log` receives human-readable progress lines (print by default; the notebook passes its
+    own). Raises RuntimeError on a genuine failure; an optional (tag) source that's missing
+    on older metastores degrades to an empty table with the right schema so the app's
+    snapshot read still works."""
     loc = f"{metadata_catalog}.{metadata_schema}"
     statements = build_statements(catalogs, metadata_catalog, metadata_schema)
-
     for i, (label, stmt, optional) in enumerate(statements, 1):
-        print(f"[{i}/{len(statements)}] {label}...", end=" ", flush=True)
-        resp = _run(w, args.warehouse_id, stmt)
+        resp = _run(w, warehouse_id, stmt)
         if resp.status.state.value == "SUCCEEDED":
-            print("ok")
+            log(f"[{i}/{len(statements)}] {label} ok")
             continue
-        # An optional (tag) source can be missing on older metastores -- fall back to an
-        # empty table with the right schema so the app's snapshot read still works. This
-        # now only fires on a genuine failure (FAILED/CANCELED/missing source), not a
-        # slow-but-succeeding build, since _run polls to a terminal state first.
+        # Only fires on a genuine failure (FAILED/CANCELED/missing source), not a
+        # slow-but-succeeding build, since _run polled to a terminal state first.
         if optional and label in _EMPTY_TABLE_DDL:
-            print(f"source unavailable ({resp.status.error.message if resp.status.error else 'error'}); creating empty table")
-            empty = _run(w, args.warehouse_id, f"CREATE OR REPLACE TABLE {loc}.{label} {_EMPTY_TABLE_DDL[label]}")
+            log(f"[{i}/{len(statements)}] {label}: source unavailable "
+                f"({resp.status.error.message if resp.status.error else 'error'}); creating empty table")
+            empty = _run(w, warehouse_id, f"CREATE OR REPLACE TABLE {loc}.{label} {_EMPTY_TABLE_DDL[label]}")
             if empty.status.state.value != "SUCCEEDED":
-                print(f"  FAILED creating empty table: {empty.status.error}")
-                raise SystemExit(1)
+                raise RuntimeError(f"Failed creating empty table {loc}.{label}: {empty.status.error}")
             continue
-        print(f"FAILED: {resp.status.error}\n{stmt}")
-        raise SystemExit(1)
-
-    print(f"\nAll {len(statements)} snapshot statements succeeded in {loc}.")
+        raise RuntimeError(f"Snapshot statement '{label}' failed: {resp.status.error}")
+    log(f"All {len(statements)} snapshot statements succeeded in {loc}.")
+    return loc
 
 
 if __name__ == "__main__":

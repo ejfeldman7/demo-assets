@@ -97,6 +97,66 @@ class TestBuildErdSnapshotStatements:
             build_erd_snapshot.build_statements(["bad; catalog"], "megacorp", "erd_meta")
 
 
+class _FakeState:
+    def __init__(self, value):
+        self.value = value
+
+
+class _FakeStatus:
+    def __init__(self, value):
+        self.state = _FakeState(value)
+        self.error = None  # real StatementResponse.status has both state and error
+
+
+class _FakeResp:
+    def __init__(self, value):
+        self.status = _FakeStatus(value)
+        self.statement_id = "sid"
+
+
+class _FakeStmtExec:
+    """Minimal stand-in for w.statement_execution: statements whose text contains any of
+    fail_substrings come back FAILED, everything else SUCCEEDED (terminal, so _run's poll
+    loop doesn't spin)."""
+    def __init__(self, fail_substrings=()):
+        self.fail_substrings = fail_substrings
+        self.executed = []
+
+    def execute_statement(self, warehouse_id, statement, wait_timeout):
+        self.executed.append(statement)
+        failed = any(s in statement for s in self.fail_substrings)
+        return _FakeResp("FAILED" if failed else "SUCCEEDED")
+
+    def get_statement(self, statement_id):
+        return _FakeResp("SUCCEEDED")
+
+
+class _FakeW:
+    def __init__(self, fail_substrings=()):
+        self.statement_execution = _FakeStmtExec(fail_substrings)
+
+
+class TestBuildErdSnapshotMaterialize:
+    def test_runs_all_statements_and_returns_loc(self):
+        w = _FakeW()
+        loc = build_erd_snapshot.materialize(w, "wh", ["c"], "c", "erd_meta", log=lambda *a: None)
+        assert loc == "c.erd_meta"
+        assert len(w.statement_execution.executed) == 8  # schema + 6 tables + meta
+
+    def test_optional_tag_source_missing_creates_empty_table(self):
+        # column_tags CTAS fails -> the optional branch creates an empty table instead of
+        # raising (and instead of silently leaving it un-created).
+        w = _FakeW(fail_substrings=("information_schema.column_tags",))
+        build_erd_snapshot.materialize(w, "wh", ["c"], "c", "erd_meta", log=lambda *a: None)
+        assert any("erd_snapshot_column_tags (" in s for s in w.statement_execution.executed)
+
+    def test_required_statement_failure_raises(self):
+        # A non-optional failure (columns CTAS) must raise, not silently pass.
+        w = _FakeW(fail_substrings=("information_schema.columns",))
+        with pytest.raises(RuntimeError):
+            build_erd_snapshot.materialize(w, "wh", ["c"], "c", "erd_meta", log=lambda *a: None)
+
+
 class TestCreateGenieSpaceBuildSerializedSpace:
     def test_structurally_equivalent_across_calls(self):
         # Not byte-identical (ids are freshly generated uuids each call by design), but

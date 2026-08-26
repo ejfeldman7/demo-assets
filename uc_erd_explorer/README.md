@@ -296,6 +296,13 @@ values) and calls the identical `setup/create_scoped_views.py` /
 `setup/create_genie_space.py` functions the CLI route's job does — it's a different
 front door onto the same automation, not a separate implementation to maintain.
 
+**Metadata snapshot on this route:** set the `erd_metadata_source` widget to `snapshot`
+and the notebook builds the `erd_snapshot_*` tables inline (step 4b, via the same
+`setup/build_erd_snapshot.py` `materialize()` the DAB job uses). One intentional
+difference from the DAB route: there's **no scheduled weekly refresh and no in-app
+"Refresh now" button** here — **re-run the notebook to refresh the snapshot**. See
+"Metadata snapshot" below for what the feature does.
+
 ## Adding a new catalog after you've already deployed
 
 Both routes are idempotent, so widening scope later is the same deploy flow you used

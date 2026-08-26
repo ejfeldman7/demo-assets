@@ -18,11 +18,14 @@
 # MAGIC at that subfolder -- one level *in* from the git checkout root, not the checkout
 # MAGIC root itself.
 # MAGIC
-# MAGIC This notebook does exactly what `databricks bundle deploy` + `databricks bundle run
+# MAGIC This notebook does what `databricks bundle deploy` + `databricks bundle run
 # MAGIC setup_genie_space` + `databricks bundle run <app>` do together, just via the
 # MAGIC Databricks SDK from notebook cells instead of the CLI -- it calls the SAME
-# MAGIC `setup/create_scoped_views.py` and `setup/create_genie_space.py` functions, so the
-# MAGIC two deploy routes can never drift apart in behavior.
+# MAGIC `setup/create_scoped_views.py`, `setup/create_genie_space.py`, and (for snapshot
+# MAGIC mode) `setup/build_erd_snapshot.py` functions, so the two routes stay in sync.
+# MAGIC **One intentional difference:** snapshot mode is supported here too (built inline in
+# MAGIC step 4b), but its *scheduled* weekly refresh and the in-app "Refresh now" button are
+# MAGIC DAB-route-only -- on this route you refresh the snapshot by re-running the notebook.
 
 # COMMAND ----------
 
@@ -40,6 +43,7 @@ dbutils.widgets.dropdown("create_demo_data", "no", ["yes", "no"], "Create the sy
 dbutils.widgets.text("demo_catalog", "", "Catalog to create the demo data in (only used if create_demo_data=yes). Blank = reuse the first erd_catalogs entry, so you don't have to type the same catalog name twice; falls back to \"megacorp\" if erd_catalogs is also blank.")
 dbutils.widgets.dropdown("add_demo_metadata", "no", ["yes", "no"], "Also add illustrative COMMENTs/tags to the demo data? (separate opt-in -- most real deployments won't want fabricated metadata layered onto their own catalogs, and even demo users may want the bare structure only)")
 dbutils.widgets.dropdown("auth_mode", "service_principal", ["service_principal", "on_behalf_of_user"], "Which identity the ERD queries run as. service_principal (default) = the app queries as its own SP, bounded by erd_catalogs. on_behalf_of_user = queries as the LOGGED-IN USER (filtered by their own UC privileges); grants the app the 'sql' user scope and grants the SP only the Genie metadata location (no data-catalog grants). In OBO each end user needs their own catalog privileges + CAN_USE on the warehouse.")
+dbutils.widgets.dropdown("erd_metadata_source", "information_schema", ["information_schema", "snapshot"], "Where the graph reads metadata. information_schema (default) = query system tables live. snapshot = build+read the materialized erd_snapshot_* Delta tables (faster, esp. the FK join). This notebook builds the snapshot inline (step 4b); REFRESH it by re-running this notebook. The scheduled weekly refresh + in-app 'Refresh now' button are DAB-route-only.")
 
 # COMMAND ----------
 
@@ -62,6 +66,7 @@ demo_catalog_raw = dbutils.widgets.get("demo_catalog").strip()
 add_demo_metadata = dbutils.widgets.get("add_demo_metadata") == "yes"
 auth_mode = dbutils.widgets.get("auth_mode").strip() or "service_principal"
 obo = auth_mode == "on_behalf_of_user"
+metadata_source = dbutils.widgets.get("erd_metadata_source").strip() or "information_schema"
 
 assert repo_root_widget, "repo_root widget is required -- the Workspace path to the uc_erd_explorer folder (one level in from the demo-assets git checkout)"
 assert app_name, "app_name widget is required"
@@ -107,6 +112,7 @@ print(f"metadata_location={metadata_location}")
 print(f"create_demo_data={create_demo_data}")
 print(f"demo_catalog={demo_catalog}")
 print(f"auth_mode={auth_mode}")
+print(f"metadata_source={metadata_source}")
 print(f"add_demo_metadata={add_demo_metadata}")
 
 # COMMAND ----------
@@ -134,6 +140,7 @@ import create_scoped_views
 import create_genie_space
 import create_megacorp_demo
 import grant_catalog_access
+import build_erd_snapshot
 
 from databricks.sdk import WorkspaceClient
 
@@ -193,6 +200,24 @@ for i, stmt in enumerate(view_statements, 1):
     assert resp.status.state.value == "SUCCEEDED", resp.status.error
     print("ok")
 print(f"\nScoped views ready in {metadata_location}.")
+
+# COMMAND ----------
+
+# MAGIC %md ## 4b. (Optional) Build the metadata snapshot
+# MAGIC Only runs when `erd_metadata_source=snapshot`. Materializes the `erd_snapshot_*`
+# MAGIC Delta tables via the SAME `setup/build_erd_snapshot.py` `materialize()` the DAB
+# MAGIC `refresh_erd_snapshot` job uses, so the app can serve the graph without the live
+# MAGIC `information_schema` joins. NOTE: this route has no scheduled refresh and no in-app
+# MAGIC "Refresh now" button (those are DAB-only) -- **re-run this notebook (or just this
+# MAGIC cell) to refresh the snapshot**. Left on `information_schema`, this is skipped and
+# MAGIC the app reads live (unchanged behavior).
+
+# COMMAND ----------
+
+if metadata_source == "snapshot":
+    build_erd_snapshot.materialize(w, warehouse_id, catalogs, metadata_catalog, metadata_schema)
+else:
+    print("Skipped (erd_metadata_source=information_schema; app reads live).")
 
 # COMMAND ----------
 
@@ -332,7 +357,16 @@ if obo:
 deploy_app(
     app_name,
     deploy_local_path,
-    {"DATABRICKS_WAREHOUSE_ID": warehouse_id, "ERD_CATALOGS": ",".join(catalogs), "ERD_AUTH_MODE": auth_mode},
+    {
+        "DATABRICKS_WAREHOUSE_ID": warehouse_id,
+        "ERD_CATALOGS": ",".join(catalogs),
+        "ERD_AUTH_MODE": auth_mode,
+        # Set explicitly (the DAB route templates these too): SOURCE selects live vs the
+        # snapshot built in step 4b; LOCATION tells the app where the snapshot / Genie
+        # metadata schema lives so its internal-schema exclusion and snapshot reads match.
+        "ERD_METADATA_SOURCE": metadata_source,
+        "ERD_METADATA_LOCATION": metadata_location,
+    },
 )
 print("Initial deployment complete.")
 
@@ -402,6 +436,8 @@ deploy_app(
         "ERD_CATALOGS": ",".join(catalogs),
         "GENIE_SPACE_ID": genie_space_id,
         "ERD_AUTH_MODE": auth_mode,
+        "ERD_METADATA_SOURCE": metadata_source,
+        "ERD_METADATA_LOCATION": metadata_location,
     },
 )
 start_app(app_name)
