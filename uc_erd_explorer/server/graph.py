@@ -22,8 +22,14 @@ Edges  = FOREIGN KEY -> PRIMARY KEY relationships (direction: FK table -> PK tab
 An edge only renders if BOTH endpoints are in-scope, so a FK pointing at a catalog
 outside the allow-list is silently dropped rather than leaking that catalog's existence.
 
-Results are cached in-memory (TTL configurable via ERD_CACHE_TTL_SECONDS, default 300s
--- schema metadata changes rarely). Catalogs above ERD_SCHEMA_COLLAPSE_THRESHOLD tables
+Metadata can be read two ways (ERD_METADATA_SOURCE, see config.get_metadata_source):
+live from system.information_schema (default), or from the pre-materialized erd_snapshot_*
+Delta tables (built weekly by setup/build_erd_snapshot.py) so the expensive joins never run
+on the request path -- _resolve_source() picks snapshot when enabled and in prod, and
+build_graph falls back to live if the first snapshot read errors (tables not built yet).
+Either way, results are cached in-memory (TTL
+configurable via ERD_CACHE_TTL_SECONDS, default 3600s -- schema metadata changes rarely).
+Catalogs above ERD_SCHEMA_COLLAPSE_THRESHOLD tables
 (default 80) default to a collapsed, one-node-per-schema view instead of full
 table-level detail -- see build_schema_summary() -- since a flat table-per-node layout
 gets slow to query and unreadable well before a few hundred nodes. Selecting a specific
@@ -31,8 +37,11 @@ schema (via `pairs`) always returns full detail for it regardless of the thresho
 this is also how the frontend "expands" a collapsed schema node on click, reusing the
 same pairs-based mechanism as the catalog/schema tree picker rather than a second one.
 """
+import contextvars
+import logging
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List, Optional, Tuple
 
 from databricks.sdk.service import sql
@@ -41,6 +50,7 @@ from .config import (
     get_cache_ttl_seconds,
     get_catalogs,
     get_metadata_location,
+    get_metadata_source,
     get_query_client,
     get_schema_collapse_threshold,
     get_test_catalog_suffix,
@@ -48,10 +58,39 @@ from .config import (
     get_warehouse_id,
 )
 
+logger = logging.getLogger("erd")
+
+# Metadata read source (see config.get_metadata_source): "information_schema" queries the
+# system tables live; "snapshot" reads the pre-materialized erd_snapshot_* Delta tables.
+_SNAPSHOT = "snapshot"
+
 # In-memory cache: {(user_key, frozenset(catalogs), frozenset(pairs)): (timestamp, payload)}
 # user_key is "" in service-principal mode (shared cache) and the per-user identity in
 # on-behalf-of-user mode (so privilege-filtered results are never shared across users).
 _CACHE: Dict[Tuple[str, frozenset, frozenset], Tuple[float, Dict[str, Any]]] = {}
+
+# Shared, BOUNDED threadpool for the per-load metadata queries. build_graph fans out ~5
+# independent information_schema queries per load; running them concurrently instead of
+# sequentially is the single biggest win on the live-query path. Bounding it (a fixed,
+# module-level pool, not an unbounded per-request one) also caps how many warehouse
+# statements all concurrent app users can have in flight at once -- natural backpressure.
+#
+# OBO note: get_query_client() reads the logged-in user's token from a ContextVar (see
+# config.py), which does NOT auto-propagate into pool threads. build_graph therefore
+# submits each query wrapped in contextvars.copy_context().run(...) so the per-user
+# identity is carried into the worker thread -- see _submit_query().
+_EXECUTOR = ThreadPoolExecutor(max_workers=8, thread_name_prefix="erd-query")
+
+
+def _submit_query(fn, *args):
+    """Submit a metadata query to the shared pool, carrying the CURRENT context (the
+    per-request OBO user token/identity captured in ContextVars) into the worker thread.
+    A bare _EXECUTOR.submit would run in a fresh context where get_query_client() sees no
+    token and, in on-behalf-of-user mode, raises -- copying the context is what threads
+    the identity through explicitly."""
+    ctx = contextvars.copy_context()
+    return _EXECUTOR.submit(ctx.run, fn, *args)
+
 
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9_]+$")
 
@@ -125,7 +164,7 @@ def _internal_schema_exclusion_sql(catalog_col: str, schema_col: str) -> str:
 # --- SQL helpers ------------------------------------------------------------
 
 
-def _execute(statement: str, timeout: str = "50s") -> sql.StatementResponse:
+def _execute(statement: str, label: str = "query", timeout: str = "50s") -> sql.StatementResponse:
     # get_query_client() is the SP in service-principal mode and the logged-in user's
     # client in on-behalf-of-user mode -- so information_schema privilege filtering
     # follows whichever identity this deployment is configured to query as.
@@ -133,11 +172,27 @@ def _execute(statement: str, timeout: str = "50s") -> sql.StatementResponse:
     warehouse_id = get_warehouse_id()
     if not warehouse_id:
         raise RuntimeError("No SQL warehouse available")
-    return client.statement_execution.execute_statement(
+    started = time.perf_counter()
+    result = client.statement_execution.execute_statement(
         warehouse_id=warehouse_id,
         statement=statement,
         wait_timeout=timeout,
+        # CANCEL, not the SDK default CONTINUE: if the statement doesn't finish within
+        # `timeout`, cancel it so the state check below raises. With CONTINUE the SDK
+        # returns a still-pending response carrying no data, which _rows() would read as
+        # an empty result -- silently rendering a partial/empty graph instead of failing.
+        on_wait_timeout=sql.ExecuteStatementRequestOnWaitTimeout.CANCEL,
     )
+    elapsed_ms = (time.perf_counter() - started) * 1000
+    state = result.status.state if result.status else None
+    row_count = len(result.result.data_array) if result.result and result.result.data_array else 0
+    logger.info("query %-13s %6.0fms state=%s rows=%d", label, elapsed_ms, state, row_count)
+    if state != sql.StatementState.SUCCEEDED:
+        err = result.status.error.message if (result.status and result.status.error) else None
+        raise RuntimeError(
+            f"Query '{label}' did not succeed (state={state}): {err or 'no result returned'}"
+        )
+    return result
 
 
 def _rows(result: sql.StatementResponse) -> List[List[Any]]:
@@ -153,81 +208,149 @@ def _in_clause(values: List[str]) -> str:
     return f"({quoted})" if quoted else "('')"
 
 
+def _snapshot_loc() -> str:
+    """`catalog.schema` where the erd_snapshot_* tables live (the ERD metadata location),
+    validated for safe interpolation into the snapshot read queries."""
+    meta_catalog, meta_schema = get_metadata_location()
+    if not (_IDENTIFIER_RE.match(meta_catalog) and _IDENTIFIER_RE.match(meta_schema)):
+        raise RuntimeError(f"Invalid ERD metadata location for snapshot reads: {meta_catalog}.{meta_schema}")
+    return f"{meta_catalog}.{meta_schema}"
+
+
+def get_snapshot_freshness() -> Optional[Dict[str, Any]]:
+    """Read the snapshot's freshness marker (erd_snapshot_meta) -> {refreshed_at,
+    catalogs}, or None if the snapshot isn't present/readable. Used by the admin panel to
+    show when the materialized metadata was last rebuilt. Tolerant: never raises."""
+    try:
+        loc = _snapshot_loc()
+        rows = _rows(_execute(
+            f"SELECT CAST(refreshed_at AS STRING), catalogs FROM {loc}.erd_snapshot_meta LIMIT 1",
+            "snapshot_meta", "30s",
+        ))
+        if not rows:
+            return None
+        return {"refreshed_at": rows[0][0], "catalogs": rows[0][1]}
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _resolve_source(env: str = "prod") -> str:
+    """The CONFIGURED metadata source for this build (intent only -- no warehouse call):
+    "snapshot" when ERD_METADATA_SOURCE asks for it AND env is prod, else live.
+
+    Test always goes live: the snapshot only materializes the configured (prod) catalogs,
+    while the Prod/Test toggle queries the _ts-suffixed catalogs, which aren't in it.
+
+    This deliberately does NOT probe whether the snapshot exists -- that cost a warehouse
+    round-trip on every cold build. Instead build_graph attempts the first snapshot read
+    and falls back to live if the tables aren't there yet (fresh deploy before the first
+    refresh job), so the graceful fallback is preserved without the extra query."""
+    if env != "prod" or get_metadata_source() != _SNAPSHOT:
+        return "information_schema"
+    return _SNAPSHOT
+
+
 # --- queries ----------------------------------------------------------------
 
 
-def _query_columns(catalogs: Optional[List[str]], pairs: Optional[List[Tuple[str, str]]]) -> List[List[Any]]:
+def _query_columns(catalogs: Optional[List[str]], pairs: Optional[List[Tuple[str, str]]],
+                   source: str = "information_schema") -> List[List[Any]]:
     """All columns for the in-scope catalogs (optionally narrowed to exact catalog.schema
-    pairs). catalogs=None means unscoped -- no catalog filter at all."""
+    pairs). catalogs=None means unscoped -- no catalog filter at all. In snapshot mode,
+    reads the pre-materialized erd_snapshot_columns table (same columns, already scoped/
+    excluded at snapshot time), so no live information_schema hit."""
     catalog_filter = f"AND table_catalog IN {_in_clause(catalogs)}" if catalogs else ""
     pair_filter = f"AND {_pair_in_clause('table_catalog', 'table_schema', pairs)}" if pairs else ""
-    stmt = f"""
-    SELECT table_catalog, table_schema, table_name, column_name, full_data_type, ordinal_position, comment
-    FROM system.information_schema.columns
-    WHERE {_internal_schema_exclusion_sql("table_catalog", "table_schema")}
-      {catalog_filter}
-      {pair_filter}
-    ORDER BY table_catalog, table_schema, table_name, ordinal_position
-    """
-    return _rows(_execute(stmt))
+    cols = "table_catalog, table_schema, table_name, column_name, full_data_type, ordinal_position, comment"
+    order = "ORDER BY table_catalog, table_schema, table_name, ordinal_position"
+    if source == _SNAPSHOT:
+        stmt = f"SELECT {cols} FROM {_snapshot_loc()}.erd_snapshot_columns WHERE 1=1 {catalog_filter} {pair_filter} {order}"
+    else:
+        stmt = f"""
+        SELECT {cols}
+        FROM system.information_schema.columns
+        WHERE {_internal_schema_exclusion_sql("table_catalog", "table_schema")}
+          {catalog_filter} {pair_filter} {order}"""
+    return _rows(_execute(stmt, "columns"))
 
 
-def _query_tables(catalogs: Optional[List[str]], pairs: Optional[List[Tuple[str, str]]]) -> List[List[Any]]:
+def _query_tables(catalogs: Optional[List[str]], pairs: Optional[List[Tuple[str, str]]],
+                  source: str = "information_schema") -> List[List[Any]]:
     """Every table (incl. those with no FK) so isolated nodes still render.
-    catalogs=None means unscoped -- no catalog filter at all."""
+    catalogs=None means unscoped -- no catalog filter at all. Snapshot mode reads
+    erd_snapshot_tables."""
     catalog_filter = f"AND table_catalog IN {_in_clause(catalogs)}" if catalogs else ""
     pair_filter = f"AND {_pair_in_clause('table_catalog', 'table_schema', pairs)}" if pairs else ""
-    stmt = f"""
-    SELECT table_catalog, table_schema, table_name, comment
-    FROM system.information_schema.tables
-    WHERE {_internal_schema_exclusion_sql("table_catalog", "table_schema")}
-      {catalog_filter}
-      {pair_filter}
-    ORDER BY table_catalog, table_schema, table_name
-    """
-    return _rows(_execute(stmt))
+    cols = "table_catalog, table_schema, table_name, comment"
+    order = "ORDER BY table_catalog, table_schema, table_name"
+    if source == _SNAPSHOT:
+        stmt = f"SELECT {cols} FROM {_snapshot_loc()}.erd_snapshot_tables WHERE 1=1 {catalog_filter} {pair_filter} {order}"
+    else:
+        stmt = f"""
+        SELECT {cols}
+        FROM system.information_schema.tables
+        WHERE {_internal_schema_exclusion_sql("table_catalog", "table_schema")}
+          {catalog_filter} {pair_filter} {order}"""
+    return _rows(_execute(stmt, "tables"))
 
 
-def _query_table_tags(catalogs: Optional[List[str]], pairs: Optional[List[Tuple[str, str]]]) -> List[List[Any]]:
+def _query_table_tags(catalogs: Optional[List[str]], pairs: Optional[List[Tuple[str, str]]],
+                      source: str = "information_schema") -> List[List[Any]]:
     """(catalog, schema, table, tag_name, tag_value) rows from Unity Catalog's tag
-    governance feature (e.g. PII classification). Tolerant of the system table being
-    unavailable in older workspaces/metastores -- degrades to "no tags" rather than
-    breaking the whole graph."""
+    governance feature (e.g. PII classification). Tolerant of the system table (or the
+    snapshot table) being unavailable -- degrades to "no tags" rather than breaking the
+    whole graph. Snapshot mode reads erd_snapshot_table_tags."""
     catalog_filter = f"AND catalog_name IN {_in_clause(catalogs)}" if catalogs else ""
     pair_filter = f"AND {_pair_in_clause('catalog_name', 'schema_name', pairs)}" if pairs else ""
-    stmt = f"""
-    SELECT catalog_name, schema_name, table_name, tag_name, tag_value
-    FROM system.information_schema.table_tags
-    WHERE {_internal_schema_exclusion_sql("catalog_name", "schema_name")}
-      {catalog_filter}
-      {pair_filter}
-    """
+    cols = "catalog_name, schema_name, table_name, tag_name, tag_value"
+    if source == _SNAPSHOT:
+        stmt = f"SELECT {cols} FROM {_snapshot_loc()}.erd_snapshot_table_tags WHERE 1=1 {catalog_filter} {pair_filter}"
+    else:
+        stmt = f"""
+        SELECT {cols}
+        FROM system.information_schema.table_tags
+        WHERE {_internal_schema_exclusion_sql("catalog_name", "schema_name")}
+          {catalog_filter} {pair_filter}"""
     try:
-        return _rows(_execute(stmt))
+        return _rows(_execute(stmt, "table_tags"))
     except Exception:  # noqa: BLE001
         return []
 
 
-def _query_column_tags(catalogs: Optional[List[str]], pairs: Optional[List[Tuple[str, str]]]) -> List[List[Any]]:
-    """(catalog, schema, table, column, tag_name, tag_value) rows -- see _query_table_tags."""
+def _query_column_tags(catalogs: Optional[List[str]], pairs: Optional[List[Tuple[str, str]]],
+                       source: str = "information_schema") -> List[List[Any]]:
+    """(catalog, schema, table, column, tag_name, tag_value) rows -- see _query_table_tags.
+    Snapshot mode reads erd_snapshot_column_tags."""
     catalog_filter = f"AND catalog_name IN {_in_clause(catalogs)}" if catalogs else ""
     pair_filter = f"AND {_pair_in_clause('catalog_name', 'schema_name', pairs)}" if pairs else ""
-    stmt = f"""
-    SELECT catalog_name, schema_name, table_name, column_name, tag_name, tag_value
-    FROM system.information_schema.column_tags
-    WHERE {_internal_schema_exclusion_sql("catalog_name", "schema_name")}
-      {catalog_filter}
-      {pair_filter}
-    """
+    cols = "catalog_name, schema_name, table_name, column_name, tag_name, tag_value"
+    if source == _SNAPSHOT:
+        stmt = f"SELECT {cols} FROM {_snapshot_loc()}.erd_snapshot_column_tags WHERE 1=1 {catalog_filter} {pair_filter}"
+    else:
+        stmt = f"""
+        SELECT {cols}
+        FROM system.information_schema.column_tags
+        WHERE {_internal_schema_exclusion_sql("catalog_name", "schema_name")}
+          {catalog_filter} {pair_filter}"""
     try:
-        return _rows(_execute(stmt))
+        return _rows(_execute(stmt, "column_tags"))
     except Exception:  # noqa: BLE001
         return []
 
 
-def _query_primary_keys(catalogs: Optional[List[str]], pairs: Optional[List[Tuple[str, str]]]) -> List[List[Any]]:
+def _query_primary_keys(catalogs: Optional[List[str]], pairs: Optional[List[Tuple[str, str]]],
+                        source: str = "information_schema") -> List[List[Any]]:
     """(catalog, schema, table, column) tuples that participate in a PRIMARY KEY.
-    catalogs=None means unscoped -- no catalog filter at all."""
+    catalogs=None means unscoped -- no catalog filter at all. Snapshot mode reads the
+    pre-materialized erd_snapshot_primary_keys (the tc/kcu join done at snapshot time)."""
+    if source == _SNAPSHOT:
+        catalog_filter = f"AND table_catalog IN {_in_clause(catalogs)}" if catalogs else ""
+        pair_filter = f"AND {_pair_in_clause('table_catalog', 'table_schema', pairs)}" if pairs else ""
+        stmt = (
+            f"SELECT table_catalog, table_schema, table_name, column_name "
+            f"FROM {_snapshot_loc()}.erd_snapshot_primary_keys WHERE 1=1 {catalog_filter} {pair_filter}"
+        )
+        return _rows(_execute(stmt, "primary_keys"))
     catalog_filter = f"AND tc.constraint_catalog IN {_in_clause(catalogs)}" if catalogs else ""
     pair_filter = f"AND {_pair_in_clause('kcu.table_catalog', 'kcu.table_schema', pairs)}" if pairs else ""
     stmt = f"""
@@ -242,20 +365,39 @@ def _query_primary_keys(catalogs: Optional[List[str]], pairs: Optional[List[Tupl
       {catalog_filter}
       {pair_filter}
     """
-    return _rows(_execute(stmt))
+    return _rows(_execute(stmt, "primary_keys"))
 
 
-def _query_foreign_keys(catalogs: Optional[List[str]]) -> List[List[Any]]:
+def _query_foreign_keys(
+    catalogs: Optional[List[str]], pairs: Optional[List[Tuple[str, str]]] = None,
+    source: str = "information_schema",
+) -> List[List[Any]]:
     """
     FK -> PK relationships sourced from system.information_schema (aggregates all
     catalogs in one query; privilege-filtered per caller). We scope to the configured
-    catalog allow-list (or apply no filter at all when catalogs=None, i.e. unscoped mode)
-    and then filter edge endpoints to the requested pairs/catalogs in Python (via the
-    `present` node-id set in build_graph) so cross-schema AND cross-catalog edges are
-    handled correctly, while anything pointing outside the allow-list is dropped rather
-    than leaking that catalog's existence.
+    catalog allow-list (or apply no filter at all when catalogs=None, i.e. unscoped mode).
+    When `pairs` is given we ALSO push a filter on the FK (source) table's
+    (catalog, schema) into the query, rather than fetching every FK for the whole catalog
+    and discarding most of them in Python: an edge only survives when BOTH endpoints are
+    in `present` (the tables in the selected pairs), so restricting the FK side to those
+    same pairs drops nothing we would have kept while cutting the scanned join
+    dramatically. Endpoints are still re-checked against `present` in build_graph, so
+    cross-schema/cross-catalog edges stay correct and anything pointing outside the
+    allow-list is dropped rather than leaking that catalog's existence.
     """
+    if source == _SNAPSHOT:
+        # The materialized edge list already has the join done; filter its own fk_* columns.
+        catalog_filter = f"AND fk_catalog IN {_in_clause(catalogs)}" if catalogs else ""
+        pair_filter = f"AND {_pair_in_clause('fk_catalog', 'fk_schema', pairs)}" if pairs else ""
+        stmt = (
+            "SELECT fk_catalog, fk_schema, fk_table, fk_column, ordinal_position, "
+            "pk_catalog, pk_schema, pk_table, pk_column, constraint_name "
+            f"FROM {_snapshot_loc()}.erd_snapshot_foreign_keys WHERE 1=1 {catalog_filter} {pair_filter} "
+            "ORDER BY constraint_name, ordinal_position"
+        )
+        return _rows(_execute(stmt, "foreign_keys"))
     catalog_filter = f"AND ref.constraint_catalog IN {_in_clause(catalogs)}" if catalogs else ""
+    pair_filter = f"AND {_pair_in_clause('fk.table_catalog', 'fk.table_schema', pairs)}" if pairs else ""
     stmt = f"""
     SELECT fk.table_catalog fk_catalog, fk.table_schema fk_schema, fk.table_name fk_table,
            fkc.column_name fk_column, fkc.ordinal_position,
@@ -276,9 +418,10 @@ def _query_foreign_keys(catalogs: Optional[List[str]]) -> List[List[Any]]:
      AND pk.constraint_name=pkc.constraint_name AND fkc.position_in_unique_constraint=pkc.ordinal_position
     WHERE 1=1
       {catalog_filter}
+      {pair_filter}
     ORDER BY ref.constraint_name, fkc.ordinal_position
     """
-    return _rows(_execute(stmt))
+    return _rows(_execute(stmt, "foreign_keys"))
 
 
 # --- catalog/schema tree (lightweight, for the frontend picker) -------------
@@ -291,14 +434,22 @@ def list_catalog_schemas(env: str = "prod") -> List[Dict[str, Any]]:
     catalogs (see _resolve_catalogs) when env == "test"."""
     catalogs = _resolve_catalogs(get_catalogs(), env)
     catalog_filter = f"AND table_catalog IN {_in_clause(catalogs)}" if catalogs else ""
-    stmt = f"""
-    SELECT DISTINCT table_catalog, table_schema
-    FROM system.information_schema.tables
-    WHERE {_internal_schema_exclusion_sql("table_catalog", "table_schema")}
-      {catalog_filter}
-    ORDER BY table_catalog, table_schema
-    """
-    rows = _rows(_execute(stmt))
+    source = _resolve_source(env)
+    if source == _SNAPSHOT:
+        stmt = (
+            "SELECT DISTINCT table_catalog, table_schema "
+            f"FROM {_snapshot_loc()}.erd_snapshot_tables WHERE 1=1 {catalog_filter} "
+            "ORDER BY table_catalog, table_schema"
+        )
+    else:
+        stmt = f"""
+        SELECT DISTINCT table_catalog, table_schema
+        FROM system.information_schema.tables
+        WHERE {_internal_schema_exclusion_sql("table_catalog", "table_schema")}
+          {catalog_filter}
+        ORDER BY table_catalog, table_schema
+        """
+    rows = _rows(_execute(stmt, "schema_tree"))
     tree: Dict[str, List[str]] = {}
     for catalog, schema in rows:
         tree.setdefault(catalog, []).append(schema)
@@ -410,24 +561,57 @@ def build_graph(pairs: Optional[List[Tuple[str, str]]] = None, env: str = "prod"
     if cached and (time.time() - cached[0]) < get_cache_ttl_seconds():
         return cached[1]
 
-    tables = _query_tables(catalogs, pairs)
-
-    # Above the collapse threshold, render one node per schema instead of one per table
-    # -- but only for the unfiltered "All" view. A specific schema selection (pairs) is
-    # exactly how a collapsed schema node "expands": clicking it sets that schema as the
-    # picker selection, which re-requests /api/graph?pairs=... and always gets full
-    # detail regardless of how many tables are in scope overall.
+    build_started = time.perf_counter()
+    # Read from the materialized snapshot when enabled (env-gated), else live. The snapshot
+    # reads double as the existence check -- no separate probe round-trip on every cold
+    # build. If ANY snapshot read fails (tables missing on a fresh deploy before the first
+    # refresh, OR a partial snapshot where e.g. columns didn't build), fall back to live and
+    # re-read the WHOLE graph. Only the snapshot attempt is retried; a live failure
+    # propagates (500) as before.
+    candidate_sources = (
+        [_SNAPSHOT, "information_schema"] if _resolve_source(env) == _SNAPSHOT else ["information_schema"]
+    )
     collapse_threshold = get_schema_collapse_threshold()
-    if not pairs and collapse_threshold and len(tables) > collapse_threshold:
-        payload = build_schema_summary(catalogs, tables)
-        _CACHE[key] = (time.time(), payload)
-        return payload
+    for source in candidate_sources:
+        try:
+            tables = _query_tables(catalogs, pairs, source)
 
-    columns = _query_columns(catalogs, pairs)
-    pks = _query_primary_keys(catalogs, pairs)
-    fks = _query_foreign_keys(catalogs)
-    table_tags = _query_table_tags(catalogs, pairs)
-    column_tags = _query_column_tags(catalogs, pairs)
+            # Above the collapse threshold, render one node per schema instead of one per
+            # table -- but only for the unfiltered "All" view. A specific schema selection
+            # (pairs) is exactly how a collapsed schema node "expands": clicking it sets that
+            # schema as the picker selection, which re-requests /api/graph?pairs=... and
+            # always gets full detail regardless of how many tables are in scope overall.
+            if not pairs and collapse_threshold and len(tables) > collapse_threshold:
+                payload = build_schema_summary(catalogs, tables, source)
+                _CACHE[key] = (time.time(), payload)
+                logger.info(
+                    "build_graph view=schema_summary source=%s nodes=%d edges=%d %.0fms",
+                    source, len(payload["nodes"]), len(payload["edges"]),
+                    (time.perf_counter() - build_started) * 1000,
+                )
+                return payload
+
+            # Fan the 5 remaining metadata queries out concurrently (they're independent)
+            # instead of serially -- each is its own warehouse round-trip, so this cuts the
+            # detail-view build to roughly the slowest single query rather than their sum.
+            # _submit_query carries the per-request OBO identity into the worker thread;
+            # .result() re-raises any query error (tag queries swallow their own -> []).
+            fut_columns = _submit_query(_query_columns, catalogs, pairs, source)
+            fut_pks = _submit_query(_query_primary_keys, catalogs, pairs, source)
+            fut_fks = _submit_query(_query_foreign_keys, catalogs, pairs, source)
+            fut_table_tags = _submit_query(_query_table_tags, catalogs, pairs, source)
+            fut_column_tags = _submit_query(_query_column_tags, catalogs, pairs, source)
+            columns = fut_columns.result()
+            pks = fut_pks.result()
+            fks = fut_fks.result()
+            table_tags = fut_table_tags.result()
+            column_tags = fut_column_tags.result()
+            break
+        except Exception as e:  # noqa: BLE001
+            if source == _SNAPSHOT and len(candidate_sources) > 1:
+                logger.warning("snapshot read failed (%s); falling back to live information_schema", e)
+                continue
+            raise
 
     # Set of table node-ids present in this view (drives edge filtering).
     present: set = {_node_id(c, s, t) for (c, s, t, _comment) in tables}
@@ -537,10 +721,15 @@ def build_graph(pairs: Optional[List[Tuple[str, str]]] = None, env: str = "prod"
         "edges": edges,
     }
     _CACHE[key] = (time.time(), payload)
+    logger.info(
+        "build_graph view=detail source=%s nodes=%d edges=%d %.0fms",
+        source, len(nodes), len(edges), (time.perf_counter() - build_started) * 1000,
+    )
     return payload
 
 
-def build_schema_summary(catalogs: Optional[List[str]], tables: List[List[Any]]) -> Dict[str, Any]:
+def build_schema_summary(catalogs: Optional[List[str]], tables: List[List[Any]],
+                         source: str = "information_schema") -> Dict[str, Any]:
     """One node per (catalog, schema) with its table count, plus one aggregate edge per
     schema-to-schema FK relationship (deduped from every underlying table-level FK)
     -- the collapsed view `build_graph` falls back to above ERD_SCHEMA_COLLAPSE_THRESHOLD
@@ -557,7 +746,7 @@ def build_schema_summary(catalogs: Optional[List[str]], tables: List[List[Any]])
     ]
     present_schema_ids = {n["id"] for n in nodes}
 
-    fks = _query_foreign_keys(catalogs)
+    fks = _query_foreign_keys(catalogs, source=source)
     schema_edge_counts: Dict[Tuple[str, str], int] = {}
     for (fk_catalog, fk_schema, _fk_table, _fk_col, _ord,
          pk_catalog, pk_schema, _pk_table, _pk_col, _constraint_name) in fks:

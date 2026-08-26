@@ -28,10 +28,12 @@ _AUTH_SP = "service_principal"
 
 # Per-request identity captured from the forwarded headers by the routes' dependency
 # (see server/routes/graph.py). ContextVars (not globals) so concurrent requests never
-# see each other's user. Read by get_query_client()/get_user_cache_key() during the same
-# request task. NOTE: this relies on the query being issued within the request's own
-# async task (the graph routes call build_graph inline) -- if a handler is ever moved to
-# a worker thread, the token must be threaded explicitly instead.
+# see each other's user. Read by get_query_client()/get_user_cache_key(). The graph
+# routes run build_graph off the event loop via asyncio.to_thread, which COPIES the
+# current context into the worker thread, and build_graph's own query fan-out re-copies
+# the context into each pool thread (see graph.py's _submit_query) -- so the identity is
+# threaded through explicitly wherever a query actually executes, never read from a bare
+# global.
 _user_token: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar("erd_user_token", default=None)
 _user_key: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar("erd_user_key", default=None)
 
@@ -115,11 +117,41 @@ def get_metadata_location() -> tuple[str, str]:
     return catalogs[0], "erd_meta"
 
 
+_SOURCE_SNAPSHOT = "snapshot"
+_SOURCE_LIVE = "information_schema"
+
+
+def get_metadata_source() -> str:
+    """Where the ERD graph reads its metadata from, via ERD_METADATA_SOURCE:
+
+    - "information_schema" (default): query system.information_schema live on every cache
+      miss -- the original behavior.
+    - "snapshot": read the pre-materialized Delta tables in the metadata location
+      (erd_snapshot_*, built weekly by setup/build_erd_snapshot.py / the
+      refresh_erd_snapshot job), so the expensive information_schema joins (esp. the
+      5-table FK join) never run on the request path. graph.py falls back to live
+      automatically if the snapshot tables aren't present yet (fresh deploy before the
+      first refresh), so enabling this is safe even before the job has run.
+
+    Anything other than an explicit snapshot value (incl. unset) is treated as live."""
+    raw = (os.environ.get("ERD_METADATA_SOURCE") or "").strip().lower()
+    return _SOURCE_SNAPSHOT if raw in (_SOURCE_SNAPSHOT, "delta", "materialized") else _SOURCE_LIVE
+
+
+@lru_cache(maxsize=1)
 def get_workspace_client() -> WorkspaceClient:
     """Get an authenticated WorkspaceClient for the current environment -- always the
     app's own identity (service principal in Apps, your CLI profile locally). Used for
-    deployment-level lookups (e.g. workspace name), NOT for the user-scoped metadata
-    queries -- those go through get_query_client()."""
+    deployment-level lookups (e.g. workspace name), and for the metadata queries in
+    service-principal mode (get_query_client() returns this), NOT for the per-user OBO
+    queries -- those build a fresh per-request client.
+
+    Cached (lru_cache) so the app/SP client -- which resolves auth/config -- is built
+    ONCE per process rather than on every query: build_graph fans out ~6 queries per
+    load, and the SDK client is safe to share across the query threadpool. The app's own
+    auth source is fixed for the process's life, so there's nothing to invalidate. (The
+    OBO path in get_query_client() deliberately does NOT use this -- it must mint a client
+    per user token.)"""
     if IS_DATABRICKS_APP:
         # Remote: uses auto-injected service-principal credentials.
         return WorkspaceClient()
@@ -188,18 +220,30 @@ def get_genie_space_id() -> Optional[str]:
     return raw
 
 
+def get_snapshot_job_id() -> Optional[str]:
+    """Job id of the refresh_erd_snapshot job, from ERD_SNAPSHOT_JOB_ID (templated by the
+    DAB from the job resource's id). Powers the admin "Refresh snapshot now" control,
+    which triggers this job via the Jobs API. None when unset (e.g. deployed without the
+    job, or run locally) -- the admin control then reports the refresh action as
+    unavailable rather than erroring."""
+    raw = (os.environ.get("ERD_SNAPSHOT_JOB_ID") or "").strip()
+    return raw or None
+
+
 def get_cache_ttl_seconds() -> int:
     """How long /api/graph results are cached in-memory before re-querying
-    information_schema. Configurable via ERD_CACHE_TTL_SECONDS -- schema metadata
-    changes rarely, so the 300s default trades a little staleness for far fewer
-    warehouse round-trips on repeated loads/filters within a session."""
+    information_schema. Configurable via ERD_CACHE_TTL_SECONDS -- schema metadata changes
+    rarely (objects deploy ~weekly), so the 3600s (1h) default trades a little staleness
+    for far fewer warehouse round-trips on repeated loads/filters. This is the in-process
+    live cache; the weekly-materialized-metadata path (planned) is the durable answer and
+    supersedes this once in place."""
     raw = os.environ.get("ERD_CACHE_TTL_SECONDS")
     if raw:
         try:
             return max(0, int(raw))
         except ValueError:
             pass
-    return 300
+    return 3600
 
 
 def get_schema_collapse_threshold() -> Optional[int]:

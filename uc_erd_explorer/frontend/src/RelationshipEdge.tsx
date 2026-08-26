@@ -24,7 +24,7 @@ export function RelationshipEdge({
   markerEnd,
   label,
   data,
-}: EdgeProps<{ inferred?: boolean }>) {
+}: EdgeProps<{ inferred?: boolean; showLabel?: boolean }>) {
   const [path, labelX, labelY] = getSmoothStepPath({
     sourceX,
     sourceY,
@@ -34,11 +34,16 @@ export function RelationshipEdge({
     targetPosition,
   })
   const inferred = Boolean(data?.inferred)
+  // Labels are hover/selection-only (App.tsx sets showLabel), not painted on every edge
+  // at once: the always-on labels overlapped table content and cluttered dense graphs.
+  // The line + arrow still show the relationship exists; the column mapping appears on
+  // demand when you hover an edge or focus a table.
+  const showLabel = Boolean(data?.showLabel)
 
   return (
     <>
       <BaseEdge id={id} path={path} markerEnd={markerEnd} style={style} />
-      {label && (
+      {label && showLabel && (
         <EdgeLabelRenderer>
           <div
             className="erd-edge-label"
@@ -51,10 +56,11 @@ export function RelationshipEdge({
               background: '#ffffff',
               borderRadius: 4,
               padding: '1px 5px',
-              fontSize: 10,
-              fontWeight: inferred ? 700 : 400,
+              fontSize: 9,
+              fontWeight: inferred ? 700 : 500,
               color: inferred ? 'var(--db-red)' : '#667085',
               whiteSpace: 'nowrap',
+              boxShadow: '0 1px 3px rgba(16,24,40,0.14)',
               // Match the line's dim/highlight opacity (set by App.tsx's displayEdges)
               // so a de-emphasized edge's label dims along with it, not just the line.
               opacity: style?.opacity ?? 1,

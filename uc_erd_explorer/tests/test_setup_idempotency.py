@@ -9,6 +9,7 @@ import re
 
 import pytest
 
+import build_erd_snapshot
 import create_genie_space
 import create_logistics_demo
 import create_megacorp_demo
@@ -50,6 +51,110 @@ class TestCreateScopedViewsBuildStatements:
         statements = create_scoped_views.build_statements(["megacorp", "sales"], "megacorp", "erd_meta")
         joined = "\n".join(statements)
         assert "'megacorp'" in joined and "'sales'" in joined
+
+
+class TestBuildErdSnapshotStatements:
+    def _sql(self, statements):
+        return "\n".join(sql for _label, sql, _optional in statements)
+
+    def test_deterministic_across_calls(self):
+        a = build_erd_snapshot.build_statements(["megacorp"], "megacorp", "erd_meta")
+        b = build_erd_snapshot.build_statements(["megacorp"], "megacorp", "erd_meta")
+        assert a == b
+
+    def test_creates_all_snapshot_tables_plus_meta(self):
+        statements = build_erd_snapshot.build_statements(["megacorp"], "megacorp", "erd_meta")
+        labels = {label for label, _sql, _opt in statements}
+        assert {
+            "erd_snapshot_tables", "erd_snapshot_columns", "erd_snapshot_primary_keys",
+            "erd_snapshot_foreign_keys", "erd_snapshot_table_tags", "erd_snapshot_column_tags",
+            "erd_snapshot_meta",
+        }.issubset(labels)
+
+    def test_writes_to_metadata_location(self):
+        statements = build_erd_snapshot.build_statements(["megacorp"], "megacorp", "erd_meta")
+        joined = self._sql(statements)
+        assert "CREATE OR REPLACE TABLE megacorp.erd_meta.erd_snapshot_tables" in joined
+        # The FK edge list is materialized (the join done in the snapshot, not the app).
+        assert "megacorp.erd_meta.erd_snapshot_foreign_keys" in joined
+        assert "referential_constraints" in joined
+
+    def test_scoped_mode_filters_by_catalog(self):
+        joined = self._sql(build_erd_snapshot.build_statements(["megacorp"], "megacorp", "erd_meta"))
+        assert "IN ('megacorp')" in joined
+
+    def test_unscoped_mode_omits_catalog_filter(self):
+        joined = self._sql(build_erd_snapshot.build_statements([], "megacorp", "erd_meta"))
+        assert "table_catalog IN" not in joined
+
+    def test_tag_snapshots_flagged_optional(self):
+        statements = build_erd_snapshot.build_statements(["megacorp"], "megacorp", "erd_meta")
+        optional = {label for label, _sql, opt in statements if opt}
+        assert optional == {"erd_snapshot_table_tags", "erd_snapshot_column_tags"}
+
+    def test_invalid_catalog_identifier_raises(self):
+        with pytest.raises(ValueError):
+            build_erd_snapshot.build_statements(["bad; catalog"], "megacorp", "erd_meta")
+
+
+class _FakeState:
+    def __init__(self, value):
+        self.value = value
+
+
+class _FakeStatus:
+    def __init__(self, value):
+        self.state = _FakeState(value)
+        self.error = None  # real StatementResponse.status has both state and error
+
+
+class _FakeResp:
+    def __init__(self, value):
+        self.status = _FakeStatus(value)
+        self.statement_id = "sid"
+
+
+class _FakeStmtExec:
+    """Minimal stand-in for w.statement_execution: statements whose text contains any of
+    fail_substrings come back FAILED, everything else SUCCEEDED (terminal, so _run's poll
+    loop doesn't spin)."""
+    def __init__(self, fail_substrings=()):
+        self.fail_substrings = fail_substrings
+        self.executed = []
+
+    def execute_statement(self, warehouse_id, statement, wait_timeout):
+        self.executed.append(statement)
+        failed = any(s in statement for s in self.fail_substrings)
+        return _FakeResp("FAILED" if failed else "SUCCEEDED")
+
+    def get_statement(self, statement_id):
+        return _FakeResp("SUCCEEDED")
+
+
+class _FakeW:
+    def __init__(self, fail_substrings=()):
+        self.statement_execution = _FakeStmtExec(fail_substrings)
+
+
+class TestBuildErdSnapshotMaterialize:
+    def test_runs_all_statements_and_returns_loc(self):
+        w = _FakeW()
+        loc = build_erd_snapshot.materialize(w, "wh", ["c"], "c", "erd_meta", log=lambda *a: None)
+        assert loc == "c.erd_meta"
+        assert len(w.statement_execution.executed) == 8  # schema + 6 tables + meta
+
+    def test_optional_tag_source_missing_creates_empty_table(self):
+        # column_tags CTAS fails -> the optional branch creates an empty table instead of
+        # raising (and instead of silently leaving it un-created).
+        w = _FakeW(fail_substrings=("information_schema.column_tags",))
+        build_erd_snapshot.materialize(w, "wh", ["c"], "c", "erd_meta", log=lambda *a: None)
+        assert any("erd_snapshot_column_tags (" in s for s in w.statement_execution.executed)
+
+    def test_required_statement_failure_raises(self):
+        # A non-optional failure (columns CTAS) must raise, not silently pass.
+        w = _FakeW(fail_substrings=("information_schema.columns",))
+        with pytest.raises(RuntimeError):
+            build_erd_snapshot.materialize(w, "wh", ["c"], "c", "erd_meta", log=lambda *a: None)
 
 
 class TestCreateGenieSpaceBuildSerializedSpace:

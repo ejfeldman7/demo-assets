@@ -1,7 +1,8 @@
 """API routes for the ERD graph and the catalog/schema picker."""
+import asyncio
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 
 from ..config import (
     get_catalogs,
@@ -68,7 +69,12 @@ async def get_graph(
             catalog, schema = pair.split(".", 1)
             parsed.append((catalog.strip(), schema.strip()))
     try:
-        return build_graph(parsed, env)
+        # build_graph does blocking, potentially slow warehouse I/O -- run it off the
+        # event loop so one slow load doesn't stall every other concurrent request (this
+        # handler is async). asyncio.to_thread copies the current context into the worker
+        # thread, carrying the OBO user identity (_capture_user set it on this request's
+        # context) through to get_query_client() -- see config.py / graph._submit_query.
+        return await asyncio.to_thread(build_graph, parsed, env)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:  # noqa: BLE001
@@ -76,17 +82,23 @@ async def get_graph(
 
 
 @router.get("/schema-tree")
-async def get_schema_tree(env: str = _ENV_QUERY):
+async def get_schema_tree(response: Response, env: str = _ENV_QUERY):
     """Enumerate catalog -> [schema, ...] for the frontend's catalog/schema tree picker,
     without fetching the full graph."""
     try:
-        return {"catalogs": list_catalog_schemas(env), "unscoped": get_catalogs() is None}
+        # Offloaded like /graph (blocking warehouse query, OBO context carried across).
+        tree = await asyncio.to_thread(list_catalog_schemas, env)
+        # `private` (never a shared/proxy cache): in on-behalf-of-user mode the tree is
+        # privilege-filtered per user, so it must not be cached anywhere cross-user. Short
+        # max-age still spares the browser a re-fetch on repeated env toggles in a session.
+        response.headers["Cache-Control"] = "private, max-age=60"
+        return {"catalogs": tree, "unscoped": get_catalogs() is None}
     except Exception as e:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.get("/config")
-async def get_config():
+async def get_config(response: Response):
     """Expose which catalogs this deployment is scoped to, and which workspace it's
     running in, for the frontend."""
     catalogs = get_catalogs()
@@ -94,6 +106,8 @@ async def get_config():
         workspace = get_workspace_name()
     except Exception:  # noqa: BLE001
         workspace = None
+    # Deployment-level, identical for every user -> safe to cache briefly in the browser.
+    response.headers["Cache-Control"] = "private, max-age=300"
     return {
         "catalogs": catalogs,
         "unscoped": catalogs is None,

@@ -217,3 +217,100 @@ class TestInferRelationships:
         result = graph.infer_relationships(columns, pks, {})
         assert len(result) == 1
         assert result[0]["fk_columns"] == ["Operator_ID"]
+
+
+class TestResolveSource:
+    def test_live_when_source_is_information_schema(self, monkeypatch):
+        monkeypatch.setattr(graph, "get_metadata_source", lambda: "information_schema")
+        assert graph._resolve_source("prod") == "information_schema"
+
+    def test_test_env_forces_live_even_in_snapshot_mode(self, monkeypatch):
+        # The snapshot only materializes the prod catalogs; Test queries the _ts catalogs.
+        monkeypatch.setattr(graph, "get_metadata_source", lambda: "snapshot")
+        assert graph._resolve_source("test") == "information_schema"
+
+    def test_snapshot_when_configured_and_prod(self, monkeypatch):
+        # Intent only -- no warehouse probe. Existence is handled by build_graph's
+        # fallback on the first snapshot read (see TestSnapshotFallback).
+        monkeypatch.setattr(graph, "get_metadata_source", lambda: "snapshot")
+        assert graph._resolve_source("prod") == "snapshot"
+
+
+class TestSnapshotFallback:
+    def test_build_graph_falls_back_to_live_when_snapshot_missing(self, monkeypatch):
+        monkeypatch.setattr(graph, "get_metadata_source", lambda: "snapshot")
+        monkeypatch.setattr(graph, "get_catalogs", lambda: ["c"])
+        monkeypatch.setattr(graph, "get_metadata_location", lambda: ("c", "erd_meta"))
+        monkeypatch.setattr(graph, "get_schema_collapse_threshold", lambda: 0)  # never collapse
+        graph._CACHE.clear()
+
+        table_sources = []
+
+        def fake_tables(catalogs, pairs, source="information_schema"):
+            table_sources.append(source)
+            if source == "snapshot":
+                raise RuntimeError("TABLE_OR_VIEW_NOT_FOUND: erd_snapshot_tables")
+            return [("c", "s", "t", None)]
+
+        monkeypatch.setattr(graph, "_query_tables", fake_tables)
+        for fn in ("_query_columns", "_query_primary_keys", "_query_foreign_keys",
+                   "_query_table_tags", "_query_column_tags"):
+            monkeypatch.setattr(graph, fn, lambda *a, **k: [])
+
+        payload = graph.build_graph(None, "prod")
+        # tried snapshot first, then fell back to live and re-read
+        assert table_sources == ["snapshot", "information_schema"]
+        assert payload["view"] == "detail"
+        assert [n["table"] for n in payload["nodes"]] == ["t"]
+
+
+class TestSnapshotVsLiveQuerySql:
+    """The source switch must produce snapshot-table SQL in snapshot mode and
+    information_schema SQL otherwise. We capture the built statement via a stubbed
+    _execute rather than hitting a warehouse."""
+
+    def _capture(self, monkeypatch):
+        cap = {}
+
+        def fake_execute(stmt, label="query", timeout="50s"):
+            cap["stmt"] = stmt
+            return object()
+
+        monkeypatch.setattr(graph, "_execute", fake_execute)
+        monkeypatch.setattr(graph, "_rows", lambda r: [])
+        monkeypatch.setattr(graph, "get_metadata_location", lambda: ("megacorp", "erd_meta"))
+        return cap
+
+    def test_columns_snapshot(self, monkeypatch):
+        cap = self._capture(monkeypatch)
+        graph._query_columns(["megacorp"], None, source="snapshot")
+        assert "megacorp.erd_meta.erd_snapshot_columns" in cap["stmt"]
+        assert "information_schema" not in cap["stmt"]
+
+    def test_columns_live(self, monkeypatch):
+        cap = self._capture(monkeypatch)
+        graph._query_columns(["megacorp"], None, source="information_schema")
+        assert "system.information_schema.columns" in cap["stmt"]
+
+    def test_primary_keys_snapshot_no_join(self, monkeypatch):
+        cap = self._capture(monkeypatch)
+        graph._query_primary_keys(["megacorp"], None, source="snapshot")
+        assert "erd_snapshot_primary_keys" in cap["stmt"]
+        assert "JOIN" not in cap["stmt"].upper()
+
+    def test_foreign_keys_snapshot_no_join(self, monkeypatch):
+        cap = self._capture(monkeypatch)
+        graph._query_foreign_keys(["megacorp"], None, source="snapshot")
+        assert "erd_snapshot_foreign_keys" in cap["stmt"]
+        assert "JOIN" not in cap["stmt"].upper()
+
+    def test_foreign_keys_live_has_join(self, monkeypatch):
+        cap = self._capture(monkeypatch)
+        graph._query_foreign_keys(["megacorp"], None, source="information_schema")
+        assert "referential_constraints" in cap["stmt"]
+        assert "JOIN" in cap["stmt"].upper()
+
+    def test_pair_filter_applies_in_snapshot(self, monkeypatch):
+        cap = self._capture(monkeypatch)
+        graph._query_columns(["megacorp"], [("megacorp", "erp")], source="snapshot")
+        assert "('megacorp', 'erp')" in cap["stmt"]

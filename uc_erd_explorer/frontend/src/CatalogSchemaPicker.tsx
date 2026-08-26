@@ -46,6 +46,11 @@ export function CatalogSchemaPicker({ tree, selectedPairs, onChange }: CatalogSc
   const all = allPairs(tree)
   const effective = selectedPairs ?? all
   const isAll = selectedPairs === null
+  // A non-null but empty set is an explicit "nothing selected" (show-nothing), distinct
+  // from null ("All"). commit() collapses a full set back to null, so a partial set is
+  // anything in between -> the All row renders checked / unchecked / indeterminate.
+  const noneSelected = selectedPairs !== null && selectedPairs.size === 0
+  const allState: CatalogState = isAll ? 'checked' : noneSelected ? 'unchecked' : 'indeterminate'
 
   function commit(next: Set<string>) {
     // Collapse back to the "All" sentinel if the explicit set now covers everything --
@@ -84,10 +89,17 @@ export function CatalogSchemaPicker({ tree, selectedPairs, onChange }: CatalogSc
 
   return (
     <div style={styles.tree}>
-      <button onClick={() => onChange(null)} style={rowStyle(isAll)}>
-        <Checkbox state={isAll ? 'checked' : 'unchecked'} />
+      {/* Two-way toggle: when everything is selected, clicking clears to "nothing"; from
+          any other state, clicking selects everything. (Previously this only ever selected
+          all -- there was no way to clear from here, so it read as one-directional.) */}
+      <button
+        onClick={() => onChange(isAll ? new Set<string>() : null)}
+        style={rowStyle(isAll)}
+        aria-label={isAll ? 'Clear all' : 'Select all'}
+      >
+        <Checkbox state={allState} />
         <span style={{ flex: 1, fontWeight: 700 }}>All</span>
-        {isAll && <span style={styles.check}>✓</span>}
+        <span style={styles.check}>{isAll ? '✓' : noneSelected ? '' : '–'}</span>
       </button>
 
       {tree.map((catalog) => {

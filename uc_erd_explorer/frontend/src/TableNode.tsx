@@ -1,6 +1,7 @@
-import { Handle, Position, type NodeProps } from 'reactflow'
+import { useEffect, useMemo } from 'react'
+import { Handle, Position, useUpdateNodeInternals, type NodeProps } from 'reactflow'
 import type { ColorPair } from './catalogColors'
-import type { TableNodeData, TagValue } from './types'
+import type { ColumnMeta, TableNodeData, TagValue } from './types'
 
 // Deterministic tag -> color mapping. Well-known governance keywords get a fixed,
 // attention-appropriate color; anything else falls back to a stable hash-based pick
@@ -53,10 +54,33 @@ export interface TableNodeProps extends NodeProps<TableNodeData> {
   data: TableNodeData & { dimmed?: boolean; selected?: boolean; color?: ColorPair }
 }
 
-export function TableNode({ data }: TableNodeProps) {
+export function TableNode({ id, data }: TableNodeProps) {
   const colors = data.color ?? { bar: '#475467', soft: '#f2f4f7' }
   const dimmed = data.dimmed
   const selected = data.selected
+  const updateNodeInternals = useUpdateNodeInternals()
+
+  // Keys at the top of each table: primary keys first, then foreign keys, then the rest
+  // (stable within each group). This is DISPLAY ONLY -- the exported model/DDL still uses
+  // the payload's true ordinal order, since export.ts reads the GraphResponse, not this
+  // rendered node.
+  const displayColumns = useMemo(() => {
+    const rank = (c: ColumnMeta) => (c.is_pk ? 0 : c.is_fk ? 1 : 2)
+    return data.columns
+      .map((c, i) => ({ c, i }))
+      .sort((a, b) => rank(a.c) - rank(b.c) || a.i - b.i)
+      .map((x) => x.c)
+  }, [data.columns])
+
+  // Each column row carries its own source/target handle (id = column name) so edges
+  // anchor to the actual related field, not the card's vertical center. React Flow caches
+  // handle geometry, so when the visible column set changes (the keys-only toggle, a new
+  // graph load, or the reorder above) we must ask it to re-measure -- otherwise edges keep
+  // pointing at stale row positions. The key is the visible column names in render order.
+  const colKey = displayColumns.map((c) => c.name).join('|')
+  useEffect(() => {
+    updateNodeInternals(id)
+  }, [id, colKey, updateNodeInternals])
 
   return (
     <div
@@ -74,7 +98,6 @@ export function TableNode({ data }: TableNodeProps) {
         overflow: 'hidden',
       }}
     >
-      <Handle type="target" position={Position.Left} style={{ background: colors.bar, border: 'none' }} />
       <div
         style={{
           background: colors.bar,
@@ -129,7 +152,7 @@ export function TableNode({ data }: TableNodeProps) {
         </div>
       )}
       <div>
-        {data.columns.map((col) => (
+        {displayColumns.map((col) => (
           <div
             key={col.name}
             style={{
@@ -139,8 +162,28 @@ export function TableNode({ data }: TableNodeProps) {
               padding: '4px 11px',
               borderTop: '1px solid #f2f4f7',
               lineHeight: '16px',
+              // Anchor point for this row's per-column handles (positioned absolutely at
+              // the row's left/right center by React Flow).
+              position: 'relative',
             }}
           >
+            {/* Per-column edge anchors: incoming FKs target this row's left handle,
+                outgoing FKs leave from its right handle. id = column name (unique within a
+                table). Non-connectable -- these are display anchors, not drag points. */}
+            <Handle
+              type="target"
+              position={Position.Left}
+              id={col.name}
+              isConnectable={false}
+              style={columnHandleStyle(colors.bar)}
+            />
+            <Handle
+              type="source"
+              position={Position.Right}
+              id={col.name}
+              isConnectable={false}
+              style={columnHandleStyle(colors.bar)}
+            />
             <span style={{ display: 'flex', gap: 3, minWidth: 34 }}>
               {col.is_pk && (
                 <span
@@ -199,7 +242,20 @@ export function TableNode({ data }: TableNodeProps) {
           </div>
         ))}
       </div>
-      <Handle type="source" position={Position.Right} style={{ background: colors.bar, border: 'none' }} />
     </div>
   )
+}
+
+// Small, subtle per-column handle -- a little dot at the row's edge that the edge
+// connects to. Kept understated so a table with many keys doesn't look busy.
+function columnHandleStyle(bar: string) {
+  return {
+    width: 7,
+    height: 7,
+    minWidth: 0,
+    minHeight: 0,
+    background: bar,
+    border: '1.5px solid #fff',
+    opacity: 0.85,
+  }
 }
