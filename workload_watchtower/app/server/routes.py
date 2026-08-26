@@ -195,7 +195,7 @@ def ask(a: Ask):
 
 # ── triage cards (Kanban) ────────────────────────────────────────────────────
 @router.get("/cards")
-def list_cards():
+def list_cards(limit: int = 500):
     with pool.connection() as conn, conn.cursor() as cur:
         cur.execute(
             """SELECT c.id, c.finding_id, c.status, c.priority, c.notes, c.assignee_id,
@@ -207,7 +207,8 @@ def list_cards():
                FROM cards c
                JOIN findings f ON c.finding_id = f.id
                LEFT JOIN it_members m ON c.assignee_id = m.id
-               ORDER BY coalesce(f.alert_priority,0) DESC, """ + _SEV_RANK + """ DESC, c.created_at DESC""")
+               ORDER BY coalesce(f.alert_priority,0) DESC, """ + _SEV_RANK + """ DESC, c.created_at DESC
+               LIMIT %s""", (limit,))
         return rows_to_dicts(cur)
 
 

@@ -7,6 +7,7 @@ Statement Execution is used (not Spark) so this runs identically local and in-ap
 from __future__ import annotations
 
 import os
+import time
 
 from databricks.sdk import WorkspaceClient
 
@@ -15,6 +16,11 @@ from .db import w  # reuse the shared WorkspaceClient
 WAREHOUSE_ID = os.environ["WT_WAREHOUSE_ID"]
 # Fully-qualified <catalog>.<schema>.workload_snapshots — set in app.yaml from your config.
 UC_SNAPSHOTS = os.environ["WT_UC_SNAPSHOTS"]
+# Trends are backed by the SQL warehouse (slow + cold-start-prone) and the Dashboard polls them
+# from every open tab, so cache briefly. They change at most once per poll (~5 min), so a short
+# TTL is safely fresh while collapsing repeated warehouse round-trips.
+_TRENDS_TTL_SEC = float(os.environ.get("WT_TRENDS_TTL_SEC", "90"))
+_trends_cache: dict[int, tuple[float, dict]] = {}  # hours -> (expires_at, data)
 
 
 def query(sql: str) -> list[dict]:
@@ -39,7 +45,18 @@ def _num(x, cast=float):
 
 
 def trends(hours: int = 24) -> dict:
-    """Cost + count trend of flagged workloads over the last `hours`, by type."""
+    """Cost + count trend of flagged workloads over the last `hours`. Cached (short TTL) so a slow
+    warehouse query isn't re-run on every Dashboard poll."""
+    now = time.time()
+    cached = _trends_cache.get(hours)
+    if cached and cached[0] > now:
+        return cached[1]
+    data = _compute_trends(hours)
+    _trends_cache[hours] = (now + _TRENDS_TTL_SEC, data)
+    return data
+
+
+def _compute_trends(hours: int = 24) -> dict:
     by_type = query(
         f"""SELECT workload_type,
                    count(DISTINCT external_id) AS workloads,

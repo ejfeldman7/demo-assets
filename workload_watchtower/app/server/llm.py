@@ -13,6 +13,8 @@ import os
 from .db import w
 
 MODEL = os.environ.get("WT_MODEL", "databricks-claude-sonnet-5")
+# Fail fast rather than tie up a worker if the serving endpoint hangs.
+_TIMEOUT_SEC = float(os.environ.get("WT_LLM_TIMEOUT_SEC", "60"))
 
 _client = None
 
@@ -50,5 +52,6 @@ def chat(system: str, user: str, max_tokens: int = 1200) -> str:
         model=MODEL,
         messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
         max_tokens=max_tokens,
+        timeout=_TIMEOUT_SEC,
     )
     return _text(resp.choices[0].message.content).strip()
