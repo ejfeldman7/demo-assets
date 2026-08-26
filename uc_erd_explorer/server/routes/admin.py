@@ -13,12 +13,17 @@ permission error, which we surface as an actionable 403 rather than a generic 50
 """
 import asyncio
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 
 from ..config import get_metadata_source, get_snapshot_job_id, get_workspace_client
 from ..graph import get_snapshot_freshness
+from .graph import _capture_user
 
-router = APIRouter(prefix="/admin", tags=["admin"])
+# Same per-request identity capture the graph router uses: in on-behalf-of-user mode the
+# snapshot-freshness read goes through get_query_client(), which needs the forwarded user
+# token from this dependency -- without it, get_snapshot_freshness would always come back
+# empty (token missing -> raise -> swallowed) and the panel would wrongly show "never built".
+router = APIRouter(prefix="/admin", tags=["admin"], dependencies=[Depends(_capture_user)])
 
 
 @router.get("/snapshot-status")
@@ -47,8 +52,14 @@ async def refresh_snapshot():
             detail="No snapshot refresh job is configured (ERD_SNAPSHOT_JOB_ID unset). "
             "This deployment can't trigger a refresh from the app.",
         )
+    try:
+        jid = int(job_id)
+    except (TypeError, ValueError):
+        raise HTTPException(
+            status_code=500,
+            detail=f"ERD_SNAPSHOT_JOB_ID is not a valid job id: {job_id!r} (deployment misconfig).",
+        )
     client = get_workspace_client()
-    jid = int(job_id)
 
     def _existing_active_run():
         # Reuse an already-running refresh instead of stacking another: the button is a

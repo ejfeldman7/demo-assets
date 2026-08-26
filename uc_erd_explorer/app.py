@@ -85,7 +85,10 @@ class _CachedStaticFiles(StaticFiles):
 
     async def get_response(self, path, scope):
         resp = await super().get_response(path, scope)
-        resp.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+        # Only on a real hit -- never cache a 404 (or any error) immutably, or a client
+        # that briefly requested a since-removed hashed asset would cache the miss for a year.
+        if resp.status_code in (200, 206):
+            resp.headers["Cache-Control"] = "public, max-age=31536000, immutable"
         return resp
 
 

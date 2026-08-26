@@ -31,6 +31,7 @@ manually:
 import argparse
 import os
 import re
+import time
 
 from databricks.sdk import WorkspaceClient
 
@@ -212,6 +213,22 @@ _EMPTY_TABLE_DDL = {
 }
 
 
+def _run(w, warehouse_id: str, statement: str):
+    """Execute a statement and POLL to a terminal state. execute_statement's wait_timeout
+    caps at 50s; a large CTAS (e.g. the FK-join snapshot across many catalogs) can exceed
+    it and return still-RUNNING. Without polling that non-terminal state is misread as
+    failure -- and for the optional tag tables it would trigger the empty-table fallback,
+    silently discarding real tags. Poll instead so only a genuinely FAILED/CANCELED state
+    (or a missing source table) is treated as failure."""
+    resp = w.statement_execution.execute_statement(
+        warehouse_id=warehouse_id, statement=statement, wait_timeout="50s"
+    )
+    while resp.status and resp.status.state and resp.status.state.value in ("PENDING", "RUNNING"):
+        time.sleep(2)
+        resp = w.statement_execution.get_statement(resp.statement_id)
+    return resp
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--profile", default=None, help="Omit to use ambient auth (job compute).")
@@ -241,21 +258,17 @@ def main():
 
     for i, (label, stmt, optional) in enumerate(statements, 1):
         print(f"[{i}/{len(statements)}] {label}...", end=" ", flush=True)
-        resp = w.statement_execution.execute_statement(
-            warehouse_id=args.warehouse_id, statement=stmt, wait_timeout="50s"
-        )
+        resp = _run(w, args.warehouse_id, stmt)
         if resp.status.state.value == "SUCCEEDED":
             print("ok")
             continue
         # An optional (tag) source can be missing on older metastores -- fall back to an
-        # empty table with the right schema so the app's snapshot read still works.
+        # empty table with the right schema so the app's snapshot read still works. This
+        # now only fires on a genuine failure (FAILED/CANCELED/missing source), not a
+        # slow-but-succeeding build, since _run polls to a terminal state first.
         if optional and label in _EMPTY_TABLE_DDL:
             print(f"source unavailable ({resp.status.error.message if resp.status.error else 'error'}); creating empty table")
-            empty = w.statement_execution.execute_statement(
-                warehouse_id=args.warehouse_id,
-                statement=f"CREATE OR REPLACE TABLE {loc}.{label} {_EMPTY_TABLE_DDL[label]}",
-                wait_timeout="50s",
-            )
+            empty = _run(w, args.warehouse_id, f"CREATE OR REPLACE TABLE {loc}.{label} {_EMPTY_TABLE_DDL[label]}")
             if empty.status.state.value != "SUCCEEDED":
                 print(f"  FAILED creating empty table: {empty.status.error}")
                 raise SystemExit(1)

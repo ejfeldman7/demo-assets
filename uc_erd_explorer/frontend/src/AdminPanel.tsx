@@ -42,11 +42,17 @@ export function AdminPanel() {
     if (open) loadStatus()
   }, [open])
 
-  // Poll the refresh run until it reaches a terminal state.
+  // Poll the refresh run until it reaches a terminal state -- but bounded: stop after
+  // MAX_POLLS so a run that never terminates (or a Jobs API stuck non-terminal) doesn't
+  // poll every 3s forever while the modal is open. On timeout we stop and point the user
+  // at the run page rather than hammering the endpoint.
   useEffect(() => {
     if (runId === null || !running) return
+    const MAX_POLLS = 100 // ~5 min at 3s
     let cancelled = false
+    let attempts = 0
     const tick = () => {
+      attempts += 1
       fetchRefreshRunStatus(runId)
         .then((r) => {
           if (cancelled) return
@@ -55,6 +61,9 @@ export function AdminPanel() {
             setRunning(false)
             setRunResult(r.result_state ?? r.life_cycle_state)
             loadStatus() // refresh freshness after a completed run
+          } else if (attempts >= MAX_POLLS) {
+            setRunning(false)
+            setRunResult('still running — check the run page')
           } else {
             timer = setTimeout(tick, 3000)
           }

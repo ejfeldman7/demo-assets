@@ -562,53 +562,56 @@ def build_graph(pairs: Optional[List[Tuple[str, str]]] = None, env: str = "prod"
         return cached[1]
 
     build_started = time.perf_counter()
-    # Read from the materialized snapshot when enabled (env-gated), else live. The first
-    # snapshot read doubles as the existence check: if the snapshot tables aren't there yet
-    # (fresh deploy before the first refresh job), fall back to live and re-read -- no
-    # separate probe round-trip on every cold build.
-    source = _resolve_source(env)
-    if source == _SNAPSHOT:
-        try:
-            tables = _query_tables(catalogs, pairs, _SNAPSHOT)
-        except Exception as e:  # noqa: BLE001
-            logger.warning("snapshot read failed (%s); falling back to live information_schema", e)
-            source = "information_schema"
-            tables = _query_tables(catalogs, pairs, source)
-    else:
-        tables = _query_tables(catalogs, pairs, source)
-
-    # Above the collapse threshold, render one node per schema instead of one per table
-    # -- but only for the unfiltered "All" view. A specific schema selection (pairs) is
-    # exactly how a collapsed schema node "expands": clicking it sets that schema as the
-    # picker selection, which re-requests /api/graph?pairs=... and always gets full
-    # detail regardless of how many tables are in scope overall.
+    # Read from the materialized snapshot when enabled (env-gated), else live. The snapshot
+    # reads double as the existence check -- no separate probe round-trip on every cold
+    # build. If ANY snapshot read fails (tables missing on a fresh deploy before the first
+    # refresh, OR a partial snapshot where e.g. columns didn't build), fall back to live and
+    # re-read the WHOLE graph. Only the snapshot attempt is retried; a live failure
+    # propagates (500) as before.
+    candidate_sources = (
+        [_SNAPSHOT, "information_schema"] if _resolve_source(env) == _SNAPSHOT else ["information_schema"]
+    )
     collapse_threshold = get_schema_collapse_threshold()
-    if not pairs and collapse_threshold and len(tables) > collapse_threshold:
-        payload = build_schema_summary(catalogs, tables, source)
-        _CACHE[key] = (time.time(), payload)
-        logger.info(
-            "build_graph view=schema_summary source=%s nodes=%d edges=%d %.0fms",
-            source, len(payload["nodes"]), len(payload["edges"]),
-            (time.perf_counter() - build_started) * 1000,
-        )
-        return payload
+    for source in candidate_sources:
+        try:
+            tables = _query_tables(catalogs, pairs, source)
 
-    # Fan the 5 remaining metadata queries out concurrently (they're independent) instead
-    # of issuing them serially -- each is its own warehouse round-trip, so this cuts the
-    # detail-view build to roughly the slowest single query rather than their sum. Each is
-    # submitted through _submit_query so the per-request OBO identity rides along into the
-    # worker thread. .result() re-raises any query error here, surfacing it as a 500 (the
-    # tag queries swallow their own errors and return [], so they never raise).
-    fut_columns = _submit_query(_query_columns, catalogs, pairs, source)
-    fut_pks = _submit_query(_query_primary_keys, catalogs, pairs, source)
-    fut_fks = _submit_query(_query_foreign_keys, catalogs, pairs, source)
-    fut_table_tags = _submit_query(_query_table_tags, catalogs, pairs, source)
-    fut_column_tags = _submit_query(_query_column_tags, catalogs, pairs, source)
-    columns = fut_columns.result()
-    pks = fut_pks.result()
-    fks = fut_fks.result()
-    table_tags = fut_table_tags.result()
-    column_tags = fut_column_tags.result()
+            # Above the collapse threshold, render one node per schema instead of one per
+            # table -- but only for the unfiltered "All" view. A specific schema selection
+            # (pairs) is exactly how a collapsed schema node "expands": clicking it sets that
+            # schema as the picker selection, which re-requests /api/graph?pairs=... and
+            # always gets full detail regardless of how many tables are in scope overall.
+            if not pairs and collapse_threshold and len(tables) > collapse_threshold:
+                payload = build_schema_summary(catalogs, tables, source)
+                _CACHE[key] = (time.time(), payload)
+                logger.info(
+                    "build_graph view=schema_summary source=%s nodes=%d edges=%d %.0fms",
+                    source, len(payload["nodes"]), len(payload["edges"]),
+                    (time.perf_counter() - build_started) * 1000,
+                )
+                return payload
+
+            # Fan the 5 remaining metadata queries out concurrently (they're independent)
+            # instead of serially -- each is its own warehouse round-trip, so this cuts the
+            # detail-view build to roughly the slowest single query rather than their sum.
+            # _submit_query carries the per-request OBO identity into the worker thread;
+            # .result() re-raises any query error (tag queries swallow their own -> []).
+            fut_columns = _submit_query(_query_columns, catalogs, pairs, source)
+            fut_pks = _submit_query(_query_primary_keys, catalogs, pairs, source)
+            fut_fks = _submit_query(_query_foreign_keys, catalogs, pairs, source)
+            fut_table_tags = _submit_query(_query_table_tags, catalogs, pairs, source)
+            fut_column_tags = _submit_query(_query_column_tags, catalogs, pairs, source)
+            columns = fut_columns.result()
+            pks = fut_pks.result()
+            fks = fut_fks.result()
+            table_tags = fut_table_tags.result()
+            column_tags = fut_column_tags.result()
+            break
+        except Exception as e:  # noqa: BLE001
+            if source == _SNAPSHOT and len(candidate_sources) > 1:
+                logger.warning("snapshot read failed (%s); falling back to live information_schema", e)
+                continue
+            raise
 
     # Set of table node-ids present in this view (drives edge filtering).
     present: set = {_node_id(c, s, t) for (c, s, t, _comment) in tables}
