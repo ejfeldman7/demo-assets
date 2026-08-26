@@ -341,11 +341,52 @@ the notebook re-run) to catch up.
 | `erd_catalogs` | `ERD_CATALOGS` (comma-separated) | `megacorp,logistics` (packaged demo default) | The catalog allow-list — scopes **both** the ERD graph and the Genie Space. Set to an empty string for unscoped mode, see below |
 | `erd_metadata_location` | `ERD_METADATA_LOCATION` (`"catalog.schema"`) | `megacorp.erd_meta` | Where the scoped Genie metadata views live. **Required** if `erd_catalogs` is empty (no catalog to default from) |
 | `genie_space_id` | `GENIE_SPACE_ID` | (set after first setup run) | Which Genie Space the chat panel talks to |
-| `erd_cache_ttl_seconds` | `ERD_CACHE_TTL_SECONDS` | `300` | How long `/api/graph` results are cached in-memory before re-querying `information_schema` |
+| `erd_metadata_source` | `ERD_METADATA_SOURCE` | `information_schema` | Where the graph reads metadata: `information_schema` (live) or `snapshot` (the materialized `erd_snapshot_*` tables — see "Metadata snapshot" below). Falls back to live if the snapshot isn't built yet |
+| `erd_cache_ttl_seconds` | `ERD_CACHE_TTL_SECONDS` | `3600` | How long `/api/graph` results are cached in-memory before re-querying the metadata source |
 | `erd_schema_collapse_threshold` | `ERD_SCHEMA_COLLAPSE_THRESHOLD` | `80` | Table count above which the ERD defaults to one node per schema (click to expand); `0` always renders full detail |
 | `erd_test_catalog_suffix` | `ERD_TEST_CATALOG_SUFFIX` | `_ts` | Suffix appended to each `erd_catalogs` entry when the frontend's Prod/Test toggle is set to Test (e.g. `edp_customer` → `edp_customer_ts`) |
 | `auth_mode` | `ERD_AUTH_MODE` | `service_principal` | Which identity the ERD queries run as. `service_principal` (default) queries as the app's own SP, bounded by `erd_catalogs`. `on_behalf_of_user` queries as the **logged-in user**, filtered by their own UC privileges — see "On-behalf-of-user authorization" below |
 | `user_api_scopes` | *(app config, not an env var)* | `[]` | User authorization scopes the app requests for OBO; set to `["sql"]` for `on_behalf_of_user`. A **complex** (list) value the CLI can't set via `--var`, so it's declared at the bundle **target** level — see below |
+
+### Metadata snapshot (faster metadata reads)
+
+By default the app queries `system.information_schema` live on every cache miss. The
+heaviest part is the 5-table foreign-key join, run on each load. To avoid it, the app can
+instead read a **materialized snapshot** — a set of `erd_snapshot_*` Delta tables in
+`erd_metadata_location`, refreshed on a schedule — so those joins run once per refresh, not
+per request. Since objects typically deploy ~weekly, a weekly refresh is plenty.
+
+**How it works.** The `refresh_erd_snapshot` job runs `setup/build_erd_snapshot.py`, which
+`CREATE OR REPLACE TABLE … AS SELECT`s the tables/columns/PK/FK/tag metadata into
+`erd_snapshot_*` (columns match what the app expects exactly). With
+`erd_metadata_source=snapshot`, the app reads those tables; if they're not present yet (or
+you're on the Prod/Test **Test** toggle, whose `_ts` catalogs aren't snapshotted), it
+**falls back to live automatically** — so enabling snapshot mode is always safe.
+
+**Enable it (opt-in):**
+
+```bash
+# 1. Deploy with snapshot mode on
+databricks bundle deploy -t dev -p <profile> \
+    --var="warehouse_id=<id>" --var="erd_metadata_source=snapshot"
+
+# 2. Populate the snapshot immediately (otherwise it's built on the weekly schedule,
+#    and the app falls back to live until then)
+databricks bundle run refresh_erd_snapshot -t dev -p <profile> --var="warehouse_id=<id>"
+
+# 3. (optional) Unpause the weekly schedule for ongoing refresh — it ships PAUSED so it
+#    does no work until you opt in. Edit the job's schedule to UNPAUSED, or unpause it in
+#    the Jobs UI.
+```
+
+**In-app "Refresh snapshot now".** The ⚙ control in the top bar shows the current source,
+when the snapshot was last built, and — in snapshot mode — a button that triggers the
+`refresh_erd_snapshot` job and polls the run to completion. The app triggers it as **its
+own service principal**, so that SP needs **`CAN_MANAGE_RUN` on the `refresh_erd_snapshot`
+job** (grant it in the Jobs UI → job → Permissions, or via the Jobs permissions API). If it
+doesn't have it, the button surfaces a clear "not allowed to run the refresh job" message
+rather than failing silently. The scheduled job itself runs as its own (job) identity and
+needs no such grant.
 
 ### Prod/Test catalog toggle
 

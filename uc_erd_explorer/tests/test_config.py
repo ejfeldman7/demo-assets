@@ -81,6 +81,9 @@ class TestGetMetadataLocation:
 
 class TestGetWorkspaceClient:
     def test_databricks_app_mode_uses_ambient_auth(self, monkeypatch):
+        # get_workspace_client is lru_cached, so clear it to actually exercise the
+        # construction path (rather than a value cached by an earlier test).
+        config.get_workspace_client.cache_clear()
         monkeypatch.setattr(config, "IS_DATABRICKS_APP", True)
         calls = []
         monkeypatch.setattr(config, "WorkspaceClient", lambda **kw: calls.append(kw) or object())
@@ -88,6 +91,7 @@ class TestGetWorkspaceClient:
         assert calls == [{}]
 
     def test_local_mode_uses_default_profile_when_unset(self, monkeypatch):
+        config.get_workspace_client.cache_clear()
         monkeypatch.setattr(config, "IS_DATABRICKS_APP", False)
         calls = []
         monkeypatch.setattr(config, "WorkspaceClient", lambda **kw: calls.append(kw) or object())
@@ -95,6 +99,7 @@ class TestGetWorkspaceClient:
         assert calls == [{}]
 
     def test_local_mode_uses_named_profile(self, monkeypatch):
+        config.get_workspace_client.cache_clear()
         monkeypatch.setattr(config, "IS_DATABRICKS_APP", False)
         monkeypatch.setenv("DATABRICKS_PROFILE", "my-profile")
         calls = []
@@ -140,7 +145,7 @@ class TestGetGenieSpaceId:
 
 class TestGetCacheTtlSeconds:
     def test_default(self):
-        assert config.get_cache_ttl_seconds() == 300
+        assert config.get_cache_ttl_seconds() == 3600
 
     def test_override(self, monkeypatch):
         monkeypatch.setenv("ERD_CACHE_TTL_SECONDS", "60")
@@ -152,7 +157,38 @@ class TestGetCacheTtlSeconds:
 
     def test_invalid_falls_back_to_default(self, monkeypatch):
         monkeypatch.setenv("ERD_CACHE_TTL_SECONDS", "not-a-number")
-        assert config.get_cache_ttl_seconds() == 300
+        assert config.get_cache_ttl_seconds() == 3600
+
+
+class TestGetMetadataSource:
+    def test_default_is_information_schema(self):
+        assert config.get_metadata_source() == "information_schema"
+
+    def test_snapshot_value(self, monkeypatch):
+        monkeypatch.setenv("ERD_METADATA_SOURCE", "snapshot")
+        assert config.get_metadata_source() == "snapshot"
+
+    def test_aliases_and_case_insensitive(self, monkeypatch):
+        for v in ("SNAPSHOT", "Delta", "materialized", "  snapshot  "):
+            monkeypatch.setenv("ERD_METADATA_SOURCE", v)
+            assert config.get_metadata_source() == "snapshot"
+
+    def test_unknown_value_falls_back_to_live(self, monkeypatch):
+        monkeypatch.setenv("ERD_METADATA_SOURCE", "banana")
+        assert config.get_metadata_source() == "information_schema"
+
+
+class TestGetSnapshotJobId:
+    def test_unset_returns_none(self):
+        assert config.get_snapshot_job_id() is None
+
+    def test_blank_returns_none(self, monkeypatch):
+        monkeypatch.setenv("ERD_SNAPSHOT_JOB_ID", "   ")
+        assert config.get_snapshot_job_id() is None
+
+    def test_set(self, monkeypatch):
+        monkeypatch.setenv("ERD_SNAPSHOT_JOB_ID", "12345")
+        assert config.get_snapshot_job_id() == "12345"
 
 
 class TestGetSchemaCollapseThreshold:

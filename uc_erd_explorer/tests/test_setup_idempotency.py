@@ -9,6 +9,7 @@ import re
 
 import pytest
 
+import build_erd_snapshot
 import create_genie_space
 import create_logistics_demo
 import create_megacorp_demo
@@ -50,6 +51,50 @@ class TestCreateScopedViewsBuildStatements:
         statements = create_scoped_views.build_statements(["megacorp", "sales"], "megacorp", "erd_meta")
         joined = "\n".join(statements)
         assert "'megacorp'" in joined and "'sales'" in joined
+
+
+class TestBuildErdSnapshotStatements:
+    def _sql(self, statements):
+        return "\n".join(sql for _label, sql, _optional in statements)
+
+    def test_deterministic_across_calls(self):
+        a = build_erd_snapshot.build_statements(["megacorp"], "megacorp", "erd_meta")
+        b = build_erd_snapshot.build_statements(["megacorp"], "megacorp", "erd_meta")
+        assert a == b
+
+    def test_creates_all_snapshot_tables_plus_meta(self):
+        statements = build_erd_snapshot.build_statements(["megacorp"], "megacorp", "erd_meta")
+        labels = {label for label, _sql, _opt in statements}
+        assert {
+            "erd_snapshot_tables", "erd_snapshot_columns", "erd_snapshot_primary_keys",
+            "erd_snapshot_foreign_keys", "erd_snapshot_table_tags", "erd_snapshot_column_tags",
+            "erd_snapshot_meta",
+        }.issubset(labels)
+
+    def test_writes_to_metadata_location(self):
+        statements = build_erd_snapshot.build_statements(["megacorp"], "megacorp", "erd_meta")
+        joined = self._sql(statements)
+        assert "CREATE OR REPLACE TABLE megacorp.erd_meta.erd_snapshot_tables" in joined
+        # The FK edge list is materialized (the join done in the snapshot, not the app).
+        assert "megacorp.erd_meta.erd_snapshot_foreign_keys" in joined
+        assert "referential_constraints" in joined
+
+    def test_scoped_mode_filters_by_catalog(self):
+        joined = self._sql(build_erd_snapshot.build_statements(["megacorp"], "megacorp", "erd_meta"))
+        assert "IN ('megacorp')" in joined
+
+    def test_unscoped_mode_omits_catalog_filter(self):
+        joined = self._sql(build_erd_snapshot.build_statements([], "megacorp", "erd_meta"))
+        assert "table_catalog IN" not in joined
+
+    def test_tag_snapshots_flagged_optional(self):
+        statements = build_erd_snapshot.build_statements(["megacorp"], "megacorp", "erd_meta")
+        optional = {label for label, _sql, opt in statements if opt}
+        assert optional == {"erd_snapshot_table_tags", "erd_snapshot_column_tags"}
+
+    def test_invalid_catalog_identifier_raises(self):
+        with pytest.raises(ValueError):
+            build_erd_snapshot.build_statements(["bad; catalog"], "megacorp", "erd_meta")
 
 
 class TestCreateGenieSpaceBuildSerializedSpace:

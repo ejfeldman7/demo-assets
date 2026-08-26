@@ -20,17 +20,14 @@ import { SchemaNode } from './SchemaNode'
 import { RelationshipEdge } from './RelationshipEdge'
 import { GeniePanel } from './GeniePanel'
 import { InfoPanel } from './InfoPanel'
+import { AdminPanel } from './AdminPanel'
 import { CatalogSchemaPicker } from './CatalogSchemaPicker'
 import { connectedComponent, directNeighbors, layoutGraph } from './graphUtils'
-import {
-  exportGraphAsErStudioZip,
-  exportGraphAsImage,
-  exportGraphAsJson,
-  exportGraphAsMarkdown,
-  exportGraphAsYaml,
-  scopeGraph,
-  type ExportScope,
-} from './export'
+// Only the ExportScope type is imported eagerly (types are erased at build time, so this
+// pulls no code). The export implementation -- which drags in html-to-image, js-yaml and
+// fflate (~hundreds of KB) -- is dynamically imported inside the export handlers, so it's
+// off the initial bundle and only fetched the first time someone actually exports.
+import type { ExportScope } from './export'
 import { buildCatalogColorMap, lookupCatalogColor } from './catalogColors'
 import type { Dialect } from './erstudio/typeMapping'
 import type {
@@ -65,6 +62,9 @@ function ErdCanvas() {
   // null = "All" -- no filter, everything in scope.
   const [selectedPairs, setSelectedPairs] = useState<Set<string> | null>(null)
   const [selectedId, setSelectedId] = useState<string | null>(null)
+  // Which edge the cursor is over -- its relationship label shows on hover (labels are
+  // otherwise hidden to keep the canvas uncluttered; see RelationshipEdge.tsx).
+  const [hoveredEdgeId, setHoveredEdgeId] = useState<string | null>(null)
   const [filterMode, setFilterMode] = useState<FilterMode>('neighbors')
   const [search, setSearch] = useState('')
   // Heuristic undeclared-relationship edges are always fetched but hidden by default,
@@ -133,18 +133,26 @@ function ErdCanvas() {
     }
 
     setLoading(true)
-    fetchGraph(selectedPairs ? Array.from(selectedPairs) : undefined, env)
-      .then((g) => {
-        if (!cancelled) setGraph(g)
-      })
-      .catch((e) => {
-        if (!cancelled) setError((e as Error).message)
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false)
-      })
+    // Debounce: toggling several catalogs/schemas in the picker changes selectedPairs
+    // rapidly, and each change would otherwise fire its own (expensive) /api/graph query.
+    // Waiting ~250ms and cancelling any pending timer collapses a burst of toggles into a
+    // single request for the final selection. env/pairs are captured together from the
+    // same render, so a Prod/Test switch (which also resets pairs) stays consistent.
+    const handle = setTimeout(() => {
+      fetchGraph(selectedPairs ? Array.from(selectedPairs) : undefined, env)
+        .then((g) => {
+          if (!cancelled) setGraph(g)
+        })
+        .catch((e) => {
+          if (!cancelled) setError((e as Error).message)
+        })
+        .finally(() => {
+          if (!cancelled) setLoading(false)
+        })
+    }, 250)
     return () => {
       cancelled = true
+      clearTimeout(handle)
     }
   }, [selectedPairs, treeUnscoped, env])
 
@@ -208,6 +216,13 @@ function ErdCanvas() {
       id: e.id,
       source: e.source,
       target: e.target,
+      // Anchor each edge to the actual related columns' handles (id = column name in
+      // TableNode) instead of the card center. First column only for composite keys --
+      // enough to point at the right region without a bundle of near-parallel lines.
+      // Only in the detail view; schema-summary nodes have no per-column handles, so
+      // those edges fall back to the SchemaNode's default centered handle (undefined).
+      sourceHandle: graph.view === 'detail' ? e.fk_columns[0] : undefined,
+      targetHandle: graph.view === 'detail' ? e.pk_columns[0] : undefined,
       data: { inferred: e.inferred },
       label: e.inferred
         ? `${e.fk_columns.join(', ')} → ${e.pk_columns.join(', ')} (inferred)`
@@ -263,8 +278,14 @@ function ErdCanvas() {
       const inSet =
         !visibleSet || (visibleSet.has(e.source) && visibleSet.has(e.target))
       const inferred = Boolean((e.data as { inferred?: boolean } | undefined)?.inferred)
+      // Show the column-mapping label when this edge is hovered, or when a table is
+      // focused (a click-to-filter selection) and this edge is part of it -- so focusing
+      // a table reveals all its relationships' columns at once, while the default view
+      // stays clean.
+      const showLabel = e.id === hoveredEdgeId || (Boolean(selectedId) && inSet)
       return {
         ...e,
+        data: { ...(e.data as object), showLabel },
         style: {
           ...e.style,
           opacity: inSet ? 1 : 0.1,
@@ -273,7 +294,7 @@ function ErdCanvas() {
         animated: Boolean(selectedId) && inSet,
       }
     })
-  }, [baseEdges, visibleSet, selectedId])
+  }, [baseEdges, visibleSet, selectedId, hoveredEdgeId])
 
   const onNodeClick: NodeMouseHandler = useCallback((_, node) => {
     const data = node.data as TableNodeData | SchemaNodeData
@@ -311,28 +332,31 @@ function ErdCanvas() {
   }, [visibleSet, displayEdges])
 
   const handleExportImage = useCallback(
-    (format: 'png' | 'svg') => {
+    async (format: 'png' | 'svg') => {
       if (!canExport) return
-      exportGraphAsImage(displayNodes, format, 'erd-export', exportScope)
+      const m = await import('./export')
+      m.exportGraphAsImage(displayNodes, format, 'erd-export', exportScope)
     },
     [canExport, displayNodes, exportScope],
   )
 
   const handleExportDocs = useCallback(
-    (format: 'md' | 'json' | 'yaml') => {
+    async (format: 'md' | 'json' | 'yaml') => {
       if (!canExport || !graph) return
-      const scoped = scopeGraph(graph, exportScope)
-      if (format === 'md') exportGraphAsMarkdown(scoped, 'erd-schema-docs')
-      else if (format === 'json') exportGraphAsJson(scoped, 'erd-schema-docs')
-      else exportGraphAsYaml(scoped, 'erd-schema-docs')
+      const m = await import('./export')
+      const scoped = m.scopeGraph(graph, exportScope)
+      if (format === 'md') m.exportGraphAsMarkdown(scoped, 'erd-schema-docs')
+      else if (format === 'json') m.exportGraphAsJson(scoped, 'erd-schema-docs')
+      else m.exportGraphAsYaml(scoped, 'erd-schema-docs')
     },
     [canExport, graph, exportScope],
   )
 
-  const handleExportErStudio = useCallback(() => {
+  const handleExportErStudio = useCallback(async () => {
     if (!canExport || !graph) return
-    const scoped = scopeGraph(graph, exportScope)
-    exportGraphAsErStudioZip(scoped, erStudioDialect, 'erd-erstudio-export')
+    const m = await import('./export')
+    const scoped = m.scopeGraph(graph, exportScope)
+    m.exportGraphAsErStudioZip(scoped, erStudioDialect, 'erd-erstudio-export')
   }, [canExport, graph, exportScope, erStudioDialect])
 
   // Fit view when a fresh graph loads.
@@ -400,6 +424,7 @@ function ErdCanvas() {
             {workspaceName}
           </div>
         )}
+        <AdminPanel />
         <InfoPanel />
         <div style={styles.avatar}>EF</div>
       </header>
@@ -440,6 +465,11 @@ function ErdCanvas() {
               selectedPairs={selectedPairs}
               onChange={setSelectedPairs}
             />
+            <div style={styles.hint}>
+              {tree.length} catalog{tree.length === 1 ? '' : 's'} visible. Only catalogs
+              this app has permission to read are listed — if one is missing, its access
+              needs to be granted.
+            </div>
           </div>
 
           <SectionLabel>Search</SectionLabel>
@@ -553,6 +583,8 @@ function ErdCanvas() {
             edgeTypes={edgeTypes}
             onNodeClick={onNodeClick}
             onPaneClick={() => setSelectedId(null)}
+            onEdgeMouseEnter={(_, edge) => setHoveredEdgeId(edge.id)}
+            onEdgeMouseLeave={() => setHoveredEdgeId(null)}
             fitView
             minZoom={0.1}
             proOptions={{ hideAttribution: true }}

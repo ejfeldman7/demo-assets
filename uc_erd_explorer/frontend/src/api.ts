@@ -28,6 +28,40 @@ export async function fetchGraph(pairs?: string[], env: CatalogEnv = 'prod'): Pr
   return res.json()
 }
 
+export interface SnapshotStatus {
+  source_mode: 'snapshot' | 'information_schema'
+  job_configured: boolean
+  snapshot: { refreshed_at: string; catalogs: string } | null
+}
+
+export async function fetchSnapshotStatus(): Promise<SnapshotStatus> {
+  const res = await fetch('/api/admin/snapshot-status')
+  if (!res.ok) throw new Error(`Failed to load snapshot status: ${res.status}`)
+  return res.json()
+}
+
+export async function triggerSnapshotRefresh(): Promise<{ run_id: number }> {
+  const res = await fetch('/api/admin/refresh-snapshot', { method: 'POST' })
+  if (!res.ok) {
+    const detail = await res.json().catch(() => null)
+    throw new Error(detail?.detail ?? `Failed to start refresh: ${res.status}`)
+  }
+  return res.json()
+}
+
+export interface RefreshRunStatus {
+  run_id: number
+  life_cycle_state: string | null
+  result_state: string | null
+  run_page_url: string | null
+}
+
+export async function fetchRefreshRunStatus(runId: number): Promise<RefreshRunStatus> {
+  const res = await fetch(`/api/admin/refresh-snapshot/status?run_id=${runId}`)
+  if (!res.ok) throw new Error(`Failed to read run status: ${res.status}`)
+  return res.json()
+}
+
 export interface GenieResponse {
   conversation_id: string
   message_id: string

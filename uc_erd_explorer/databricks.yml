@@ -48,12 +48,24 @@ variables:
       value or valueFrom"); server/config.py's get_genie_space_id() treats the
       "not-configured" sentinel as unset.
     default: "not-configured"
+  erd_metadata_source:
+    description: >-
+      Where the ERD graph reads metadata from. "information_schema" (default) queries the
+      system tables live on every cache miss. "snapshot" reads the pre-materialized
+      erd_snapshot_* Delta tables in erd_metadata_location (built by the
+      refresh_erd_snapshot job), so the expensive information_schema joins never run on the
+      request path. Snapshot mode falls back to live automatically if the snapshot tables
+      aren't present yet, so it's safe to enable before the first refresh -- but for the
+      speedup to actually take effect, run `databricks bundle run refresh_erd_snapshot`
+      once after enabling (then it refreshes weekly on schedule). Only applies to Prod;
+      the Prod/Test toggle's Test catalogs are always queried live.
+    default: "information_schema"
   erd_cache_ttl_seconds:
     description: >-
       Seconds /api/graph results are cached in-memory before re-querying
       information_schema. Schema metadata changes rarely, so the default trades a
       little staleness for far fewer warehouse round-trips on repeated loads/filters.
-    default: "300"
+    default: "3600"
   erd_schema_collapse_threshold:
     description: >-
       Table count above which the ERD defaults to one node per schema instead of one
@@ -151,6 +163,16 @@ resources:
             value: ${var.erd_test_catalog_suffix}
           - name: "ERD_AUTH_MODE"
             value: ${var.auth_mode}
+          - name: "ERD_METADATA_SOURCE"
+            value: ${var.erd_metadata_source}
+          - name: "ERD_METADATA_LOCATION"
+            value: ${var.erd_metadata_location}
+          # Job id for the admin "Refresh snapshot now" control (Jobs run-now). Templated
+          # from the job resource below so it's always the right id post-deploy. NOTE: for
+          # the button to work, the app's service principal needs CAN_MANAGE_RUN on this
+          # job -- see README "Metadata snapshot" (the app surfaces a clear error if not).
+          - name: "ERD_SNAPSHOT_JOB_ID"
+            value: ${resources.jobs.refresh_erd_snapshot.id}
       resources:
         - name: sql-warehouse
           description: "Warehouse for information_schema metadata queries"
@@ -198,6 +220,44 @@ resources:
               - ${var.erd_metadata_location}
               - "--grant-to-app"
               - "erd-explorer-${bundle.target}"
+      environments:
+        - environment_key: default
+          spec:
+            client: "3"
+            dependencies:
+              - databricks-sdk
+
+    refresh_erd_snapshot:
+      name: "erd-explorer-refresh-snapshot-${bundle.target}"
+      description: >-
+        Materializes the ERD metadata (tables/columns/PKs/FKs/tags) into the
+        erd_snapshot_* Delta tables in erd_metadata_location, so the app can serve the
+        graph without the expensive information_schema joins on every load (see
+        setup/build_erd_snapshot.py + var.erd_metadata_source="snapshot"). Runs weekly to
+        match the ~weekly cadence objects are deployed. Enable the fast path with:
+        (1) deploy --var="erd_metadata_source=snapshot", (2) `databricks bundle run
+        refresh_erd_snapshot` once to populate immediately, (3) UNPAUSE the schedule below
+        (or set pause_status UNPAUSED and redeploy) for ongoing weekly refresh. Left PAUSED
+        by default so it does no work until snapshot mode is actually enabled.
+      schedule:
+        # Weekly, Sundays 08:00 UTC. PAUSED until snapshot mode is enabled (see above).
+        quartz_cron_expression: "0 0 8 ? * SUN"
+        timezone_id: "UTC"
+        pause_status: "PAUSED"
+      tasks:
+        - task_key: build_erd_snapshot
+          environment_key: default
+          spark_python_task:
+            python_file: ./setup/build_erd_snapshot.py
+            # No --profile: on job compute the script uses ambient WorkspaceClient() auth
+            # (the job's identity) -- the snapshot reflects what that identity can see.
+            parameters:
+              - "--warehouse-id"
+              - ${var.warehouse_id}
+              - "--catalogs"
+              - ${var.erd_catalogs}
+              - "--metadata-location"
+              - ${var.erd_metadata_location}
       environments:
         - environment_key: default
           spec:
