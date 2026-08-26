@@ -195,7 +195,7 @@ def ask(a: Ask):
 
 # ── triage cards (Kanban) ────────────────────────────────────────────────────
 @router.get("/cards")
-def list_cards():
+def list_cards(limit: int = 500):
     with pool.connection() as conn, conn.cursor() as cur:
         cur.execute(
             """SELECT c.id, c.finding_id, c.status, c.priority, c.notes, c.assignee_id,
@@ -207,7 +207,8 @@ def list_cards():
                FROM cards c
                JOIN findings f ON c.finding_id = f.id
                LEFT JOIN it_members m ON c.assignee_id = m.id
-               ORDER BY coalesce(f.alert_priority,0) DESC, """ + _SEV_RANK + """ DESC, c.created_at DESC""")
+               ORDER BY coalesce(f.alert_priority,0) DESC, """ + _SEV_RANK + """ DESC, c.created_at DESC
+               LIMIT %s""", (limit,))
         return rows_to_dicts(cur)
 
 
@@ -398,6 +399,9 @@ def poll_runs(limit: int = 30):
 # ── trends (UC Delta) ────────────────────────────────────────────────────────
 @router.get("/trends")
 def trends(hours: int = 24):
+    # Clamp to a sane range: caps the warehouse scan and bounds the cache key space in uc.trends
+    # (the cache is keyed on `hours`), so an arbitrary `?hours=` can't grow memory or force a huge scan.
+    hours = max(1, min(hours, 168))
     try:
         return uc.trends(hours)
     except Exception as exc:  # UC/warehouse may be cold or empty
