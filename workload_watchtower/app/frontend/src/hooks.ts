@@ -32,7 +32,8 @@ export function useApi<T>(fetcher: () => Promise<T>, opts: { intervalMs?: number
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, deps);
 
-  return { data, error, loading, refresh: () => load(false), refreshQuiet: () => load(true) };
+  // mutate: update cached data locally (e.g. optimistic UI); reconcile via refreshQuiet after.
+  return { data, error, loading, mutate: setData, refresh: () => load(false), refreshQuiet: () => load(true) };
 }
 
 const THEME_KEY = "wt-theme";

@@ -172,16 +172,20 @@ export function TriageBoard() {
   const mem = members.data ?? [];
 
   const patch = async (id: number, body: Partial<Pick<CardT, "status" | "assignee_id" | "priority" | "notes">>) => {
+    // Optimistic: apply the change locally right away (the card moves columns / the control updates
+    // instantly) so the board feels native, then send the PATCH and reconcile — rolling back to
+    // server truth on failure.
+    cards.mutate((prev) => (prev ? prev.map((c) => (c.id === id ? { ...c, ...body } : c)) : prev));
     try {
       await api.patchCard(id, body);
-      cards.refreshQuiet();
+      cards.refreshQuiet(); // reconcile with server truth (no spinner; UI already correct)
       if (body.status) toast({ kind: "success", title: `Card moved to ${body.status}` });
       else if ("assignee_id" in body)
         toast({ kind: "success", title: body.assignee_id ? "Card assigned" : "Card unassigned" });
       else if (body.priority) toast({ kind: "info", title: `Priority set to ${body.priority}` });
     } catch (e) {
       toast({ kind: "error", title: "Update failed", detail: e instanceof Error ? e.message : String(e) });
-      cards.refresh();
+      cards.refresh(); // roll back the optimistic change to server state
     }
   };
 
