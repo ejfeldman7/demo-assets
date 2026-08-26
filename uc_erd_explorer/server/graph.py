@@ -41,14 +41,17 @@ from .config import (
     get_cache_ttl_seconds,
     get_catalogs,
     get_metadata_location,
+    get_query_client,
     get_schema_collapse_threshold,
     get_test_catalog_suffix,
+    get_user_cache_key,
     get_warehouse_id,
-    get_workspace_client,
 )
 
-# In-memory cache: {(frozenset(catalogs), frozenset(pairs)): (timestamp, payload)}
-_CACHE: Dict[Tuple[frozenset, frozenset], Tuple[float, Dict[str, Any]]] = {}
+# In-memory cache: {(user_key, frozenset(catalogs), frozenset(pairs)): (timestamp, payload)}
+# user_key is "" in service-principal mode (shared cache) and the per-user identity in
+# on-behalf-of-user mode (so privilege-filtered results are never shared across users).
+_CACHE: Dict[Tuple[str, frozenset, frozenset], Tuple[float, Dict[str, Any]]] = {}
 
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9_]+$")
 
@@ -123,7 +126,10 @@ def _internal_schema_exclusion_sql(catalog_col: str, schema_col: str) -> str:
 
 
 def _execute(statement: str, timeout: str = "50s") -> sql.StatementResponse:
-    client = get_workspace_client()
+    # get_query_client() is the SP in service-principal mode and the logged-in user's
+    # client in on-behalf-of-user mode -- so information_schema privilege filtering
+    # follows whichever identity this deployment is configured to query as.
+    client = get_query_client()
     warehouse_id = get_warehouse_id()
     if not warehouse_id:
         raise RuntimeError("No SQL warehouse available")
@@ -394,7 +400,11 @@ def build_graph(pairs: Optional[List[Tuple[str, str]]] = None, env: str = "prod"
     if pairs:
         validate_pairs(pairs, catalogs)  # raises ValueError naming the bad entry, rather
         # than silently dropping it and widening the result back to everything in scope.
-    key = (frozenset(catalogs or ()), frozenset(pairs or ()))
+    # The leading user key segments the cache per logged-in user in on-behalf-of-user
+    # mode (results are privilege-filtered per user, so a shared cache would leak one
+    # user's visible set to another); it is "" in service-principal mode, leaving the
+    # cache shared exactly as before.
+    key = (get_user_cache_key(), frozenset(catalogs or ()), frozenset(pairs or ()))
 
     cached = _CACHE.get(key)
     if cached and (time.time() - cached[0]) < get_cache_ttl_seconds():

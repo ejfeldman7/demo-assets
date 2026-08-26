@@ -1,12 +1,37 @@
 """API routes for the ERD graph and the catalog/schema picker."""
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
-from ..config import get_catalogs, get_test_catalog_suffix, get_workspace_name
+from ..config import (
+    get_catalogs,
+    get_test_catalog_suffix,
+    get_workspace_name,
+    reset_user_context,
+    set_user_context,
+)
 from ..graph import build_graph, list_catalog_schemas
 
-router = APIRouter(tags=["graph"])
+
+async def _capture_user(request: Request):
+    """Capture the logged-in user's forwarded identity for the duration of the request,
+    so get_query_client() can query information_schema as that user in on-behalf-of-user
+    mode. Databricks Apps forward the user's token/identity in these headers; they are
+    absent in service-principal mode and local dev, in which case this is a harmless
+    no-op (the token contextvar stays None and the SP/profile path is used).
+
+    A yield dependency runs its teardown after the response, resetting the contextvars so
+    a token never leaks into a later request that reuses the same task."""
+    token = request.headers.get("x-forwarded-access-token")
+    email = request.headers.get("x-forwarded-email") or request.headers.get("x-forwarded-user")
+    ctx = set_user_context(token, email)
+    try:
+        yield
+    finally:
+        reset_user_context(ctx)
+
+
+router = APIRouter(tags=["graph"], dependencies=[Depends(_capture_user)])
 
 _ENV_QUERY = Query(
     default="prod",
