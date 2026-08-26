@@ -399,6 +399,9 @@ def poll_runs(limit: int = 30):
 # ── trends (UC Delta) ────────────────────────────────────────────────────────
 @router.get("/trends")
 def trends(hours: int = 24):
+    # Clamp to a sane range: caps the warehouse scan and bounds the cache key space in uc.trends
+    # (the cache is keyed on `hours`), so an arbitrary `?hours=` can't grow memory or force a huge scan.
+    hours = max(1, min(hours, 168))
     try:
         return uc.trends(hours)
     except Exception as exc:  # UC/warehouse may be cold or empty
