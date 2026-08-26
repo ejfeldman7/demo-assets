@@ -480,6 +480,7 @@ function ErdCanvas() {
                 onChange={(e) => setSearch(e.target.value)}
                 onKeyDown={(e) => e.key === 'Enter' && runSearch()}
                 placeholder="Find a table…"
+                aria-label="Find a table by name"
                 style={styles.searchInput}
               />
               <button onClick={runSearch} style={styles.searchBtn}>
@@ -645,6 +646,7 @@ function ErdCanvas() {
                     value={erStudioDialect}
                     onChange={(e) => setErStudioDialect(e.target.value as Dialect)}
                     disabled={!canExport}
+                    aria-label="ER/Studio SQL dialect"
                     style={exportDialectSelect(canExport)}
                   >
                     <option value="sqlserver">SQL Server</option>

@@ -40,7 +40,7 @@ export async function fetchSnapshotStatus(): Promise<SnapshotStatus> {
   return res.json()
 }
 
-export async function triggerSnapshotRefresh(): Promise<{ run_id: number }> {
+export async function triggerSnapshotRefresh(): Promise<{ run_id: number; already_running?: boolean }> {
   const res = await fetch('/api/admin/refresh-snapshot', { method: 'POST' })
   if (!res.ok) {
     const detail = await res.json().catch(() => null)

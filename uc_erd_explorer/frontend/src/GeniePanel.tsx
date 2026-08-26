@@ -191,6 +191,7 @@ export function GeniePanel() {
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={(e) => e.key === 'Enter' && send()}
             placeholder="Ask about the schema…"
+            aria-label="Ask Genie about the schema"
             style={{
               flex: 1,
               border: '1px solid var(--border-strong)',

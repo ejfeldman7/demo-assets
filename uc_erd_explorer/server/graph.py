@@ -25,8 +25,9 @@ outside the allow-list is silently dropped rather than leaking that catalog's ex
 Metadata can be read two ways (ERD_METADATA_SOURCE, see config.get_metadata_source):
 live from system.information_schema (default), or from the pre-materialized erd_snapshot_*
 Delta tables (built weekly by setup/build_erd_snapshot.py) so the expensive joins never run
-on the request path -- _resolve_source() picks snapshot only when enabled, in prod, and the
-snapshot exists, else falls back to live. Either way, results are cached in-memory (TTL
+on the request path -- _resolve_source() picks snapshot when enabled and in prod, and
+build_graph falls back to live if the first snapshot read errors (tables not built yet).
+Either way, results are cached in-memory (TTL
 configurable via ERD_CACHE_TTL_SECONDS, default 3600s -- schema metadata changes rarely).
 Catalogs above ERD_SCHEMA_COLLAPSE_THRESHOLD tables
 (default 80) default to a collapsed, one-node-per-schema view instead of full
@@ -234,26 +235,19 @@ def get_snapshot_freshness() -> Optional[Dict[str, Any]]:
 
 
 def _resolve_source(env: str = "prod") -> str:
-    """Decide whether this build reads from the materialized snapshot or live
-    information_schema. Returns "snapshot" only when ERD_METADATA_SOURCE asks for it, the
-    environment is prod, AND the snapshot actually exists (probed via erd_snapshot_meta).
+    """The CONFIGURED metadata source for this build (intent only -- no warehouse call):
+    "snapshot" when ERD_METADATA_SOURCE asks for it AND env is prod, else live.
 
     Test always goes live: the snapshot only materializes the configured (prod) catalogs,
-    while the Prod/Test toggle queries the _ts-suffixed catalogs, which aren't in it. And
-    if the snapshot is missing/misconfigured (e.g. a fresh deploy before the first refresh
-    job), we fall back to live -- correct-but-slower rather than erroring."""
+    while the Prod/Test toggle queries the _ts-suffixed catalogs, which aren't in it.
+
+    This deliberately does NOT probe whether the snapshot exists -- that cost a warehouse
+    round-trip on every cold build. Instead build_graph attempts the first snapshot read
+    and falls back to live if the tables aren't there yet (fresh deploy before the first
+    refresh job), so the graceful fallback is preserved without the extra query."""
     if env != "prod" or get_metadata_source() != _SNAPSHOT:
         return "information_schema"
-    try:
-        loc = _snapshot_loc()
-        _execute(f"SELECT 1 FROM {loc}.erd_snapshot_meta LIMIT 1", "snapshot_probe", "30s")
-        return _SNAPSHOT
-    except Exception as e:  # noqa: BLE001
-        logger.warning(
-            "ERD_METADATA_SOURCE=snapshot but the snapshot tables are unavailable (%s); "
-            "falling back to live information_schema", e,
-        )
-        return "information_schema"
+    return _SNAPSHOT
 
 
 # --- queries ----------------------------------------------------------------
@@ -568,9 +562,20 @@ def build_graph(pairs: Optional[List[Tuple[str, str]]] = None, env: str = "prod"
         return cached[1]
 
     build_started = time.perf_counter()
-    # Read from the materialized snapshot when enabled+available (env-gated), else live.
+    # Read from the materialized snapshot when enabled (env-gated), else live. The first
+    # snapshot read doubles as the existence check: if the snapshot tables aren't there yet
+    # (fresh deploy before the first refresh job), fall back to live and re-read -- no
+    # separate probe round-trip on every cold build.
     source = _resolve_source(env)
-    tables = _query_tables(catalogs, pairs, source)
+    if source == _SNAPSHOT:
+        try:
+            tables = _query_tables(catalogs, pairs, _SNAPSHOT)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("snapshot read failed (%s); falling back to live information_schema", e)
+            source = "information_schema"
+            tables = _query_tables(catalogs, pairs, source)
+    else:
+        tables = _query_tables(catalogs, pairs, source)
 
     # Above the collapse threshold, render one node per schema instead of one per table
     # -- but only for the unfiltered "All" view. A specific schema selection (pairs) is

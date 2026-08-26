@@ -48,8 +48,19 @@ async def refresh_snapshot():
             "This deployment can't trigger a refresh from the app.",
         )
     client = get_workspace_client()
+    jid = int(job_id)
+
+    def _existing_active_run():
+        # Reuse an already-running refresh instead of stacking another: the button is a
+        # shared, non-idempotent action (rapid clicks or two users would otherwise fire
+        # multiple concurrent job runs). Return the first active run if one exists.
+        return next(iter(client.jobs.list_runs(job_id=jid, active_only=True)), None)
+
     try:
-        run = await asyncio.to_thread(client.jobs.run_now, job_id=int(job_id))
+        existing = await asyncio.to_thread(_existing_active_run)
+        if existing is not None:
+            return {"run_id": existing.run_id, "already_running": True}
+        run = await asyncio.to_thread(client.jobs.run_now, job_id=jid)
     except Exception as e:  # noqa: BLE001
         msg = str(e)
         if "PERMISSION" in msg.upper() or "not authorized" in msg.lower():
@@ -59,7 +70,7 @@ async def refresh_snapshot():
                 "Grant it CAN_MANAGE_RUN on the refresh_erd_snapshot job (see README).",
             )
         raise HTTPException(status_code=500, detail=f"Failed to start refresh: {msg}")
-    return {"run_id": run.run_id}
+    return {"run_id": run.run_id, "already_running": False}
 
 
 @router.get("/refresh-snapshot/status")

@@ -18,11 +18,20 @@ from fastapi.staticfiles import StaticFiles
 from server.config import get_catalogs
 from server.routes import admin, genie, graph
 
-# Entry-point logging setup so the per-query/per-request timing (logger name "erd")
-# actually surfaces in the app's stdout. basicConfig is a no-op if the runtime (uvicorn)
-# already configured root handlers, in which case our "erd" records still propagate up.
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+# Logging setup so the per-query/per-request timing (logger name "erd", used here and in
+# server/graph.py) actually surfaces in `databricks apps logs`. Under `uvicorn app:app`,
+# uvicorn configures logging BEFORE importing this module and does NOT touch the root
+# logger, so a bare logging.basicConfig here is unreliable -- records can emit nowhere.
+# Instead, bind the "erd" logger to uvicorn's own handlers when they exist; fall back to a
+# basic stderr handler for local/non-uvicorn runs (e.g. pytest, `python app.py`).
 logger = logging.getLogger("erd")
+logger.setLevel(logging.INFO)
+_uvicorn_handlers = logging.getLogger("uvicorn.error").handlers
+if _uvicorn_handlers:
+    logger.handlers = _uvicorn_handlers
+    logger.propagate = False
+else:
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
 app = FastAPI(
     title="UC ERD Viewer",
