@@ -10,6 +10,7 @@ import os
 import time
 
 from databricks.sdk import WorkspaceClient
+from databricks.sdk.service import sql as dbsql
 
 from .db import w  # reuse the shared WorkspaceClient
 
@@ -24,9 +25,17 @@ _trends_cache: dict[int, tuple[float, dict]] = {}  # hours -> (expires_at, data)
 
 
 def query(sql: str) -> list[dict]:
+    # CANCEL (not the CONTINUE default) so a query that outruns wait_timeout is cancelled and we
+    # can raise — the CONTINUE default returns no result on a slow/cold warehouse, which would
+    # silently render an empty trends chart instead of surfacing the problem.
     resp = w.statement_execution.execute_statement(
-        statement=sql, warehouse_id=WAREHOUSE_ID, wait_timeout="30s"
+        statement=sql, warehouse_id=WAREHOUSE_ID, wait_timeout="30s",
+        on_wait_timeout=dbsql.ExecuteStatementRequestOnWaitTimeout.CANCEL,
     )
+    state = resp.status.state.value if resp.status and resp.status.state else "UNKNOWN"
+    if state != "SUCCEEDED":
+        err = resp.status.error.message if (resp.status and resp.status.error) else state
+        raise RuntimeError(f"trends query did not succeed ({state}): {err}")
     if not resp.result or not resp.result.data_array:
         return []
     cols = [c.name for c in resp.manifest.schema.columns]

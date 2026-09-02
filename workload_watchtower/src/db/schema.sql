@@ -92,10 +92,13 @@ CREATE TABLE IF NOT EXISTS action_log (
     action       TEXT        NOT NULL,     -- email | card
     target       TEXT,                     -- recipient email / member
     payload      JSONB,
-    result       TEXT        NOT NULL DEFAULT 'pending', -- pending | sent | drafted | failed
+    result       TEXT        NOT NULL DEFAULT 'pending', -- pending | drafted | sending | sent | failed
     error        TEXT,
-    created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at   TIMESTAMPTZ NOT NULL DEFAULT now()   -- bumped on every result transition; a stale 'sending' is reclaimable
 );
+-- Migration for pre-existing installs (CREATE TABLE IF NOT EXISTS above won't add columns).
+ALTER TABLE action_log ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT now();
 
 -- Audit of each poll cycle for observability of the poller itself.
 CREATE TABLE IF NOT EXISTS poll_runs (

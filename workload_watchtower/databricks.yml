@@ -98,6 +98,40 @@ resources:
               # w.postgres (Lakebase credential minting), and a loose pin won't upgrade.
               - "databricks-sdk>=0.96.0"
 
+    # ── On-demand email sender (triggered by the app's Send/Retry button) ───────
+    # Databricks Apps compute can't open outbound SMTP (Apps permit only ports 80/443/53/22/123;
+    # 25/465/587 fail with errno 101 — a platform port block, Jira LHA-144). Jobs compute is
+    # unaffected, so the app routes the actual send here. Triggered via run_now with the action_id
+    # job parameter; the task sends that action's email and writes back sent/failed.
+    watchtower_send:
+      name: watchtower-send
+      description: "Sends one drafted email action via SMTP from jobs compute (Apps compute can't reach SMTP)."
+      parameters:
+        - name: action_id
+          default: "0"
+      tasks:
+        - task_key: send
+          spark_python_task:
+            python_file: src/poller/main.py
+            # Same deployment config as the poller (main.py translates these to env vars), plus
+            # the action to send (interpolated from the job parameter at run_now time).
+            parameters:
+              - "--warehouse-id=${var.warehouse_id}"
+              - "--uc-schema=${var.uc_schema}"
+              - "--lakebase-endpoint=${var.lakebase_endpoint}"
+              - "--lakebase-host=${var.lakebase_host}"
+              - "--lakebase-schema=${var.lakebase_schema}"
+              - "--secret-scope=${var.secret_scope}"
+              - "--send-action={{job.parameters.action_id}}"
+          environment_key: send_env
+      environments:
+        - environment_key: send_env
+          spec:
+            client: "3"
+            dependencies:
+              - "psycopg[binary]"
+              - "databricks-sdk>=0.96.0"
+
   # ── SQL Alert (v2): "new critical findings" — evaluated by the job's alert_check task ───────
   # Content-based native alerting over the append-only alert_events table. The task triggers this
   # right after each poll; on trigger it notifies the subscriptions below.

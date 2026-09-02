@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useRef, useEffect } from "react";
 import { Mail, Send, ChevronDown, ChevronRight, CheckCircle2, XCircle, FileText, Users, Plus, X } from "lucide-react";
 import { api, type ActionRow } from "../api";
 import { useApi } from "../hooks";
@@ -88,6 +88,7 @@ function DistributionList() {
 
 const RESULT_META: Record<string, { color: string; icon: typeof Send; label: string }> = {
   drafted: { color: "#FFAB00", icon: FileText, label: "Drafted" },
+  sending: { color: "#8AB4F8", icon: Send, label: "Sending…" },
   sent: { color: "#3DD68C", icon: CheckCircle2, label: "Sent" },
   failed: { color: "#E5484D", icon: XCircle, label: "Failed" },
 };
@@ -108,18 +109,36 @@ export function Actions() {
   const toast = useToast();
   const [expanded, setExpanded] = useState<number | null>(null);
   const [sending, setSending] = useState<number | null>(null);
+  const timers = useRef<number[]>([]);
+  // Clear any pending post-send refresh timers if the view unmounts (avoids refresh-after-unmount).
+  useEffect(() => () => timers.current.forEach(clearTimeout), []);
 
   const list = actions.data ?? [];
+
+  // A row is sendable when it's drafted/failed, or a 'sending' that's been stuck past the job's
+  // worst-case runtime (job died before writing back) — reclaimable rather than stuck forever.
+  const STALE_SENDING_MS = 5 * 60 * 1000;
+  const canSend = (a: ActionRow) =>
+    a.result === "drafted" ||
+    a.result === "failed" ||
+    (a.result === "sending" && a.updated_at != null && Date.now() - Date.parse(a.updated_at) > STALE_SENDING_MS);
 
   const send = async (a: ActionRow) => {
     setSending(a.id);
     try {
+      // The endpoint queues the send on jobs compute and always returns result='sending'.
       const r = await api.sendAction(a.id);
-      if (r.ok) toast({ kind: "success", title: "Email sent", detail: r.detail });
-      else toast({ kind: r.result === "failed" ? "error" : "info", title: `Not sent (${r.result})`, detail: r.detail });
+      toast({ kind: "info", title: "Sending from jobs compute…", detail: r.detail });
       actions.refresh();
+      // The send job runs ~30–40s on cold serverless; nudge a couple of refreshes so the row
+      // flips sending→sent without waiting for the 20s auto-refresh. Tracked so they're cleared
+      // on unmount.
+      timers.current.push(
+        window.setTimeout(() => actions.refresh(), 15000),
+        window.setTimeout(() => actions.refresh(), 35000),
+      );
     } catch (e) {
-      toast({ kind: "error", title: "Send failed", detail: e instanceof Error ? e.message : String(e) });
+      toast({ kind: "error", title: "Could not send", detail: e instanceof Error ? e.message : String(e) });
     } finally {
       setSending(null);
     }
@@ -191,7 +210,7 @@ export function Actions() {
                     >
                       {meta.label}
                     </span>
-                    {(a.result === "drafted" || a.result === "failed") && (
+                    {canSend(a) && (
                       <Button
                         variant="primary"
                         icon={Send}
@@ -202,7 +221,7 @@ export function Actions() {
                         }}
                         className="py-1.5"
                       >
-                        {a.result === "failed" ? "Retry" : "Send"}
+                        {a.result === "drafted" ? "Send" : "Retry"}
                       </Button>
                     )}
                   </div>
