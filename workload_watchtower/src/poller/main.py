@@ -363,7 +363,8 @@ def poll(w: WorkspaceClient) -> dict:
                 errors.append(f"email {aid}: {detail}")
         with lakebase.connect(w) as conn, conn.cursor() as cur:
             for aid, res, err in results:
-                cur.execute("UPDATE action_log SET result = %s, error = %s WHERE id = %s", (res, err, aid))
+                cur.execute("UPDATE action_log SET result = %s, error = %s, updated_at = now() WHERE id = %s",
+                            (res, err, aid))
 
     # 6. record poll run
     dur_ms = int((time.time() - t0) * 1000)
@@ -380,8 +381,69 @@ def poll(w: WorkspaceClient) -> dict:
     return summary
 
 
+def send_action(w: WorkspaceClient, action_id: int) -> dict:
+    """Send one drafted/failed email action via SMTP (from jobs compute, which — unlike Apps
+    compute — can reach SMTP). Triggered by the app's /actions/{id}/send through the
+    `watchtower-send` job. Same recipients (active subscribers, else the workload owner) and body
+    as the app's former in-process send; writes back 'sent'/'failed' (recoverable cases stay
+    'drafted')."""
+    with lakebase.connect(w) as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT a.target, a.payload, f.object_name, f.owner, f.violation_reason "
+            "FROM action_log a LEFT JOIN findings f ON a.finding_id = f.id "
+            "WHERE a.id = %s", (action_id,))
+        row = cur.fetchone()
+    if row is None:
+        log.warning("send_action: action %s not found", action_id)
+        return {"ok": False, "detail": "action not found"}
+    _target, payload, obj, owner, violation = row
+    with lakebase.connect(w) as conn, conn.cursor() as cur:
+        cur.execute("SELECT email FROM subscribers WHERE active ORDER BY email")
+        recipients = [r[0] for r in cur.fetchall()]
+    if not recipients and owner:
+        recipients = [owner]
+
+    subject = f"[Workload Watchtower] Flagged workload: {obj or 'your workload'}"
+    body = (
+        f"Hi {owner or 'there'},\n\n"
+        f"Workload Watchtower flagged one of your Databricks workloads.\n\n"
+        f"Details:\n{json.dumps(payload, indent=2, default=str)}\n\n"
+    )
+    if violation and "STATEMENT_TIMEOUT_OVERRIDE" in violation:
+        body += (f"A session-level STATEMENT_TIMEOUT override was detected — this bypasses the "
+                 f"workspace/warehouse guardrail (session scope wins). Review:\n{_TIMEOUT_DOC}\n\n")
+    body += "— Workload Watchtower"
+
+    cfg = mailer.load_config(w)
+    if not cfg:
+        # Not-configured is recoverable (drop the secret in, then retry) — keep it 'drafted'.
+        ok, detail, result = False, "SMTP not configured in the secret scope", "drafted"
+    else:
+        ok, detail = mailer.send(cfg, recipients, subject, body)
+        # 'no recipients' is likewise recoverable → stays 'drafted'; only a real send error is 'failed'.
+        recoverable = (not ok) and ("no recipients" in detail)
+        result = "sent" if ok else ("drafted" if recoverable else "failed")
+    with lakebase.connect(w) as conn, conn.cursor() as cur:
+        cur.execute("UPDATE action_log SET result = %s, error = %s, updated_at = now() WHERE id = %s",
+                    (result, None if ok else detail, action_id))
+    log.info("send_action %s -> %s (%s)", action_id, result, detail)
+    return {"ok": ok, "result": result, "detail": detail}
+
+
 def main() -> None:
     w = WorkspaceClient()
+    # `watchtower-send` job mode: config comes as --key=value params (see _config_from_args);
+    # --send-action=<id> means "send one action's email, then exit" (no poll / bootstrap).
+    send_args = [a for a in sys.argv[1:] if a.startswith("--send-action=")]
+    if send_args:
+        val = send_args[0].split("=", 1)[1]
+        try:
+            aid = int(val)
+        except ValueError:
+            log.error("--send-action requires a numeric action id; got %r", val)
+            return
+        send_action(w, aid)
+        return
     try:
         lakebase.bootstrap_schema(w)   # first-run convenience; no-op once the schema exists
     except Exception as exc:

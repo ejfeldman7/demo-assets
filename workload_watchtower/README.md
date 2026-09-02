@@ -219,7 +219,11 @@ Three complementary ways to get notified — use any combination:
 
 1. **In-app email automations (built in)** — the rule engine auto-sends critical findings to the
    distribution list, drafts warnings for one-click send, and triages everything on the board.
-   Per-finding and self-contained (needs the optional SMTP config above).
+   Per-finding and self-contained (needs the optional SMTP config above). Both the auto-send and the
+   manual **Send/Retry** button send from **jobs compute** (the `watchtower-send` job), not from the
+   app process: Databricks Apps compute blocks outbound SMTP ports, so the app would fail to connect
+   — jobs compute is unaffected. A manual Send therefore triggers a short serverless job and the row
+   flips *sending → sent* in a few seconds.
 
 2. **SQL Alert task (recommended native path)** — the poller job ships a second task, **`alert_check`**,
    that runs *downstream of the poll* on the same schedule (no separate alert schedule). It evaluates

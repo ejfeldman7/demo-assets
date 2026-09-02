@@ -53,8 +53,6 @@ def _query_metrics(query_id: str) -> dict | None:
     except Exception:
         return None
 
-_TIMEOUT_DOC = "https://docs.databricks.com/aws/en/sql/language-manual/parameters/statement_timeout"
-
 # severity is stored as TEXT; rank it numerically so ORDER BY is by severity, not alphabet
 _SEV_RANK = "(CASE f.severity WHEN 'critical' THEN 3 WHEN 'warning' THEN 2 WHEN 'info' THEN 1 ELSE 0 END)"
 
@@ -350,43 +348,39 @@ def list_actions(limit: int = 100):
 
 @router.post("/actions/{action_id}/send")
 def send_action(action_id: int):
-    """Send a drafted email via SMTP (mailer). If SMTP isn't configured in the
-    'watchtower' secret scope, the action stays a draft (nothing is sent)."""
-    with pool.connection() as conn, conn.cursor() as cur:
-        cur.execute(
-            "SELECT a.target, a.payload, f.object_name, f.owner, f.violation_reason "
-            "FROM action_log a LEFT JOIN findings f ON a.finding_id = f.id "
-            "WHERE a.id = %s AND a.result IN ('drafted','failed')", (action_id,))
-        row = cur.fetchone()
-    if row is None:
-        raise HTTPException(404, "action not found or already sent")
-    target, payload, obj, owner, violation = row
-    # send to the distribution list; fall back to the workload owner if the list is empty
-    with pool.connection() as conn, conn.cursor() as cur:
-        cur.execute("SELECT email FROM subscribers WHERE active ORDER BY email")
-        recipients = [r[0] for r in cur.fetchall()]
-    if not recipients and owner:
-        recipients = [owner]
-    subject = f"[Workload Watchtower] Flagged workload: {obj or 'your workload'}"
-    body = (
-        f"Hi {owner or 'there'},\n\n"
-        f"Workload Watchtower flagged one of your Databricks workloads.\n\n"
-        f"Details:\n{json.dumps(payload, indent=2, default=str)}\n\n"
-    )
-    if violation and "STATEMENT_TIMEOUT_OVERRIDE" in violation:
-        body += f"A session-level STATEMENT_TIMEOUT override was detected — this bypasses the " \
-                f"workspace/warehouse guardrail (session scope wins). Review:\n{_TIMEOUT_DOC}\n\n"
-    body += "— Workload Watchtower"
+    """Queue a drafted/failed email to send from JOBS compute via the `watchtower-send` job.
 
-    ok, detail = mailer.send_email(recipients, subject, body)
-    # config / no-recipient problems stay 'drafted' (recoverable once fixed); real send
-    # errors become 'failed' but remain retryable via this same endpoint.
-    recoverable = ("not configured" in detail) or ("no recipients" in detail)
-    result = "sent" if ok else ("drafted" if recoverable else "failed")
+    Databricks Apps compute can't open outbound SMTP (Apps permit only ports 80/443/53/22/123;
+    25/465/587 fail with errno 101 — a platform port block, Jira LHA-144). Serverless jobs compute
+    is unaffected, so the actual SMTP send runs in the job (reusing the poller's mailer + secret).
+    We mark the action 'sending', trigger the job with the action_id, and the job writes back
+    'sent'/'failed' (recoverable cases stay 'drafted'); the Actions view auto-refresh reflects it."""
     with pool.connection() as conn, conn.cursor() as cur:
-        cur.execute("UPDATE action_log SET result = %s, error = %s WHERE id = %s",
-                    (result, None if ok else detail, action_id))
-    return {"ok": ok, "result": result, "detail": detail}
+        cur.execute("SELECT result FROM action_log WHERE id = %s", (action_id,))
+        row = cur.fetchone()
+        if row is None:
+            raise HTTPException(404, "action not found")
+        # Atomic claim: flip to 'sending' only if it's drafted/failed, OR a 'sending' that's been
+        # stuck past the job's worst-case runtime (the triggered job died before writing back).
+        # This single guarded UPDATE serialises concurrent sends — a rapid double-click has exactly
+        # one request win the row; the loser gets no row back and 409s (no double email/job).
+        cur.execute(
+            "UPDATE action_log SET result = 'sending', error = NULL, updated_at = now() "
+            "WHERE id = %s AND (result IN ('drafted','failed') "
+            "                   OR (result = 'sending' AND updated_at < now() - interval '5 minutes')) "
+            "RETURNING id", (action_id,))
+        claimed = cur.fetchone()
+    if claimed is None:
+        raise HTTPException(409, f"action is '{row[0]}' — nothing to send (already sent, or a send is in progress)")
+    try:
+        run = _run_job(_SEND_JOB_NAME, {"action_id": str(action_id)})
+    except Exception as exc:
+        with pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("UPDATE action_log SET result = 'failed', error = %s, updated_at = now() WHERE id = %s",
+                        (f"could not trigger send job: {exc}", action_id))
+        raise HTTPException(502, f"could not trigger send job: {exc}")
+    return {"ok": True, "result": "sending", "run_id": run["run_id"],
+            "detail": "Sending from jobs compute — status updates in a few seconds."}
 
 
 @router.get("/poll-runs")
@@ -412,14 +406,20 @@ def trends(hours: int = 24):
 # The poller normally runs on its scheduled interval (the Lakeflow job). This lets an
 # admin force a poll now — e.g. right after setup, or to confirm a rule change takes effect.
 _POLLER_JOB_NAME = os.environ.get("WT_POLLER_JOB_NAME", "watchtower-poller")
+_SEND_JOB_NAME = os.environ.get("WT_SEND_JOB_NAME", "watchtower-send")
+
+
+def _run_job(name: str, job_parameters: dict | None = None) -> dict:
+    """Trigger a job by name (the app's service principal needs CAN_MANAGE_RUN on it)."""
+    jobs = list(w.jobs.list(name=name))
+    if not jobs:
+        raise HTTPException(404, f"job '{name}' not found")
+    run = w.jobs.run_now(job_id=jobs[0].job_id, job_parameters=job_parameters or None)
+    return {"job_id": jobs[0].job_id, "run_id": run.run_id}
 
 
 @router.post("/ops/poll")
 def trigger_poll():
     """Run the poller job now. Requires the app's service principal to have run
     permission (CAN_MANAGE_RUN) on the poller job."""
-    jobs = list(w.jobs.list(name=_POLLER_JOB_NAME))
-    if not jobs:
-        raise HTTPException(404, f"poller job '{_POLLER_JOB_NAME}' not found")
-    run = w.jobs.run_now(job_id=jobs[0].job_id)
-    return {"job_id": jobs[0].job_id, "run_id": run.run_id}
+    return _run_job(_POLLER_JOB_NAME)

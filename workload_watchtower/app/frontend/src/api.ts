@@ -90,8 +90,9 @@ export interface ActionRow {
   finding_id: number;
   action: string;
   target: string | null;
-  result: "drafted" | "sent" | "failed";
+  result: "drafted" | "sending" | "sent" | "failed";
   created_at: string | null;
+  updated_at: string | null;
   object_name: string | null;
   owner: string | null;
   payload: unknown;
