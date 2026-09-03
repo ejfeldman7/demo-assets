@@ -1,10 +1,14 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { COLUMN_CAP, visibleColumns } from './graphUtils.ts'
-import type { ColumnMeta } from './types'
+import { COLUMN_CAP, shortestPath, visibleColumns } from './graphUtils.ts'
+import type { ColumnMeta, GraphEdge } from './types'
 
 function col(name: string, opts: { pk?: boolean; fk?: boolean } = {}): ColumnMeta {
   return { name, type: 'string', is_pk: !!opts.pk, is_fk: !!opts.fk, comment: null, tags: [] }
+}
+
+function e(id: string, source: string, target: string): GraphEdge {
+  return { id, source, target, fk_columns: [], pk_columns: [], constraint_name: null, inferred: false }
 }
 
 describe('visibleColumns', () => {
@@ -50,5 +54,36 @@ describe('visibleColumns', () => {
     const { visible, hidden } = visibleColumns(cols, true)
     assert.equal(visible.length, 100)
     assert.equal(hidden, 0)
+  })
+})
+
+describe('shortestPath', () => {
+  // a -e1- b -e2- c -e3- d ;  b -e4- e (branch) ;  x isolated
+  const edges = [e('e1', 'a', 'b'), e('e2', 'b', 'c'), e('e3', 'c', 'd'), e('e4', 'b', 'e')]
+
+  it('finds the fewest-hops path and the edges along it', () => {
+    const p = shortestPath('a', 'd', edges)
+    assert.deepEqual(p?.nodeIds, ['a', 'b', 'c', 'd'])
+    assert.deepEqual(p?.edgeIds, ['e1', 'e2', 'e3'])
+  })
+
+  it('works regardless of edge direction (undirected)', () => {
+    const p = shortestPath('d', 'a', edges)
+    assert.deepEqual(p?.nodeIds, ['d', 'c', 'b', 'a'])
+    assert.deepEqual(p?.edgeIds, ['e3', 'e2', 'e1'])
+  })
+
+  it('returns the node itself with no edges when source === target', () => {
+    assert.deepEqual(shortestPath('a', 'a', edges), { nodeIds: ['a'], edgeIds: [] })
+  })
+
+  it('returns null when the tables are in different components', () => {
+    assert.equal(shortestPath('a', 'x', edges), null)
+  })
+
+  it('takes the shorter of two routes', () => {
+    // a-b direct (e1) vs a-...-b longer; add a long way a-f-g-b.
+    const withLoop = [...edges, e('f1', 'a', 'f'), e('f2', 'f', 'g'), e('f3', 'g', 'b')]
+    assert.deepEqual(shortestPath('a', 'b', withLoop)?.edgeIds, ['e1'])
   })
 })

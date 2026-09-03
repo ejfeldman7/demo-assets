@@ -21,7 +21,7 @@ import { GeniePanel } from './GeniePanel'
 import { InfoPanel } from './InfoPanel'
 import { AdminPanel } from './AdminPanel'
 import { CatalogSchemaPicker } from './CatalogSchemaPicker'
-import { COLUMN_CAP, ROW_HEIGHT, connectedComponent, directNeighbors, nodeSize, visibleColumns } from './graphUtils'
+import { COLUMN_CAP, ROW_HEIGHT, connectedComponent, directNeighbors, nodeSize, shortestPath, visibleColumns } from './graphUtils'
 import { layoutGraphElk, type LayoutDirection } from './elkLayout'
 import {
   activeEdgeIds,
@@ -78,6 +78,11 @@ function ErdCanvas() {
   const [hoveredEdgeId, setHoveredEdgeId] = useState<string | null>(null)
   const [hoveredKey, setHoveredKey] = useState<HoveredKey | null>(null)
   const [filterMode, setFilterMode] = useState<FilterMode>('neighbors')
+  // Join-path tracing: when `tracing` is on, clicking two tables sets the from/to endpoints
+  // and the shortest FK path between them is highlighted (rest dimmed).
+  const [tracing, setTracing] = useState(false)
+  const [traceFrom, setTraceFrom] = useState<string | null>(null)
+  const [traceTo, setTraceTo] = useState<string | null>(null)
   const [search, setSearch] = useState('')
   // Heuristic undeclared-relationship edges are always fetched but hidden by default,
   // so first load renders identically to before this feature existed.
@@ -398,12 +403,21 @@ function ErdCanvas() {
   }, [expandedTables, layoutDir])
 
   // Compute the currently-visible set based on selection + mode.
+  // The shortest join path between the two chosen endpoints (tracing mode), or null.
+  const tracePath = useMemo(
+    () => (tracing && traceFrom && traceTo ? shortestPath(traceFrom, traceTo, scopedGraphEdges) : null),
+    [tracing, traceFrom, traceTo, scopedGraphEdges],
+  )
+  const pathEdgeIds = useMemo(() => new Set(tracePath?.edgeIds ?? []), [tracePath])
+
   const visibleSet = useMemo<Set<string> | null>(() => {
+    // Tracing takes over the dim/focus: show only the path's tables.
+    if (tracePath) return new Set(tracePath.nodeIds)
     if (!selectedId || !graph) return null
     return filterMode === 'neighbors'
       ? directNeighbors(selectedId, scopedGraphEdges)
       : connectedComponent(selectedId, scopedGraphEdges)
-  }, [selectedId, filterMode, graph, scopedGraphEdges])
+  }, [tracePath, selectedId, filterMode, graph, scopedGraphEdges])
 
   // Apply dim/selection styling + catalog color to nodes.
   const displayNodes = useMemo<Node<TableNodeData | SchemaNodeData>[]>(() => {
@@ -420,42 +434,67 @@ function ErdCanvas() {
   }, [baseNodes, visibleSet, selectedId, catalogColorMap, highlightColsByNode])
 
   const displayEdges = useMemo<Edge[]>(() => {
-    const hasSelection = Boolean(selectedId)
+    const hasSelection = Boolean(selectedId) || Boolean(tracePath)
     return baseEdges.map((e) => {
       const inferred = Boolean((e.data as { inferred?: boolean } | undefined)?.inferred)
       // Label visibility is HOVER-ONLY (computeEdgeVisual reads activeEdgeSet, not
       // selection): clicking a table focuses it but no longer paints its join-key labels
       // persistently -- the core behavior change from the review.
       const v = computeEdgeVisual({ edge: e, active: activeEdgeSet, visibleSet, hasSelection })
+      // Edges on the traced join path are emphasized (blue, thicker, animated).
+      const onPath = pathEdgeIds.has(e.id)
       return {
         ...e,
         data: { ...(e.data as object), showLabel: v.showLabel },
         style: {
           ...e.style,
           opacity: v.opacity,
-          stroke: v.dimmed ? '#e4e7ec' : inferred ? 'var(--db-red)' : '#98a2b3',
+          stroke: v.dimmed ? '#e4e7ec' : onPath ? 'var(--db-blue)' : inferred ? 'var(--db-red)' : '#98a2b3',
+          strokeWidth: onPath ? 2.5 : e.style?.strokeWidth,
         },
-        animated: v.animated,
+        animated: v.animated || onPath,
       }
     })
-  }, [baseEdges, visibleSet, selectedId, activeEdgeSet])
+  }, [baseEdges, visibleSet, selectedId, activeEdgeSet, tracePath, pathEdgeIds])
 
-  const onNodeClick: NodeMouseHandler = useCallback((_, node) => {
-    const data = node.data as TableNodeData | SchemaNodeData
-    if (isSchemaNodeData(data)) {
-      // "Expand" a collapsed schema node by selecting just that schema in the tree
-      // picker -- the same pairs-based mechanism the sidebar picker uses, which
-      // re-fetches /api/graph scoped to it and always returns full table-level detail.
-      setSelectedPairs(new Set([node.id]))
-      return
-    }
-    setSelectedId((cur) => (cur === node.id ? null : node.id))
-  }, [])
+  const onNodeClick: NodeMouseHandler = useCallback(
+    (_, node) => {
+      const data = node.data as TableNodeData | SchemaNodeData
+      if (isSchemaNodeData(data)) {
+        // "Expand" a collapsed schema node by selecting just that schema in the tree
+        // picker -- the same pairs-based mechanism the sidebar picker uses, which
+        // re-fetches /api/graph scoped to it and always returns full table-level detail.
+        setSelectedPairs(new Set([node.id]))
+        return
+      }
+      if (tracing) {
+        // First click sets "from"; second sets "to"; a third starts a fresh trace.
+        if (!traceFrom || (traceFrom && traceTo)) {
+          setTraceFrom(node.id)
+          setTraceTo(null)
+        } else if (node.id !== traceFrom) {
+          setTraceTo(node.id)
+        }
+        return
+      }
+      setSelectedId((cur) => (cur === node.id ? null : node.id))
+    },
+    [tracing, traceFrom, traceTo],
+  )
 
   const reset = useCallback(() => {
     setSelectedId(null)
     setTimeout(() => fitView({ padding: 0.15, duration: 400 }), 0)
   }, [fitView])
+
+  const toggleTracing = useCallback(() => {
+    setTracing((on) => {
+      setTraceFrom(null)
+      setTraceTo(null)
+      if (!on) setSelectedId(null) // entering trace mode: drop any click-to-focus selection
+      return !on
+    })
+  }, [])
 
   // Disabled in the collapsed schema-summary view -- there's no table/column detail to
   // export until a schema is expanded, and an image of two big summary boxes isn't
@@ -703,6 +742,33 @@ function ErdCanvas() {
             >
               Reset view
             </button>
+          </div>
+
+          <SectionLabel>Join path</SectionLabel>
+          <div style={styles.card}>
+            <Switch label="Trace join path" checked={tracing} onChange={toggleTracing} />
+            <div style={styles.hint}>
+              {!tracing
+                ? 'Highlight the shortest FK path between two tables.'
+                : !traceFrom
+                  ? 'Click the first table…'
+                  : !traceTo
+                    ? `From ${traceFrom.split('.').pop()} — now click the target table.`
+                    : tracePath
+                      ? tracePath.nodeIds.map((n) => n.split('.').pop()).join(' → ')
+                      : `No path between ${traceFrom.split('.').pop()} and ${traceTo.split('.').pop()} — they're in different components.`}
+            </div>
+            {tracing && (traceFrom || traceTo) && (
+              <button
+                onClick={() => {
+                  setTraceFrom(null)
+                  setTraceTo(null)
+                }}
+                style={styles.resetBtn}
+              >
+                Clear path
+              </button>
+            )}
           </div>
 
           <SectionLabel>Layout</SectionLabel>

@@ -84,6 +84,56 @@ export function directNeighbors(nodeId: string, edges: GraphEdge[]): Set<string>
   return result
 }
 
+/**
+ * Shortest join path between two tables over the (undirected) relationship graph -- "how
+ * does A connect to B?". BFS, so the fewest hops. Returns the node ids along the path and
+ * the edge ids linking them, or null if they're in different connected components.
+ */
+export function shortestPath(
+  sourceId: string,
+  targetId: string,
+  edges: GraphEdge[],
+): { nodeIds: string[]; edgeIds: string[] } | null {
+  if (sourceId === targetId) return { nodeIds: [sourceId], edgeIds: [] }
+  const adj = new Map<string, { to: string; edgeId: string }[]>()
+  const link = (a: string, b: string, id: string) => {
+    let l = adj.get(a)
+    if (!l) adj.set(a, (l = []))
+    l.push({ to: b, edgeId: id })
+  }
+  for (const e of edges) {
+    link(e.source, e.target, e.id)
+    link(e.target, e.source, e.id)
+  }
+  const prev = new Map<string, { node: string; edgeId: string }>()
+  const visited = new Set<string>([sourceId])
+  const queue = [sourceId]
+  while (queue.length > 0) {
+    const cur = queue.shift()!
+    if (cur === targetId) break
+    for (const { to, edgeId } of adj.get(cur) ?? []) {
+      if (!visited.has(to)) {
+        visited.add(to)
+        prev.set(to, { node: cur, edgeId })
+        queue.push(to)
+      }
+    }
+  }
+  if (!visited.has(targetId)) return null
+  const nodeIds = [targetId]
+  const edgeIds: string[] = []
+  let cur = targetId
+  while (cur !== sourceId) {
+    const p = prev.get(cur)!
+    edgeIds.push(p.edgeId)
+    nodeIds.push(p.node)
+    cur = p.node
+  }
+  nodeIds.reverse()
+  edgeIds.reverse()
+  return { nodeIds, edgeIds }
+}
+
 /** Full connected component (BFS transitive closure) containing the node. */
 export function connectedComponent(nodeId: string, edges: GraphEdge[]): Set<string> {
   const adj = buildAdjacency(edges)
