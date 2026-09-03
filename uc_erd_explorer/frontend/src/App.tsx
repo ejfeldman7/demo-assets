@@ -21,7 +21,7 @@ import { GeniePanel } from './GeniePanel'
 import { InfoPanel } from './InfoPanel'
 import { AdminPanel } from './AdminPanel'
 import { CatalogSchemaPicker } from './CatalogSchemaPicker'
-import { COLUMN_CAP, connectedComponent, directNeighbors, visibleColumns } from './graphUtils'
+import { COLUMN_CAP, ROW_HEIGHT, connectedComponent, directNeighbors, nodeSize, visibleColumns } from './graphUtils'
 import { layoutGraphElk, type LayoutDirection } from './elkLayout'
 import {
   activeEdgeIds,
@@ -98,9 +98,8 @@ function ErdCanvas() {
 
   const { fitView, setCenter, getNode } = useReactFlow()
   const laidOutRef = useRef<Node<TableNodeData | SchemaNodeData>[]>([])
-  // Layout anchoring for expand/collapse (see the layout effect): the table to keep in
-  // place across a re-layout, and a one-shot flag to skip that pass's fit-view.
-  const expandAnchorRef = useRef<string | null>(null)
+  // One-shot flag: skip the next fit-view (set when a baseNodes change came from an
+  // expand/collapse push rather than a fresh layout, so toggling doesn't re-zoom).
   const skipFitRef = useRef(false)
 
   // Load the catalog/schema tree whenever the Prod/Test environment changes, to
@@ -212,16 +211,14 @@ function ErdCanvas() {
     () => ({
       onKeyEnter: (key: HoveredKey) => setHoveredKey(key),
       onKeyLeave: () => setHoveredKey(null),
-      onToggleExpand: (nodeId: string) => {
-        // Mark this table as the layout anchor so the imminent re-layout keeps it in place
-        // (and skips the fit-view), instead of the card jumping to a new position.
-        expandAnchorRef.current = nodeId
+      onToggleExpand: (nodeId: string) =>
+        // The local-push effect keys off this state change to grow the card in place and
+        // nudge only its lane -- no re-layout, no re-fit.
         setExpandedTables((prev) => {
           const next = new Set(prev)
           next.has(nodeId) ? next.delete(nodeId) : next.add(nodeId)
           return next
-        })
-      },
+        }),
     }),
     [],
   )
@@ -318,42 +315,30 @@ function ErdCanvas() {
     return { rawNodes, baseEdges: edges }
   }, [graph, scopedGraphEdges, keysOnly, expandedTables])
 
-  // Positioned nodes, produced by ELK's async layout. Re-run whenever the raw nodes,
-  // edges, or flow direction change. A cancel flag guards against an out-of-order result
-  // from a superseded layout (e.g. rapid keysOnly/direction toggles) overwriting a newer one.
-  // When a single table is expanded/collapsed, ELK still re-lays-out everything (so
-  // neighbors reflow and nothing overlaps), but we DON'T want the card the user clicked to
-  // jump or the view to re-zoom. expandAnchorRef (set in onToggleExpand) names that table:
-  // the new layout is translated so it stays exactly where it was, and skipFitRef
-  // suppresses the fit-view for that pass. Structural changes (new graph, keys-only,
-  // direction) leave both unset and fit normally.
+  // rawNodes/baseEdges reflect the current column-expansion state, so they change on every
+  // expand toggle. The ELK layout reads them through refs (not effect deps) so a single
+  // table's expand/collapse does NOT trigger a full re-layout -- only structural changes do
+  // (see the local-push effect for what expansion does instead).
+  const rawNodesRef = useRef(rawNodes)
+  rawNodesRef.current = rawNodes
+  const baseEdgesRef = useRef(baseEdges)
+  baseEdgesRef.current = baseEdges
+
+  // Positioned nodes, produced by ELK's async layout. Structural deps ONLY (new graph,
+  // keys-only, inferred toggle, direction) -- never per-table expansion. A cancel flag
+  // guards against an out-of-order result from a superseded layout overwriting a newer one.
   const [baseNodes, setBaseNodes] = useState<Node<TableNodeData | SchemaNodeData>[]>([])
   useEffect(() => {
     let cancelled = false
-    if (rawNodes.length === 0) {
+    const nodes = rawNodesRef.current
+    if (nodes.length === 0) {
       laidOutRef.current = []
       setBaseNodes([])
       return
     }
-    layoutGraphElk(rawNodes, baseEdges, layoutDir)
+    layoutGraphElk(nodes, baseEdgesRef.current, layoutDir)
       .then((laid) => {
         if (cancelled) return
-        const anchorId = expandAnchorRef.current
-        if (anchorId) {
-          // Shift the whole new layout so the toggled card returns to its prior position
-          // (relative positions are preserved, so it stays overlap-free).
-          const oldNode = laidOutRef.current.find((n) => n.id === anchorId)
-          const newNode = laid.find((n) => n.id === anchorId)
-          if (oldNode && newNode) {
-            const dx = newNode.position.x - oldNode.position.x
-            const dy = newNode.position.y - oldNode.position.y
-            if (dx || dy) {
-              for (const n of laid) n.position = { x: n.position.x - dx, y: n.position.y - dy }
-            }
-          }
-          skipFitRef.current = true
-          expandAnchorRef.current = null
-        }
         laidOutRef.current = laid
         setBaseNodes(laid)
       })
@@ -363,7 +348,54 @@ function ErdCanvas() {
     return () => {
       cancelled = true
     }
-  }, [rawNodes, baseEdges, layoutDir])
+  }, [graph, keysOnly, showInferred, layoutDir])
+
+  // Expand/collapse a single table WITHOUT re-laying-out. Expansion only ever changes a
+  // card's height, so we keep every card in place and apply a local vertical push: shift
+  // the cards that would otherwise collide -- those below the toggled card in its layout
+  // lane -- by exactly the height delta. In LR the lane is the toggled card's column (same
+  // x-band), so only that column nudges; in TB everything below shifts down as a block.
+  // No re-layout, no re-fit, no overlap.
+  const prevExpandedRef = useRef(expandedTables)
+  useEffect(() => {
+    const prev = prevExpandedRef.current
+    prevExpandedRef.current = expandedTables
+    const added = [...expandedTables].filter((id) => !prev.has(id))
+    const removed = [...prev].filter((id) => !expandedTables.has(id))
+    // Only a single-table toggle gets a local push; bulk/none changes (e.g. a graph
+    // reload) just fall through to the fresh layout the ELK effect produced.
+    if (added.length + removed.length !== 1) return
+    const toggledId = added[0] ?? removed[0]
+    const expanding = added.length === 1
+
+    setBaseNodes((nodes) => {
+      const toggled = nodes.find((n) => n.id === toggledId)
+      const raw = rawNodesRef.current.find((n) => n.id === toggledId)
+      if (!toggled || !raw || !('columns' in raw.data)) return nodes
+      const rawData = raw.data as TableNodeData & { hiddenColumnCount?: number }
+      // |full columns - cap| rows appear/disappear. On expand, rawData.columns is the full
+      // set (hidden 0); on collapse it's the capped set + hiddenColumnCount.
+      const fullCount = rawData.columns.length + (expanding ? 0 : rawData.hiddenColumnCount ?? 0)
+      const delta = Math.max(0, fullCount - COLUMN_CAP) * ROW_HEIGHT
+      const { width: newW, height: newH } = nodeSize(rawData)
+      skipFitRef.current = true
+      if (delta === 0) {
+        return nodes.map((n) => (n.id === toggledId ? { ...n, data: raw.data, width: newW, height: newH } : n))
+      }
+      const shift = expanding ? delta : -delta
+      const tW = toggled.width ?? 240
+      const inLane = (n: Node<TableNodeData | SchemaNodeData>) => {
+        if (n.id === toggledId || n.position.y <= toggled.position.y) return false
+        if (layoutDir === 'TB') return true // block-shift everything below the toggled card
+        const nW = n.width ?? 240 // LR: same column = horizontal overlap with the toggled card
+        return n.position.x < toggled.position.x + tW && n.position.x + nW > toggled.position.x
+      }
+      return nodes.map((n) => {
+        if (n.id === toggledId) return { ...n, data: raw.data, width: newW, height: newH }
+        return inLane(n) ? { ...n, position: { x: n.position.x, y: n.position.y + shift } } : n
+      })
+    })
+  }, [expandedTables, layoutDir])
 
   // Compute the currently-visible set based on selection + mode.
   const visibleSet = useMemo<Set<string> | null>(() => {

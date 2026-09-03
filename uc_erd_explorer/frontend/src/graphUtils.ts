@@ -35,7 +35,7 @@ export function visibleColumns(
 // their declared box, so an under-estimate lets tall cards overlap their neighbors (the
 // reported bug). A few px of headroom is harmless (it only adds gap).
 const NODE_WIDTH = 240
-const ROW_HEIGHT = 25
+export const ROW_HEIGHT = 25
 const HEADER_HEIGHT = 36
 const TAGS_ROW_HEIGHT = 30
 const CARD_PADDING = 4
