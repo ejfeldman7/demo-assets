@@ -29,6 +29,8 @@ import {
   type HoveredKey,
 } from './edgeDisplay'
 import { ErdInteractionContext } from './erdContext'
+import { CommandPalette } from './CommandPalette'
+import type { TableEntry } from './search'
 // Only the ExportScope type is imported eagerly (types are erased at build time, so this
 // pulls no code). The export implementation -- which drags in html-to-image, js-yaml and
 // fflate (~hundreds of KB) -- is dynamically imported inside the export handlers, so it's
@@ -85,6 +87,7 @@ function ErdCanvas() {
   // a header-only card (no columns); that's expected and called out in the sidebar hint.
   const [keysOnly, setKeysOnly] = useState(false)
   const [erStudioDialect, setErStudioDialect] = useState<Dialect>('sqlserver')
+  const [paletteOpen, setPaletteOpen] = useState(false)
 
   const { fitView, setCenter, getNode } = useReactFlow()
   const laidOutRef = useRef<Node<TableNodeData | SchemaNodeData>[]>([])
@@ -417,6 +420,40 @@ function ErdCanvas() {
     }
   }, [search, getNode, setCenter])
 
+  // Table list for the Cmd+K quick-find palette -- only meaningful in the detail view
+  // (schema-summary has no table nodes to jump to).
+  const tableEntries = useMemo<TableEntry[]>(() => {
+    if (!graph || graph.view !== 'detail') return []
+    return (graph.nodes as (TableNodeData | SchemaNodeData)[])
+      .filter((n): n is TableNodeData => 'columns' in n)
+      .map((n) => ({ id: n.id, catalog: n.catalog, schema: n.schema, table: n.table }))
+  }, [graph])
+
+  // Pan/zoom to a table and focus it -- shared by the palette and the sidebar search.
+  const jumpToNode = useCallback(
+    (id: string) => {
+      const node = getNode(id)
+      if (node) {
+        setCenter(node.position.x + 120, node.position.y + 80, { zoom: 1.1, duration: 500 })
+        setSelectedId(id)
+      }
+    },
+    [getNode, setCenter],
+  )
+
+  // Cmd/Ctrl+K opens the quick-find palette (Lineage-Explorer-style navigation for large
+  // graphs). Registered globally so it works regardless of focus.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && (e.key === 'k' || e.key === 'K')) {
+        e.preventDefault()
+        setPaletteOpen((o) => !o)
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [])
+
   const selectedTable = selectedId
     ? selectedId.split('.').slice(1).join('.')
     : null
@@ -513,6 +550,9 @@ function ErdCanvas() {
               <button onClick={runSearch} style={styles.searchBtn}>
                 Go
               </button>
+            </div>
+            <div style={styles.hint}>
+              Press <kbd style={styles.kbdHint}>⌘K</kbd> / <kbd style={styles.kbdHint}>Ctrl K</kbd> for quick find.
             </div>
           </div>
 
@@ -695,6 +735,12 @@ function ErdCanvas() {
       </div>
 
       <GeniePanel />
+      <CommandPalette
+        open={paletteOpen}
+        tables={tableEntries}
+        onSelect={jumpToNode}
+        onClose={() => setPaletteOpen(false)}
+      />
     </div>
     </ErdInteractionContext.Provider>
   )
@@ -992,6 +1038,16 @@ const styles: Record<string, CSSProperties> = {
     color: 'var(--text-muted)',
     padding: '6px 10px 2px',
     lineHeight: 1.4,
+  },
+  kbdHint: {
+    display: 'inline-block',
+    padding: '0 4px',
+    border: '1px solid var(--border-strong)',
+    borderRadius: 4,
+    background: '#fff',
+    fontSize: 10,
+    fontFamily: 'inherit',
+    color: 'var(--text-muted)',
   },
   resetBtn: {
     marginTop: 6,
