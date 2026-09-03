@@ -8,16 +8,20 @@ export const COLUMN_CAP = 12
 const FOOTER_HEIGHT = 26
 
 /**
- * The columns a card actually renders, ordered PK -> FK -> rest (stable within each group),
- * capped at COLUMN_CAP unless expanded. Ordering PK/FK first is what guarantees the edge
- * anchor columns (fk_columns[0]/pk_columns[0]) survive the cap, so relationship lines never
- * lose their handle. Returns the visible slice plus how many were hidden.
+ * The columns a card actually renders, ordered PK -> FK -> anchor -> rest (stable within
+ * each group), capped at COLUMN_CAP unless expanded. `anchor` names columns an edge
+ * connects to (fk_columns[0]/pk_columns[0]); ranking them with the keys guarantees they
+ * survive the cap so a relationship line never loses its per-column handle. This matters
+ * for INFERRED edges especially: their columns aren't flagged is_fk, so without `anchor`
+ * a >COLUMN_CAP table could slice off an inferred FK column and dangle its dashed edge.
+ * Returns the visible slice plus how many were hidden.
  */
 export function visibleColumns(
   columns: ColumnMeta[],
   expanded: boolean,
+  anchor?: Set<string>,
 ): { visible: ColumnMeta[]; hidden: number } {
-  const rank = (c: ColumnMeta) => (c.is_pk ? 0 : c.is_fk ? 1 : 2)
+  const rank = (c: ColumnMeta) => (c.is_pk ? 0 : c.is_fk || anchor?.has(c.name) ? 1 : 2)
   const sorted = columns
     .map((c, i) => ({ c, i }))
     .sort((a, b) => rank(a.c) - rank(b.c) || a.i - b.i)

@@ -1,4 +1,4 @@
-import { BaseEdge, EdgeLabelRenderer, getSmoothStepPath, type EdgeProps } from 'reactflow'
+import { BaseEdge, EdgeLabelRenderer, Position, getSmoothStepPath, type EdgeProps } from 'reactflow'
 import { formatJoinLabel } from './edgeDisplay'
 
 // A custom edge, not React Flow's built-in 'smoothstep' type, for one specific reason:
@@ -56,8 +56,15 @@ export function RelationshipEdge({
   // glyphs: a splayed three-prong "many" foot planted at the FK/source node, and a single
   // perpendicular "one" bar at the PK/target node. Passive (pointerEvents none) and dimmed
   // in step with the line.
-  const cardStroke = inferred ? 'var(--db-red)' : 'var(--text-subtle)'
+  const cardStroke = inferred ? 'var(--db-red)' : 'var(--edge)'
   const markerOpacity = style?.opacity ?? 1
+  // The crow's-foot/one-bar glyphs are drawn assuming a HORIZONTAL line at both endpoints
+  // (the fixed Left/Right per-column handles). Schema-summary edges in top-to-bottom
+  // layout use Bottom/Top handles (a vertical line), where these fixed shapes would point
+  // sideways -- so skip the cardinality glyphs there rather than draw them wrong.
+  const horizontalEnds =
+    (sourcePosition === Position.Left || sourcePosition === Position.Right) &&
+    (targetPosition === Position.Left || targetPosition === Position.Right)
   // "many" foot: toes splay by the source node, converging outward toward the line.
   const manyPath =
     `M${sourceX + 15},${sourceY} L${sourceX + 1},${sourceY - 6}` +
@@ -70,8 +77,12 @@ export function RelationshipEdge({
   return (
     <>
       <BaseEdge id={id} path={path} style={style} />
-      <path d={manyPath} stroke={cardStroke} strokeWidth={1.6} fill="none" strokeLinecap="round" strokeLinejoin="round" style={markerStyle} />
-      <path d={onePath} stroke={cardStroke} strokeWidth={1.6} fill="none" strokeLinecap="round" style={markerStyle} />
+      {horizontalEnds && (
+        <>
+          <path d={manyPath} stroke={cardStroke} strokeWidth={1.6} fill="none" strokeLinecap="round" strokeLinejoin="round" style={markerStyle} />
+          <path d={onePath} stroke={cardStroke} strokeWidth={1.6} fill="none" strokeLinecap="round" style={markerStyle} />
+        </>
+      )}
       {label && (
         <EdgeLabelRenderer>
           <div

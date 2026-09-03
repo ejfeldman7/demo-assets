@@ -25,7 +25,6 @@
   --edge: #98a2b3; /* relationship line (declared) */
   --edge-dim: #e4e7ec; /* de-emphasized relationship line */
   --canvas-dot: #e4e7ec; /* React Flow background dots */
-  --minimap-mask: rgba(246, 247, 249, 0.7);
   --overlay: rgba(16, 24, 40, 0.35); /* modal backdrop (Cmd+K) */
   --pk: #ca8a04; /* primary-key icon (gold) */
   --fk: #175cd3; /* foreign-key icon (blue) */
@@ -69,7 +68,6 @@
   --edge: #7f8a97;
   --edge-dim: #2b343d;
   --canvas-dot: #2b343d;
-  --minimap-mask: rgba(15, 20, 24, 0.7);
   --overlay: rgba(0, 0, 0, 0.6);
   --pk: #e0a94a;
   --fk: #5b9be0;
@@ -95,7 +93,6 @@
     --edge: #7f8a97;
     --edge-dim: #2b343d;
     --canvas-dot: #2b343d;
-    --minimap-mask: rgba(15, 20, 24, 0.7);
     --overlay: rgba(0, 0, 0, 0.6);
     --pk: #e0a94a;
     --fk: #5b9be0;

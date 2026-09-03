@@ -217,6 +217,25 @@ function ErdCanvas() {
     [graph, showInferred],
   )
 
+  // The column each visible edge anchors to, per node (fk_columns[0] on the source,
+  // pk_columns[0] on the target). Fed to visibleColumns so the cap never slices off an
+  // anchor column and dangles its edge -- crucial for inferred edges, whose columns aren't
+  // flagged is_fk. Keyed on scopedGraphEdges so it tracks the inferred-visibility toggle.
+  const anchorColsByNode = useMemo(() => {
+    const m = new Map<string, Set<string>>()
+    const add = (id: string, col: string | undefined) => {
+      if (!col) return
+      let s = m.get(id)
+      if (!s) m.set(id, (s = new Set()))
+      s.add(col)
+    }
+    for (const e of scopedGraphEdges) {
+      add(e.source, e.fk_columns[0])
+      add(e.target, e.pk_columns[0])
+    }
+    return m
+  }, [scopedGraphEdges])
+
   // The relationship(s) whose detail is revealed right now -- driven purely by transient
   // hover (a hovered edge, or a hovered PK/FK key column), never by selection.
   const activeEdgeSet = useMemo(
@@ -292,7 +311,7 @@ function ErdCanvas() {
         ? n.columns.filter((c) => c.is_pk || c.is_fk || inferredFkColsByNode[n.id]?.has(c.name))
         : n.columns
       const expanded = expandedTables.has(n.id)
-      const { visible, hidden } = visibleColumns(baseCols, expanded)
+      const { visible, hidden } = visibleColumns(baseCols, expanded, anchorColsByNode.get(n.id))
       return {
         id: n.id,
         type: 'table',
@@ -343,7 +362,7 @@ function ErdCanvas() {
     }))
 
     return { rawNodes, baseEdges: edges }
-  }, [graph, scopedGraphEdges, keysOnly, expandedTables])
+  }, [graph, scopedGraphEdges, keysOnly, expandedTables, anchorColsByNode])
 
   // rawNodes/baseEdges reflect the current column-expansion state, so they change on every
   // expand toggle. The ELK layout reads them through refs (not effect deps) so a single
@@ -370,10 +389,16 @@ function ErdCanvas() {
         return
       }
       const gen = ++layoutGenRef.current
-      if (!fit) skipFitRef.current = true
-      layoutGraphElk(nodes, baseEdgesRef.current, layoutDir, groupBy, collapsedGroups)
+      // Grouping is only meaningful in the detail view; in schema-summary the nodes ARE
+      // schemas (no columns), so grouping them would emit bogus "__ungrouped" boxes.
+      const effectiveGroupBy = graph?.view === 'detail' ? groupBy : 'none'
+      layoutGraphElk(nodes, baseEdgesRef.current, layoutDir, effectiveGroupBy, collapsedGroups)
         .then((r) => {
           if (gen !== layoutGenRef.current) return
+          // Set the skip-fit flag here (not synchronously) so ONLY the layout that actually
+          // applies decides whether to fit -- a superseded no-fit layout can't suppress the
+          // fit a later structural layout intended.
+          skipFitRef.current = !fit
           laidOutRef.current = r.nodes
           setBaseNodes(r.nodes)
           setGroupBoxes(r.groups)
@@ -382,7 +407,7 @@ function ErdCanvas() {
           if (gen === layoutGenRef.current) setError((e as Error).message)
         })
     },
-    [layoutDir, groupBy, collapsedGroups],
+    [graph, layoutDir, groupBy, collapsedGroups],
   )
 
   // Structural re-layout: new graph, keys-only, inferred toggle, direction, grouping
@@ -518,7 +543,7 @@ function ErdCanvas() {
         style: {
           ...e.style,
           opacity: dimmed ? 0.1 : 1,
-          stroke: dimmed ? 'var(--border)' : onPath ? 'var(--db-blue)' : inferred ? 'var(--db-red)' : 'var(--text-subtle)',
+          stroke: dimmed ? 'var(--edge-dim)' : onPath ? 'var(--db-blue)' : inferred ? 'var(--db-red)' : 'var(--edge)',
           strokeWidth: onPath ? 2.5 : e.style?.strokeWidth,
         },
         animated: tracePath ? onPath : v.animated,
@@ -629,9 +654,9 @@ function ErdCanvas() {
   const runSearch = useCallback(() => {
     const q = search.trim().toLowerCase()
     if (!q) return
-    // Only meaningful for actual table nodes -- in the collapsed schema-summary view
-    // there are no table names to search yet (select a schema to expand it first).
-    const nodes = laidOutRef.current.filter(
+    // Search the currently-VISIBLE table nodes (baseNodes) -- always up to date, and it
+    // excludes tables inside a collapsed group, which have no node to pan to anyway.
+    const nodes = baseNodes.filter(
       (n): n is Node<TableNodeData> => !isSchemaNodeData(n.data),
     )
     // Prefer an exact table-name match (so "materials" hits factory.materials,
@@ -649,16 +674,16 @@ function ErdCanvas() {
         if (!tracing) setSelectedId(match.id)
       }
     }
-  }, [search, getNode, setCenter, tracing])
+  }, [search, getNode, setCenter, tracing, baseNodes])
 
-  // Table list for the Cmd+K quick-find palette -- only meaningful in the detail view
-  // (schema-summary has no table nodes to jump to).
+  // Table list for the Cmd+K quick-find palette -- the currently-VISIBLE table nodes, so a
+  // pick always has a node to pan to (tables in a collapsed group are excluded, matching
+  // what's on the canvas; schema-summary nodes have no columns and are skipped).
   const tableEntries = useMemo<TableEntry[]>(() => {
-    if (!graph || graph.view !== 'detail') return []
-    return (graph.nodes as (TableNodeData | SchemaNodeData)[])
-      .filter((n): n is TableNodeData => 'columns' in n)
-      .map((n) => ({ id: n.id, catalog: n.catalog, schema: n.schema, table: n.table }))
-  }, [graph])
+    return baseNodes
+      .filter((n): n is Node<TableNodeData> => !isSchemaNodeData(n.data))
+      .map((n) => ({ id: n.id, catalog: n.data.catalog, schema: n.data.schema, table: n.data.table }))
+  }, [baseNodes])
 
   // Pan/zoom to a table and focus it -- shared by the palette and the sidebar search.
   const jumpToNode = useCallback(
@@ -967,7 +992,7 @@ function ErdCanvas() {
             proOptions={{ hideAttribution: true }}
             style={{ background: 'var(--bg)' }}
           >
-            <Background color={isDark ? '#2b343d' : 'var(--border)'} gap={22} />
+            <Background color="var(--canvas-dot)" gap={22} />
             <Controls />
             <MiniMap
               nodeColor={(n) =>

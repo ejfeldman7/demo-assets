@@ -49,6 +49,16 @@ describe('visibleColumns', () => {
     assert.equal(names[0], 'id') // PK first
   })
 
+  it('keeps an anchor column within the cap even when it is not a declared key', () => {
+    // 13 plain columns; the last is an inferred-edge FK (not is_fk). Without `anchor` it'd
+    // be sliced past the cap and dangle its edge; with `anchor` it's ranked with the keys.
+    const cols = Array.from({ length: 13 }, (_, i) => col(`c${i}`))
+    const anchorName = 'c12'
+    const { visible } = visibleColumns(cols, false, new Set([anchorName]))
+    assert.equal(visible.length, COLUMN_CAP)
+    assert.ok(visible.some((c) => c.name === anchorName))
+  })
+
   it('expanded shows everything with nothing hidden', () => {
     const cols = Array.from({ length: 100 }, (_, i) => col(`c${i}`))
     const { visible, hidden } = visibleColumns(cols, true)
