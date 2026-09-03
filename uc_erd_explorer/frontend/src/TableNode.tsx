@@ -13,7 +13,7 @@ function KeyIcon({ kind }: { kind: 'pk' | 'fk' }) {
   // accent, the red inferred edges, and red-family catalog headers. #ca8a04 clears the 3:1
   // non-text contrast bar on white, and PK vs FK is also cued by shape (filled vs outline),
   // never by color alone.
-  const color = kind === 'pk' ? '#ca8a04' : '#175cd3'
+  const color = kind === 'pk' ? 'var(--pk)' : 'var(--fk)'
   const label = kind === 'pk' ? 'Primary key' : 'Foreign key'
   return (
     <svg
@@ -131,8 +131,8 @@ export function TableNode({ id, data }: TableNodeProps) {
     <div
       style={{
         width: 240,
-        background: '#fff',
-        border: selected ? `2px solid ${colors.bar}` : '1px solid #e4e7ec',
+        background: 'var(--surface)',
+        border: selected ? `2px solid ${colors.bar}` : '1px solid var(--border)',
         borderRadius: 10,
         boxShadow: selected
           ? `0 0 0 4px ${colors.soft}, 0 8px 24px rgba(16,24,40,0.14)`
@@ -146,7 +146,7 @@ export function TableNode({ id, data }: TableNodeProps) {
       <div
         style={{
           background: colors.bar,
-          color: '#fff',
+          color: 'var(--on-accent)',
           padding: '8px 11px',
           fontWeight: 600,
           fontSize: 13,
@@ -187,8 +187,8 @@ export function TableNode({ id, data }: TableNodeProps) {
             flexWrap: 'wrap',
             gap: 4,
             padding: '6px 11px',
-            borderTop: '1px solid #f2f4f7',
-            background: '#fbfcfd',
+            borderTop: '1px solid var(--border-subtle)',
+            background: 'var(--surface-subtle)',
           }}
         >
           {data.tags.map((tag) => (
@@ -213,7 +213,7 @@ export function TableNode({ id, data }: TableNodeProps) {
               alignItems: 'center',
               gap: 6,
               padding: '4px 11px',
-              borderTop: '1px solid #f2f4f7',
+              borderTop: '1px solid var(--border-subtle)',
               lineHeight: '16px',
               // Highlight the row when an active relationship connects to this column.
               background: highlighted ? colors.soft : undefined,
@@ -251,7 +251,7 @@ export function TableNode({ id, data }: TableNodeProps) {
               style={{
                 flex: 1,
                 fontWeight: col.is_pk ? 600 : 400,
-                color: '#1d2939',
+                color: 'var(--text)',
                 display: 'flex',
                 alignItems: 'center',
                 gap: 4,
@@ -259,7 +259,7 @@ export function TableNode({ id, data }: TableNodeProps) {
               }}
             >
               <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>{col.name}</span>
-              {col.comment && <span style={{ color: '#98a2b3', fontSize: 10, flexShrink: 0 }}>ⓘ</span>}
+              {col.comment && <span style={{ color: 'var(--text-subtle)', fontSize: 10, flexShrink: 0 }}>ⓘ</span>}
             </span>
             {col.tags.length > 0 && (
               <span style={{ display: 'flex', gap: 3, flexShrink: 0 }}>
@@ -268,7 +268,7 @@ export function TableNode({ id, data }: TableNodeProps) {
                 ))}
               </span>
             )}
-            <span style={{ color: '#98a2b3', fontSize: 10 }}>{col.type}</span>
+            <span style={{ color: 'var(--text-subtle)', fontSize: 10 }}>{col.type}</span>
           </div>
           )
         })}
@@ -286,8 +286,8 @@ export function TableNode({ id, data }: TableNodeProps) {
           style={{
             width: '100%',
             border: 'none',
-            borderTop: '1px solid #f2f4f7',
-            background: '#fbfcfd',
+            borderTop: '1px solid var(--border-subtle)',
+            background: 'var(--surface-subtle)',
             color: 'var(--db-blue)',
             fontSize: 10.5,
             fontWeight: 600,
@@ -314,7 +314,7 @@ function columnHandleStyle(bar: string) {
     minWidth: 0,
     minHeight: 0,
     background: bar,
-    border: '1.5px solid #fff',
+    border: '1.5px solid var(--surface)',
     opacity: 0.85,
   }
 }

@@ -1,20 +1,34 @@
 :root {
+  /* LIGHT theme (the baseline). The dark overrides live in the two blocks below; every
+     color the app renders should resolve to one of these tokens so both themes stay in
+     sync. Brand hues (red/navy/blue) and `--on-accent` are intentionally theme-stable. */
+
   /* Databricks brand palette (brand.databricks.com) */
   --db-red: #ff3621; /* primary brand accent — used sparingly */
   --db-red-hover: #e6301d;
-  --db-navy: #1b3139; /* dark neutral (top bar, headings) */
+  --db-navy: #1b3139; /* dark neutral (top bar, headings) — reads on both themes */
   --db-oat: #f9f7f4; /* warm off-white app background */
   --db-blue: #2272b4; /* links / secondary action */
-  --db-blue-soft: #eaf2fb;
+  --db-blue-soft: #eaf2fb; /* selected/focus tint */
 
   /* Neutrals */
-  --surface: #ffffff;
-  --bg: #f6f7f9;
+  --surface: #ffffff; /* cards, panels, sidebar */
+  --surface-subtle: #fbfcfd; /* faint inset rows (tag row, footers) */
+  --bg: #f6f7f9; /* canvas */
   --border: #e4e7ec;
+  --border-subtle: #f2f4f7; /* hairline row dividers */
   --border-strong: #d0d5dd;
   --text: #1d2939;
   --text-muted: #667085;
   --text-subtle: #98a2b3;
+  --on-accent: #ffffff; /* text/icon on a saturated bar — stays light in both themes */
+  --edge: #98a2b3; /* relationship line (declared) */
+  --edge-dim: #e4e7ec; /* de-emphasized relationship line */
+  --canvas-dot: #e4e7ec; /* React Flow background dots */
+  --minimap-mask: rgba(246, 247, 249, 0.7);
+  --overlay: rgba(16, 24, 40, 0.35); /* modal backdrop (Cmd+K) */
+  --pk: #ca8a04; /* primary-key icon (gold) */
+  --fk: #175cd3; /* foreign-key icon (blue) */
 
   /* Schema accents */
   --schema-factory: #2272b4;
@@ -26,6 +40,71 @@
   --shadow-sm: 0 1px 2px rgba(16, 24, 40, 0.06);
   --shadow-md: 0 4px 12px rgba(16, 24, 40, 0.1);
   --shadow-lg: 0 12px 32px rgba(16, 24, 40, 0.16);
+}
+
+/* DARK theme tokens. Applied when the user explicitly picks dark (data-theme="dark"), and
+   -- via the media query -- when the OS prefers dark AND the user hasn't forced light. Only
+   the tokens that change are redefined; brand hues + --on-accent carry over from :root. */
+:root[data-theme='dark'],
+:root[data-theme='dark'] body {
+  color-scheme: dark;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) {
+    color-scheme: dark;
+  }
+}
+:root[data-theme='dark'] {
+  --db-oat: #10161c;
+  --db-blue-soft: rgba(34, 114, 180, 0.24);
+  --surface: #1b2229;
+  --surface-subtle: #222a32;
+  --bg: #0f1418;
+  --border: #2b343d;
+  --border-subtle: #232b33;
+  --border-strong: #3b4551;
+  --text: #e6e9ee;
+  --text-muted: #9aa4b0;
+  --text-subtle: #6c7683;
+  --edge: #7f8a97;
+  --edge-dim: #2b343d;
+  --canvas-dot: #2b343d;
+  --minimap-mask: rgba(15, 20, 24, 0.7);
+  --overlay: rgba(0, 0, 0, 0.6);
+  --pk: #e0a94a;
+  --fk: #5b9be0;
+  --schema-factory-soft: rgba(34, 114, 180, 0.22);
+  --schema-erp-soft: rgba(124, 58, 237, 0.22);
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.5);
+  --shadow-lg: 0 12px 32px rgba(0, 0, 0, 0.6);
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) {
+    --db-oat: #10161c;
+    --db-blue-soft: rgba(34, 114, 180, 0.24);
+    --surface: #1b2229;
+    --surface-subtle: #222a32;
+    --bg: #0f1418;
+    --border: #2b343d;
+    --border-subtle: #232b33;
+    --border-strong: #3b4551;
+    --text: #e6e9ee;
+    --text-muted: #9aa4b0;
+    --text-subtle: #6c7683;
+    --edge: #7f8a97;
+    --edge-dim: #2b343d;
+    --canvas-dot: #2b343d;
+    --minimap-mask: rgba(15, 20, 24, 0.7);
+    --overlay: rgba(0, 0, 0, 0.6);
+    --pk: #e0a94a;
+    --fk: #5b9be0;
+    --schema-factory-soft: rgba(34, 114, 180, 0.22);
+    --schema-erp-soft: rgba(124, 58, 237, 0.22);
+    --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
+    --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.5);
+    --shadow-lg: 0 12px 32px rgba(0, 0, 0, 0.6);
+  }
 }
 
 * {
@@ -72,6 +151,7 @@ button {
   border: 1px solid var(--border);
   border-radius: 8px;
   box-shadow: var(--shadow-sm);
+  background: var(--surface);
 }
 .react-flow__edge-text {
   font-family: inherit;

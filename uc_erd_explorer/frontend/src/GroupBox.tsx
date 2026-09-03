@@ -19,7 +19,7 @@ export interface GroupBoxData {
 }
 
 export function GroupBoxNode({ data }: NodeProps<GroupBoxData>) {
-  const color = data.color ?? { bar: '#475467', soft: '#f2f4f7' }
+  const color = data.color ?? { bar: '#475467', soft: 'var(--border-subtle)' }
   const { onToggleGroup } = useContext(ErdInteractionContext)
   return (
     <div
@@ -51,7 +51,7 @@ export function GroupBoxNode({ data }: NodeProps<GroupBoxData>) {
           borderRadius: 7,
           border: 'none',
           background: color.bar,
-          color: '#fff',
+          color: 'var(--on-accent)',
           fontSize: 11,
           fontWeight: 700,
           letterSpacing: 0.2,

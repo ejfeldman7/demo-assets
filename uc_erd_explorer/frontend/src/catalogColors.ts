@@ -30,7 +30,7 @@ function hslToHex(h: number, s: number, l: number): string {
  * down to one catalog) -- deliberate, since in-view distinguishability matters more here
  * than a catalog keeping one fixed color across every possible view.
  */
-export function buildCatalogColorMap(catalogs: string[]): Map<string, ColorPair> {
+export function buildCatalogColorMap(catalogs: string[], dark = false): Map<string, ColorPair> {
   const sorted = Array.from(new Set(catalogs)).sort()
   const map = new Map<string, ColorPair>()
   const n = sorted.length
@@ -38,8 +38,12 @@ export function buildCatalogColorMap(catalogs: string[]): Map<string, ColorPair>
   sorted.forEach((catalog, i) => {
     const hue = (360 / n) * i
     map.set(catalog, {
-      bar: hslToHex(hue, 0.62, 0.38),
-      soft: hslToHex(hue, 0.62, 0.95),
+      // Header bar stays dark enough that the white (--on-accent) label reads in both
+      // themes; the soft tint (group-box fill, selected ring, highlighted row) flips from
+      // a near-white wash in light to a dark, low-lightness tint in dark so it doesn't
+      // become a glowing patch.
+      bar: dark ? hslToHex(hue, 0.5, 0.46) : hslToHex(hue, 0.62, 0.38),
+      soft: dark ? hslToHex(hue, 0.45, 0.2) : hslToHex(hue, 0.62, 0.95),
     })
   })
   return map

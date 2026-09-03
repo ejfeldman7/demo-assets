@@ -11,7 +11,7 @@ export interface SchemaNodeProps extends NodeProps<SchemaNodeData> {
 // selects that schema in the tree picker -- the existing click-to-filter mechanism --
 // which re-fetches /api/graph scoped to it and always gets full table-level detail.
 export function SchemaNode({ data }: SchemaNodeProps) {
-  const colors = data.color ?? { bar: '#475467', soft: '#f2f4f7' }
+  const colors = data.color ?? { bar: '#475467', soft: 'var(--border-subtle)' }
   const dimmed = data.dimmed
   const selected = data.selected
 
@@ -19,8 +19,8 @@ export function SchemaNode({ data }: SchemaNodeProps) {
     <div
       style={{
         width: 220,
-        background: '#fff',
-        border: selected ? `2px solid ${colors.bar}` : '1px solid #e4e7ec',
+        background: 'var(--surface)',
+        border: selected ? `2px solid ${colors.bar}` : '1px solid var(--border)',
         borderRadius: 10,
         boxShadow: selected
           ? `0 0 0 4px ${colors.soft}, 0 8px 24px rgba(16,24,40,0.14)`
@@ -36,7 +36,7 @@ export function SchemaNode({ data }: SchemaNodeProps) {
       <div
         style={{
           background: colors.bar,
-          color: '#fff',
+          color: 'var(--on-accent)',
           padding: '10px 12px',
           fontWeight: 700,
           fontSize: 14,
@@ -45,8 +45,8 @@ export function SchemaNode({ data }: SchemaNodeProps) {
         {data.catalog}.{data.schema}
       </div>
       <div style={{ padding: '10px 12px', display: 'flex', flexDirection: 'column', gap: 4 }}>
-        <span style={{ fontSize: 20, fontWeight: 700, color: '#1d2939' }}>{data.table_count}</span>
-        <span style={{ color: '#667085', fontSize: 11 }}>
+        <span style={{ fontSize: 20, fontWeight: 700, color: 'var(--text)' }}>{data.table_count}</span>
+        <span style={{ color: 'var(--text-muted)', fontSize: 11 }}>
           table{data.table_count === 1 ? '' : 's'} -- click to expand
         </span>
       </div>

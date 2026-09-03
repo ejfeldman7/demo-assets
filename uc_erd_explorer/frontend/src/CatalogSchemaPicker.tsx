@@ -151,7 +151,7 @@ function Checkbox({ state }: { state: CatalogState }) {
     <span
       style={{
         ...styles.checkbox,
-        background: state === 'unchecked' ? '#fff' : 'var(--db-blue)',
+        background: state === 'unchecked' ? 'var(--surface)' : 'var(--db-blue)',
         borderColor: state === 'unchecked' ? 'var(--border-strong)' : 'var(--db-blue)',
       }}
     >
@@ -210,7 +210,7 @@ const styles: Record<string, CSSProperties> = {
     justifyContent: 'center',
     fontSize: 10,
     fontWeight: 800,
-    color: '#fff',
+    color: 'var(--on-accent)',
   },
   countBadge: {
     fontSize: 10.5,

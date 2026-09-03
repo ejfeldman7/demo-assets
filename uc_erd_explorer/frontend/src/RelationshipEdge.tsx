@@ -47,7 +47,7 @@ export function RelationshipEdge({
   const label = showLabel
     ? formatJoinLabel(data?.fkCols ?? [], data?.pkCols ?? [], inferred)
     : null
-  const accent = inferred ? 'var(--db-red)' : '#667085'
+  const accent = inferred ? 'var(--db-red)' : 'var(--text-muted)'
 
   // Crow's-foot cardinality, drawn directly in the edge layer rather than via SVG <marker>
   // (whose auto-orientation rendered the "many" foot as a plain arrowhead). The layout is
@@ -56,7 +56,7 @@ export function RelationshipEdge({
   // glyphs: a splayed three-prong "many" foot planted at the FK/source node, and a single
   // perpendicular "one" bar at the PK/target node. Passive (pointerEvents none) and dimmed
   // in step with the line.
-  const cardStroke = inferred ? 'var(--db-red)' : '#98a2b3'
+  const cardStroke = inferred ? 'var(--db-red)' : 'var(--text-subtle)'
   const markerOpacity = style?.opacity ?? 1
   // "many" foot: toes splay by the source node, converging outward toward the line.
   const manyPath =
@@ -84,7 +84,7 @@ export function RelationshipEdge({
               // the canvas; hover/click must keep reaching the edge and nodes beneath it.
               pointerEvents: 'none',
               zIndex: 1001,
-              background: '#ffffff',
+              background: 'var(--surface)',
               borderRadius: 5,
               padding: label.stacked ? '3px 7px' : '1px 6px',
               // Cap the footprint so even a pathological name can't sprawl across neighbors;
@@ -97,7 +97,7 @@ export function RelationshipEdge({
               textAlign: 'center',
               overflowWrap: 'anywhere',
               boxShadow: '0 1px 3px rgba(16,24,40,0.14)',
-              border: '1px solid #eaecf0',
+              border: '1px solid var(--border)',
               // Match the line's dim/highlight opacity (set by App's displayEdges) so a
               // de-emphasized edge's label dims with it.
               opacity: style?.opacity ?? 1,

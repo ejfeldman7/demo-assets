@@ -20,6 +20,7 @@ import { RelationshipEdge } from './RelationshipEdge'
 import { GeniePanel } from './GeniePanel'
 import { InfoPanel } from './InfoPanel'
 import { AdminPanel } from './AdminPanel'
+import { ThemeToggle, useResolvedDark } from './ThemeToggle'
 import { CatalogSchemaPicker } from './CatalogSchemaPicker'
 import { COLUMN_CAP, ROW_HEIGHT, connectedComponent, directNeighbors, nodeSize, shortestPath, visibleColumns } from './graphUtils'
 import { layoutGraphElk, type LayoutDirection } from './elkLayout'
@@ -204,7 +205,8 @@ function ErdCanvas() {
   // Colors assigned per the catalogs actually present in the current (already
   // catalog/schema-scoped) graph -- see catalogColors.ts for why this is computed fresh
   // per graph rather than from a fixed name->color lookup.
-  const catalogColorMap = useMemo(() => buildCatalogColorMap(graph?.catalogs ?? []), [graph])
+  const isDark = useResolvedDark()
+  const catalogColorMap = useMemo(() => buildCatalogColorMap(graph?.catalogs ?? [], isDark), [graph, isDark])
 
   // Edges filtered to the current inferred-visibility toggle -- used for both rendering
   // and click-to-filter connectivity, so a hidden inferred edge never silently changes
@@ -334,7 +336,7 @@ function ErdCanvas() {
       // overlap a solid one is never fully hidden underneath it.
       zIndex: e.inferred ? 1 : 0,
       style: {
-        stroke: e.inferred ? 'var(--db-red)' : '#98a2b3',
+        stroke: e.inferred ? 'var(--db-red)' : 'var(--text-subtle)',
         strokeWidth: e.inferred ? 2 : 1.5,
         strokeDasharray: e.inferred ? '6 4' : undefined,
       },
@@ -516,7 +518,7 @@ function ErdCanvas() {
         style: {
           ...e.style,
           opacity: dimmed ? 0.1 : 1,
-          stroke: dimmed ? '#e4e7ec' : onPath ? 'var(--db-blue)' : inferred ? 'var(--db-red)' : '#98a2b3',
+          stroke: dimmed ? 'var(--border)' : onPath ? 'var(--db-blue)' : inferred ? 'var(--db-red)' : 'var(--text-subtle)',
           strokeWidth: onPath ? 2.5 : e.style?.strokeWidth,
         },
         animated: tracePath ? onPath : v.animated,
@@ -719,6 +721,7 @@ function ErdCanvas() {
             {workspaceName}
           </div>
         )}
+        <ThemeToggle />
         <AdminPanel />
         <InfoPanel />
         <div style={styles.avatar}>EF</div>
@@ -946,13 +949,13 @@ function ErdCanvas() {
             proOptions={{ hideAttribution: true }}
             style={{ background: 'var(--bg)' }}
           >
-            <Background color="#e4e7ec" gap={22} />
+            <Background color={isDark ? '#2b343d' : 'var(--border)'} gap={22} />
             <Controls />
             <MiniMap
               nodeColor={(n) =>
                 lookupCatalogColor(catalogColorMap, (n.data as TableNodeData | SchemaNodeData)?.catalog ?? '').bar
               }
-              maskColor="rgba(246,247,249,0.7)"
+              maskColor={isDark ? 'rgba(15,20,24,0.7)' : 'rgba(246,247,249,0.7)'}
               pannable
               zoomable
             />
@@ -1087,7 +1090,7 @@ function Switch({
           height: 19,
           flexShrink: 0,
           borderRadius: 999,
-          background: checked ? 'var(--db-red)' : '#d0d5dd',
+          background: checked ? 'var(--db-red)' : 'var(--border-strong)',
           transition: 'background 0.15s ease',
         }}
       >
@@ -1099,7 +1102,7 @@ function Switch({
             width: 15,
             height: 15,
             borderRadius: '50%',
-            background: '#fff',
+            background: 'var(--on-accent)',
             boxShadow: '0 1px 2px rgba(16,24,40,0.2)',
             transition: 'left 0.15s ease',
           }}
@@ -1129,10 +1132,10 @@ function sidebarRow(active: boolean): CSSProperties {
 
 function exportBtn(enabled: boolean): CSSProperties {
   return {
-    border: '1px solid var(--border, #e4e7ec)',
+    border: '1px solid var(--border)',
     borderRadius: 6,
-    background: '#fff',
-    color: enabled ? 'var(--text)' : '#c0c5cd',
+    background: 'var(--surface)',
+    color: enabled ? 'var(--text)' : 'var(--text-subtle)',
     fontSize: 11,
     fontWeight: 600,
     padding: '4px 8px',
@@ -1143,10 +1146,10 @@ function exportBtn(enabled: boolean): CSSProperties {
 
 function exportDialectSelect(enabled: boolean): CSSProperties {
   return {
-    border: '1px solid var(--border, #e4e7ec)',
+    border: '1px solid var(--border)',
     borderRadius: 6,
-    background: '#fff',
-    color: enabled ? 'var(--text)' : '#c0c5cd',
+    background: 'var(--surface)',
+    color: enabled ? 'var(--text)' : 'var(--text-subtle)',
     fontSize: 11,
     fontWeight: 600,
     padding: '4px 6px',
@@ -1160,8 +1163,8 @@ const styles: Record<string, CSSProperties> = {
     flexDirection: 'column',
     gap: 6,
     width: 236,
-    background: '#fff',
-    border: '1px solid #e4e7ec',
+    background: 'var(--surface)',
+    border: '1px solid var(--border)',
     borderRadius: 8,
     padding: '8px',
     boxShadow: '0 1px 2px rgba(16,24,40,0.06), 0 1px 3px rgba(16,24,40,0.1)',
@@ -1175,7 +1178,7 @@ const styles: Record<string, CSSProperties> = {
   exportLabel: {
     fontSize: 10.5,
     fontWeight: 700,
-    color: '#98a2b3',
+    color: 'var(--text-subtle)',
     textTransform: 'uppercase',
     letterSpacing: 0.4,
   },
@@ -1197,7 +1200,7 @@ const styles: Record<string, CSSProperties> = {
     flexShrink: 0,
     fontSize: 10,
     fontWeight: 600,
-    color: '#98a2b3',
+    color: 'var(--text-subtle)',
   },
   app: {
     width: '100vw',
@@ -1213,7 +1216,7 @@ const styles: Record<string, CSSProperties> = {
     height: 52,
     padding: '0 18px',
     background: 'var(--db-navy)',
-    color: '#fff',
+    color: 'var(--on-accent)',
     flexShrink: 0,
   },
   brandMark: { display: 'flex', alignItems: 'center', gap: 8 },
@@ -1247,7 +1250,7 @@ const styles: Record<string, CSSProperties> = {
     height: 30,
     borderRadius: '50%',
     background: 'var(--db-red)',
-    color: '#fff',
+    color: 'var(--on-accent)',
     fontSize: 11,
     fontWeight: 700,
     display: 'flex',
@@ -1285,7 +1288,7 @@ const styles: Record<string, CSSProperties> = {
     gap: 2,
   },
   catalogCard: {
-    background: 'linear-gradient(135deg,#ffffff,#faf6f4)',
+    background: 'linear-gradient(135deg,var(--surface),var(--surface-subtle))',
     border: '1px solid var(--border)',
     borderRadius: 'var(--radius)',
     padding: '12px 14px',
@@ -1315,7 +1318,7 @@ const styles: Record<string, CSSProperties> = {
     border: 'none',
     borderRadius: 8,
     background: 'var(--db-blue)',
-    color: '#fff',
+    color: 'var(--on-accent)',
     padding: '0 14px',
     fontSize: 13,
     fontWeight: 600,
@@ -1332,7 +1335,7 @@ const styles: Record<string, CSSProperties> = {
     padding: '0 4px',
     border: '1px solid var(--border-strong)',
     borderRadius: 4,
-    background: '#fff',
+    background: 'var(--surface)',
     fontSize: 10,
     fontFamily: 'inherit',
     color: 'var(--text-muted)',
