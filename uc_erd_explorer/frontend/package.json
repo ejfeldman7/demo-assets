@@ -8,7 +8,7 @@
     "build": "tsc -b && vite build",
     "lint": "oxlint",
     "preview": "vite preview",
-    "test": "vitest run"
+    "test": "node --test \"src/**/*.test.ts\""
   },
   "dependencies": {
     "dagre": "^0.8.5",
@@ -29,7 +29,6 @@
     "oxlint": "^1.69.0",
     "playwright": "^1.61.1",
     "typescript": "~6.0.2",
-    "vite": "^8.1.0",
-    "vitest": "^3.2.7"
+    "vite": "^8.1.0"
   }
 }

@@ -21,5 +21,9 @@
     "erasableSyntaxOnly": true,
     "noFallthroughCasesInSwitch": true
   },
-  "include": ["src"]
+  "include": ["src"],
+  // Unit tests run on Node's built-in runner (`node --test`, which type-strips), not
+  // through this browser-app build. Excluding them keeps `tsc -b` (and the CI dist-check's
+  // `npm run build`) from needing @types/node just to resolve `node:test`/`node:assert`.
+  "exclude": ["src/**/*.test.ts"]
 }
