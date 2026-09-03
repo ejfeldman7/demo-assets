@@ -69,10 +69,13 @@ def get_user_email() -> Optional[str]:
 
 
 def get_admin_emails() -> set[str]:
-    """Lowercased allow-list from ERD_ADMIN_EMAILS (comma-separated). Empty set means no
-    allow-list configured -> admin actions are open (the internal-demo default; set this
-    on any shared/multi-user deployment to lock them down)."""
-    raw = os.environ.get("ERD_ADMIN_EMAILS") or ""
+    """Lowercased allow-list from ERD_ADMIN_EMAILS (comma-separated). An empty result set
+    means no restriction -> admin actions are open. "*" is the explicit open sentinel (the
+    deploy-time default, since Databricks Apps reject an empty-string env value), and a
+    bare empty string means the same; set specific emails to lock admin down."""
+    raw = (os.environ.get("ERD_ADMIN_EMAILS") or "").strip()
+    if raw in ("", "*"):
+        return set()
     return {e.strip().lower() for e in raw.split(",") if e.strip()}
 
 

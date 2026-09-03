@@ -96,11 +96,14 @@ variables:
     description: >-
       Comma-separated allow-list of user emails permitted to trigger the in-app snapshot
       refresh (the "Refresh snapshot now" button runs a Jobs run-now that spends compute).
-      Empty (default) leaves the admin action open -- fine for a single-user/internal
-      deployment where app access == trust. Set it (e.g.
+      "*" (default) leaves the admin action open to any app user -- fine for a
+      single-user/internal deployment where app access == trust. Set specific emails (e.g.
       --var="erd_admin_emails=you@example.com,teammate@example.com") on any shared,
       multi-role, or customer deployment so only listed users can trigger a refresh.
-    default: ""
+      NOTE: must stay NON-EMPTY -- an empty string renders as a null env value the
+      Databricks Apps API rejects; server/config.py's get_admin_emails() treats "*" (and
+      empty) as "no restriction".
+    default: "*"
   user_api_scopes:
     description: >-
       User authorization scopes the app requests on behalf of the logged-in user (OBO).
