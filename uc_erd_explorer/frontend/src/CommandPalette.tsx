@@ -68,7 +68,7 @@ export function CommandPalette({
 
   return (
     <div style={styles.backdrop} onMouseDown={onClose}>
-      <div style={styles.palette} onMouseDown={(e) => e.stopPropagation()} role="dialog" aria-label="Find a table">
+      <div style={styles.palette} onMouseDown={(e) => e.stopPropagation()} role="dialog" aria-modal="true" aria-label="Find a table">
         <input
           ref={inputRef}
           value={query}
@@ -79,16 +79,26 @@ export function CommandPalette({
           onKeyDown={onKeyDown}
           placeholder="Find a table by name…"
           aria-label="Quick-find a table by name"
+          // Combobox pattern so a screen reader announces the highlighted result as you
+          // arrow through it (aria-activedescendant points at the active option's id).
+          role="combobox"
+          aria-controls="cmdk-listbox"
+          aria-expanded={results.length > 0}
+          aria-autocomplete="list"
+          aria-activedescendant={results.length > 0 && active >= 0 ? `cmdk-opt-${active}` : undefined}
           style={styles.input}
         />
-        <div ref={listRef} style={styles.list}>
+        <div ref={listRef} id="cmdk-listbox" role="listbox" aria-label="Matching tables" style={styles.list}>
           {results.length === 0 ? (
             <div style={styles.empty}>No matching tables</div>
           ) : (
             results.map((r, i) => (
               <div
                 key={r.id}
+                id={`cmdk-opt-${i}`}
                 data-idx={i}
+                role="option"
+                aria-selected={i === active}
                 onMouseEnter={() => setActive(i)}
                 onMouseDown={(e) => {
                   e.preventDefault()

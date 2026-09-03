@@ -42,6 +42,7 @@ export function GroupBoxNode({ data }: NodeProps<GroupBoxData>) {
           onToggleGroup(data.id)
         }}
         title={data.collapsed ? 'Expand schema' : 'Collapse schema'}
+        aria-expanded={!data.collapsed}
         style={{
           display: 'inline-flex',
           alignItems: 'center',

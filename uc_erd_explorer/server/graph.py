@@ -57,6 +57,7 @@ from .config import (
     get_user_cache_key,
     get_warehouse_id,
 )
+from .retry import retry_transient
 
 logger = logging.getLogger("erd")
 
@@ -191,15 +192,23 @@ def _execute(statement: str, label: str = "query", timeout: str = "50s") -> sql.
     if not warehouse_id:
         raise RuntimeError("No SQL warehouse available")
     started = time.perf_counter()
-    result = client.statement_execution.execute_statement(
-        warehouse_id=warehouse_id,
-        statement=statement,
-        wait_timeout=timeout,
-        # CANCEL, not the SDK default CONTINUE: if the statement doesn't finish within
-        # `timeout`, cancel it so the state check below raises. With CONTINUE the SDK
-        # returns a still-pending response carrying no data, which _rows() would read as
-        # an empty result -- silently rendering a partial/empty graph instead of failing.
-        on_wait_timeout=sql.ExecuteStatementRequestOnWaitTimeout.CANCEL,
+    # Retry transient failures (warehouse cold-start, a momentary 429/503, a dropped
+    # connection) with backoff -- these SELECTs are idempotent, so a repeat is safe, and a
+    # blip shouldn't surface as a hard 500. A non-transient error (bad SQL, missing grant)
+    # is re-raised on the first attempt by retry_transient. Runs in a worker thread (the
+    # query pool / to_thread), so its time.sleep never blocks the event loop.
+    result = retry_transient(
+        lambda: client.statement_execution.execute_statement(
+            warehouse_id=warehouse_id,
+            statement=statement,
+            wait_timeout=timeout,
+            # CANCEL, not the SDK default CONTINUE: if the statement doesn't finish within
+            # `timeout`, cancel it so the state check below raises. With CONTINUE the SDK
+            # returns a still-pending response carrying no data, which _rows() would read as
+            # an empty result -- silently rendering a partial/empty graph instead of failing.
+            on_wait_timeout=sql.ExecuteStatementRequestOnWaitTimeout.CANCEL,
+        ),
+        label=label,
     )
     elapsed_ms = (time.perf_counter() - started) * 1000
     state = result.status.state if result.status else None

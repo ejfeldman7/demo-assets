@@ -821,6 +821,7 @@ function ErdCanvas() {
               <button
                 key={m}
                 onClick={() => setFilterMode(m)}
+                aria-pressed={filterMode === m}
                 style={sidebarRow(filterMode === m)}
               >
                 <span style={{ flex: 1 }}>
@@ -875,7 +876,7 @@ function ErdCanvas() {
           <SectionLabel>Layout</SectionLabel>
           <div style={styles.card}>
             {(['LR', 'TB'] as LayoutDirection[]).map((d) => (
-              <button key={d} onClick={() => setLayoutDir(d)} style={sidebarRow(layoutDir === d)}>
+              <button key={d} onClick={() => setLayoutDir(d)} aria-pressed={layoutDir === d} style={sidebarRow(layoutDir === d)}>
                 <span style={{ flex: 1 }}>{d === 'LR' ? 'Left → right' : 'Top → bottom'}</span>
                 {layoutDir === d && <span style={styles.check}>✓</span>}
               </button>
@@ -899,6 +900,7 @@ function ErdCanvas() {
                 <button
                   key={g}
                   onClick={() => setGroupBy(g)}
+                  aria-pressed={groupBy === g}
                   style={{ ...sidebarRow(groupBy === g), flex: 1, justifyContent: 'center' }}
                 >
                   {label}
