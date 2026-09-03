@@ -163,6 +163,9 @@ function ErdCanvas() {
     // silently highlighting same-named tables the user never picked here).
     setTraceFrom(null)
     setTraceTo(null)
+    // Fresh data scope -> fresh view: clear any schema collapses (they name schemas in the
+    // OLD scope, and a schema the user just picked shouldn't load collapsed/empty).
+    setCollapsedGroups(new Set())
 
     // An explicit, empty selection (nothing checked) means "show nothing" -- not the
     // same as null ("All"). The backend has no way to express "no pairs = empty" (a bare
@@ -523,6 +526,10 @@ function ErdCanvas() {
 
   const onNodeClick: NodeMouseHandler = useCallback(
     (_, node) => {
+      // Group boxes collapse via their own header button; a click anywhere else on the box
+      // must be ignored. (They carry no `columns`, so without this they'd fall into the
+      // schema-summary branch below and get sent to /api/graph as a bogus pair.)
+      if (node.type === 'groupBox') return
       const data = node.data as TableNodeData | SchemaNodeData
       if (isSchemaNodeData(data)) {
         // "Expand" a collapsed schema node by selecting just that schema in the tree
