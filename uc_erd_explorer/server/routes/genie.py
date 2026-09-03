@@ -17,7 +17,7 @@ import time
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, Field, field_validator
 
 from ..config import get_genie_space_id, get_workspace_client
 
@@ -33,7 +33,9 @@ _UUID_RE = re.compile(r"^[0-9a-fA-F-]{1,64}$")
 
 
 class AskRequest(BaseModel):
-    message: str
+    # Bounded so a client can't post an unbounded blob (each ask spends a Genie/warehouse
+    # call); 4000 chars is far more than any real schema question.
+    message: str = Field(min_length=1, max_length=4000)
     conversation_id: Optional[str] = None
 
     @field_validator("conversation_id")
