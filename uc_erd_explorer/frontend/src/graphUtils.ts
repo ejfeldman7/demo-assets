@@ -4,13 +4,17 @@ import type { GraphEdge, SchemaNodeData, TableNodeData } from './types'
 // row per column; a collapsed schema card is a fixed size). Consumed by the ELK layout
 // (elkLayout.ts) to give each node a footprint, and re-attached to the laid-out node so
 // getNodesBounds() (the PNG/SVG export) has a real box per node, not just a point.
+// Calibrated against the actual rendered card (TableNode): a column row measures ~25px
+// and the header+card chrome ~36px. These MUST NOT under-estimate -- ELK spaces nodes by
+// their declared box, so an under-estimate lets tall cards overlap their neighbors (the
+// reported bug). A few px of headroom is harmless (it only adds gap).
 const NODE_WIDTH = 240
-const ROW_HEIGHT = 22
-const HEADER_HEIGHT = 40
-const TAGS_ROW_HEIGHT = 28
-const CARD_PADDING = 12
+const ROW_HEIGHT = 25
+const HEADER_HEIGHT = 36
+const TAGS_ROW_HEIGHT = 30
+const CARD_PADDING = 4
 const SCHEMA_NODE_WIDTH = 220
-const SCHEMA_NODE_HEIGHT = 84
+const SCHEMA_NODE_HEIGHT = 88
 
 function isSchemaNode(data: TableNodeData | SchemaNodeData): data is SchemaNodeData {
   return !('columns' in data)
