@@ -21,7 +21,8 @@ import { GeniePanel } from './GeniePanel'
 import { InfoPanel } from './InfoPanel'
 import { AdminPanel } from './AdminPanel'
 import { CatalogSchemaPicker } from './CatalogSchemaPicker'
-import { connectedComponent, directNeighbors, layoutGraph } from './graphUtils'
+import { connectedComponent, directNeighbors } from './graphUtils'
+import { layoutGraphElk, type LayoutDirection } from './elkLayout'
 import {
   activeEdgeIds,
   computeEdgeVisual,
@@ -88,6 +89,9 @@ function ErdCanvas() {
   const [keysOnly, setKeysOnly] = useState(false)
   const [erStudioDialect, setErStudioDialect] = useState<Dialect>('sqlserver')
   const [paletteOpen, setPaletteOpen] = useState(false)
+  // ELK layout flow direction: 'LR' (left-to-right, default -- reads best for these wide
+  // column-listing cards) or 'TB' (top-to-bottom).
+  const [layoutDir, setLayoutDir] = useState<LayoutDirection>('LR')
 
   const { fitView, setCenter, getNode } = useReactFlow()
   const laidOutRef = useRef<Node<TableNodeData | SchemaNodeData>[]>([])
@@ -202,10 +206,11 @@ function ErdCanvas() {
     [],
   )
 
-  // Base (laid-out) nodes + edges derived from the loaded graph.
-  const { baseNodes, baseEdges } = useMemo(() => {
+  // Un-positioned nodes + edges derived from the loaded graph (synchronous). ELK then
+  // positions them asynchronously in the effect below -> baseNodes state.
+  const { rawNodes, baseEdges } = useMemo(() => {
     if (!graph) {
-      return { baseNodes: [] as Node<TableNodeData | SchemaNodeData>[], baseEdges: [] as Edge[] }
+      return { rawNodes: [] as Node<TableNodeData | SchemaNodeData>[], baseEdges: [] as Edge[] }
     }
 
     // "Keys only" filters each table's columns to PK/FK before layout, so node heights
@@ -277,10 +282,33 @@ function ErdCanvas() {
       },
     }))
 
-    const laidOut = layoutGraph(rawNodes, edges)
-    laidOutRef.current = laidOut
-    return { baseNodes: laidOut, baseEdges: edges }
+    return { rawNodes, baseEdges: edges }
   }, [graph, scopedGraphEdges, keysOnly])
+
+  // Positioned nodes, produced by ELK's async layout. Re-run whenever the raw nodes,
+  // edges, or flow direction change. A cancel flag guards against an out-of-order result
+  // from a superseded layout (e.g. rapid keysOnly/direction toggles) overwriting a newer one.
+  const [baseNodes, setBaseNodes] = useState<Node<TableNodeData | SchemaNodeData>[]>([])
+  useEffect(() => {
+    let cancelled = false
+    if (rawNodes.length === 0) {
+      laidOutRef.current = []
+      setBaseNodes([])
+      return
+    }
+    layoutGraphElk(rawNodes, baseEdges, layoutDir)
+      .then((laid) => {
+        if (cancelled) return
+        laidOutRef.current = laid
+        setBaseNodes(laid)
+      })
+      .catch((e) => {
+        if (!cancelled) setError((e as Error).message)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [rawNodes, baseEdges, layoutDir])
 
   // Compute the currently-visible set based on selection + mode.
   const visibleSet = useMemo<Set<string> | null>(() => {
@@ -584,6 +612,20 @@ function ErdCanvas() {
             >
               Reset view
             </button>
+          </div>
+
+          <SectionLabel>Layout</SectionLabel>
+          <div style={styles.card}>
+            {(['LR', 'TB'] as LayoutDirection[]).map((d) => (
+              <button key={d} onClick={() => setLayoutDir(d)} style={sidebarRow(layoutDir === d)}>
+                <span style={{ flex: 1 }}>{d === 'LR' ? 'Left → right' : 'Top → bottom'}</span>
+                {layoutDir === d && <span style={styles.check}>✓</span>}
+              </button>
+            ))}
+            <div style={styles.hint}>
+              Auto-arranged with ELK. Left → right suits these wide table cards; top → bottom
+              stacks them vertically.
+            </div>
           </div>
 
           <SectionLabel>Columns</SectionLabel>
