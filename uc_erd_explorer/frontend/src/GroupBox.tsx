@@ -42,6 +42,7 @@ export function GroupBoxNode({ data }: NodeProps<GroupBoxData>) {
           onToggleGroup(data.id)
         }}
         title={data.collapsed ? 'Expand schema' : 'Collapse schema'}
+        aria-expanded={!data.collapsed}
         style={{
           display: 'inline-flex',
           alignItems: 'center',
@@ -59,6 +60,9 @@ export function GroupBoxNode({ data }: NodeProps<GroupBoxData>) {
           cursor: 'pointer',
           maxWidth: 'calc(100% - 16px)',
           overflow: 'hidden',
+          // The group box node is pointerEvents:none (so it doesn't swallow edge hover under
+          // it -- see App.tsx); re-enable events here so the collapse header stays clickable.
+          pointerEvents: 'auto',
         }}
       >
         <span aria-hidden style={{ opacity: 0.9 }}>{data.collapsed ? '▸' : '▾'}</span>

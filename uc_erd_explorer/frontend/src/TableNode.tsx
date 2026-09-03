@@ -283,6 +283,7 @@ export function TableNode({ id, data }: TableNodeProps) {
             onToggleExpand(id)
           }}
           title={data.expanded ? 'Collapse to the capped view' : 'Show all columns'}
+          aria-expanded={data.expanded}
           style={{
             width: '100%',
             border: 'none',

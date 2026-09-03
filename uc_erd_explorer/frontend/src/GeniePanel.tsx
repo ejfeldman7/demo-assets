@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { askGenie } from './api'
 
 interface ChatMessage {
@@ -21,6 +21,13 @@ export function GeniePanel() {
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [busy, setBusy] = useState(false)
   const [conversationId, setConversationId] = useState<string | undefined>()
+  const inputRef = useRef<HTMLInputElement>(null)
+
+  // Move focus into the panel's input when it opens (keyboard users land where they can
+  // act, not back at the FAB); focus after paint so the input is visible/focusable.
+  useEffect(() => {
+    if (open) requestAnimationFrame(() => inputRef.current?.focus())
+  }, [open])
 
   async function send() {
     const text = input.trim()
@@ -71,8 +78,15 @@ export function GeniePanel() {
         <span style={{ fontSize: 16 }}>✦</span> Ask Genie
       </button>
 
-      {/* Right-side slide-in panel */}
+      {/* Right-side slide-in panel. `inert` when closed removes its input/Send/Close from
+          the tab order and the accessibility tree while it's slid off-screen -- otherwise a
+          keyboard/screen-reader user would tab into an invisible panel. role="dialog" +
+          aria-label name it; it's a non-modal side panel (the canvas stays usable), so no
+          aria-modal. */}
       <div
+        role="dialog"
+        aria-label="Ask Genie"
+        inert={!open}
         style={{
           position: 'fixed',
           top: 0,
@@ -110,7 +124,7 @@ export function GeniePanel() {
           </div>
           <button
             onClick={() => setOpen(false)}
-            aria-label="Close"
+            aria-label="Close Genie panel"
             style={{
               border: 'none',
               background: 'rgba(255,255,255,0.12)',
@@ -127,7 +141,16 @@ export function GeniePanel() {
           </button>
         </div>
 
-        <div style={{ flex: 1, overflowY: 'auto', padding: 14, background: 'var(--bg)' }}>
+        <div
+          // Live region so a screen reader announces Genie's answers as they arrive
+          // (polite = after the user's current utterance). additions-only so re-renders of
+          // existing messages aren't re-read.
+          role="log"
+          aria-live="polite"
+          aria-relevant="additions"
+          aria-label="Conversation with Genie"
+          style={{ flex: 1, overflowY: 'auto', padding: 14, background: 'var(--bg)' }}
+        >
           {messages.length === 0 && (
             <div
               style={{
@@ -187,6 +210,7 @@ export function GeniePanel() {
           }}
         >
           <input
+            ref={inputRef}
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={(e) => e.key === 'Enter' && send()}

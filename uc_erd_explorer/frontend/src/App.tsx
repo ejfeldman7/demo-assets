@@ -493,7 +493,14 @@ function ErdCanvas() {
       position: { x: g.x, y: g.y },
       width: g.width,
       height: g.height,
-      style: { width: g.width, height: g.height },
+      // pointerEvents 'none': the group box is a background container that spans its whole
+      // area in the nodes layer, which paints ABOVE the edges layer -- with default
+      // pointer-events it swallows hover/click on every edge (and the empty space) under it,
+      // so edge-hover-to-reveal-join-keys silently died inside any group. Making it
+      // non-interactive lets those events fall through to the edges beneath; the collapse
+      // header re-enables pointer events on itself (see GroupBox.tsx). The table cards inside
+      // are their own nodes with their own pointer events, so they stay fully interactive.
+      style: { width: g.width, height: g.height, pointerEvents: 'none' },
       selectable: false,
       draggable: false,
       zIndex: 0,
@@ -821,6 +828,7 @@ function ErdCanvas() {
               <button
                 key={m}
                 onClick={() => setFilterMode(m)}
+                aria-pressed={filterMode === m}
                 style={sidebarRow(filterMode === m)}
               >
                 <span style={{ flex: 1 }}>
@@ -875,7 +883,7 @@ function ErdCanvas() {
           <SectionLabel>Layout</SectionLabel>
           <div style={styles.card}>
             {(['LR', 'TB'] as LayoutDirection[]).map((d) => (
-              <button key={d} onClick={() => setLayoutDir(d)} style={sidebarRow(layoutDir === d)}>
+              <button key={d} onClick={() => setLayoutDir(d)} aria-pressed={layoutDir === d} style={sidebarRow(layoutDir === d)}>
                 <span style={{ flex: 1 }}>{d === 'LR' ? 'Left → right' : 'Top → bottom'}</span>
                 {layoutDir === d && <span style={styles.check}>✓</span>}
               </button>
@@ -899,6 +907,7 @@ function ErdCanvas() {
                 <button
                   key={g}
                   onClick={() => setGroupBy(g)}
+                  aria-pressed={groupBy === g}
                   style={{ ...sidebarRow(groupBy === g), flex: 1, justifyContent: 'center' }}
                 >
                   {label}

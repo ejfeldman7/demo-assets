@@ -108,6 +108,30 @@
   box-sizing: border-box;
 }
 
+/* Keyboard focus ring. :focus-visible only paints for keyboard/AT navigation, not on a
+   mouse click, so the many controls that set `outline: none` inline for aesthetics still
+   get a clear, consistent focus indicator when tabbed to. !important so it beats those
+   inline `outline: none` declarations. */
+:focus-visible {
+  outline: 2px solid var(--db-blue) !important;
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+/* Respect the OS "reduce motion" setting: neutralize transitions/animations (the Genie
+   panel slide-in, node hover fades, the sidebar toggle) for users who get motion sick or
+   have vestibular disorders. Near-zero rather than 0 so transitionend still fires. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
 html,
 body,
 #root {

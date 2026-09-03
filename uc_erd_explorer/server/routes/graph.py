@@ -12,6 +12,7 @@ from ..config import (
     set_user_context,
 )
 from ..graph import build_graph, list_catalog_schemas
+from ..ratelimit import graph_rate_limit
 
 
 async def _capture_user(request: Request):
@@ -44,7 +45,7 @@ _ENV_QUERY = Query(
 )
 
 
-@router.get("/graph")
+@router.get("/graph", dependencies=[Depends(graph_rate_limit)])
 async def get_graph(
     pairs: Optional[str] = Query(
         default=None,
@@ -81,7 +82,7 @@ async def get_graph(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/schema-tree")
+@router.get("/schema-tree", dependencies=[Depends(graph_rate_limit)])
 async def get_schema_tree(response: Response, env: str = _ENV_QUERY):
     """Enumerate catalog -> [schema, ...] for the frontend's catalog/schema tree picker,
     without fetching the full graph."""

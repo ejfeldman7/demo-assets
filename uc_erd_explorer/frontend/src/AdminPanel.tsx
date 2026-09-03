@@ -104,8 +104,8 @@ export function AdminPanel() {
       </button>
 
       {open && (
-        <div style={styles.overlay} onClick={() => setOpen(false)}>
-          <div style={styles.modal} onClick={(e) => e.stopPropagation()}>
+        <div style={styles.overlay} onClick={() => setOpen(false)} onKeyDown={(e) => e.key === 'Escape' && setOpen(false)}>
+          <div style={styles.modal} onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true" aria-label="Metadata snapshot settings">
             <div style={styles.header}>
               <div>
                 <div style={styles.title}>Metadata snapshot</div>

@@ -352,6 +352,8 @@ the notebook re-run) to catch up.
 | `erd_cache_ttl_seconds` | `ERD_CACHE_TTL_SECONDS` | `3600` | How long `/api/graph` results are cached in-memory before re-querying the metadata source |
 | `erd_schema_collapse_threshold` | `ERD_SCHEMA_COLLAPSE_THRESHOLD` | `80` | Table count above which the ERD defaults to one node per schema (click to expand); `0` always renders full detail |
 | `erd_test_catalog_suffix` | `ERD_TEST_CATALOG_SUFFIX` | `_ts` | Suffix appended to each `erd_catalogs` entry when the frontend's Prod/Test toggle is set to Test (e.g. `edp_customer` → `edp_customer_ts`) |
+| `erd_rate_limit_per_min` | `ERD_RATE_LIMIT_PER_MIN` | `120` | Max `/api/graph` + `/api/schema-tree` requests per minute **per identity** (user email in OBO, else client IP) before `429`; `0` disables. In-process (per container). See "Abuse protection" below |
+| `erd_genie_rate_limit_per_min` | `ERD_GENIE_RATE_LIMIT_PER_MIN` | `20` | Max `/api/genie/ask` requests per minute per identity before `429` — tighter, since each ask spends a Genie call; `0` disables |
 | `auth_mode` | `ERD_AUTH_MODE` | `service_principal` | Which identity the ERD queries run as. `service_principal` (default) queries as the app's own SP, bounded by `erd_catalogs`. `on_behalf_of_user` queries as the **logged-in user**, filtered by their own UC privileges — see "On-behalf-of-user authorization" below |
 | `user_api_scopes` | *(app config, not an env var)* | `[]` | User authorization scopes the app requests for OBO; set to `["sql"]` for `on_behalf_of_user`. A **complex** (list) value the CLI can't set via `--var`, so it's declared at the bundle **target** level — see below |
 
@@ -497,7 +499,28 @@ runs as the user.
 
 **Genie stays on the service principal** in both modes — the chat proxy isn't part of OBO,
 and its scoped views still need the SP granted on `erd_metadata_location` (the deploy
-handles this).
+handles this). This is a **deliberate, bounded scoping decision**, not an oversight: in OBO
+mode the ERD graph is privilege-filtered per user, but Genie answers over the 3 narrow
+pre-scoped metadata views (`setup/create_scoped_views.py`), which expose only object
+**names / comments / tags** — schema shape, never row data — so running them as the shared
+SP leaks no customer data. Routing Genie under each user's token instead would require
+granting every end user `SELECT` on the views plus Genie Space access and is fragile through
+the conversations API — not worth it for a metadata side panel. If a future deployment
+genuinely needs Genie scoped per user, **hide the panel in OBO mode** rather than
+half-scoping it (see the note in `server/routes/genie.py`).
+
+### Abuse protection (rate limiting)
+
+The warehouse-backed endpoints are rate-limited per identity (logged-in user email in OBO,
+else client IP) so a runaway client — a tight retry loop, a refresh-happy tab — can't rack
+up warehouse/Genie compute: `ERD_RATE_LIMIT_PER_MIN` (default 120/min) caps `/api/graph` +
+`/api/schema-tree`, and `ERD_GENIE_RATE_LIMIT_PER_MIN` (default 20/min) caps `/api/genie/ask`
+(tighter, since each ask spends a Genie + warehouse round-trip). Past the cap the app
+returns `429` with a `Retry-After` header. Set either to `0` to disable. Counters are
+**in-process** — a Databricks App runs as a single container, so this is effectively
+app-wide; if ever scaled to multiple replicas the limit becomes per-replica. Transient
+warehouse/Genie failures (cold-start, a momentary 429/503, a dropped connection) are also
+retried with jittered backoff (`server/retry.py`) so a blip doesn't surface as a hard 500.
 
 ## Permissions
 
