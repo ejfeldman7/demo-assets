@@ -23,7 +23,7 @@ import { AdminPanel } from './AdminPanel'
 import { ThemeToggle, useResolvedDark } from './ThemeToggle'
 import { CatalogSchemaPicker } from './CatalogSchemaPicker'
 import { COLUMN_CAP, ROW_HEIGHT, connectedComponent, directNeighbors, nodeSize, shortestPath, visibleColumns } from './graphUtils'
-import { layoutGraphElk, type LayoutDirection } from './elkLayout'
+import { layoutGraphElk, type GroupBy, type LayoutDirection } from './elkLayout'
 import {
   activeEdgeIds,
   computeEdgeVisual,
@@ -103,9 +103,9 @@ function ErdCanvas() {
   // Tables whose full column list is expanded (past the COLUMN_CAP row cap). Per-table so
   // an analyst can pin a wide fact table open while everything else stays compact.
   const [expandedTables, setExpandedTables] = useState<Set<string>>(new Set())
-  // "Group by schema": cluster tables into a labeled box per catalog.schema (ELK compound
-  // layout). Off by default -- the flat view is the baseline.
-  const [groupBySchema, setGroupBySchema] = useState(false)
+  // Grouping dimension: 'none' (flat, the baseline), 'schema' (a box per catalog.schema),
+  // or 'catalog' (a box per catalog -- for multi-catalog overviews). ELK compound layout.
+  const [groupBy, setGroupBy] = useState<GroupBy>('none')
   const [groupBoxes, setGroupBoxes] = useState<GroupBox[]>([])
   // Collapsed schema group ids ("group:catalog.schema") -- their tables are hidden.
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set())
@@ -371,7 +371,7 @@ function ErdCanvas() {
       }
       const gen = ++layoutGenRef.current
       if (!fit) skipFitRef.current = true
-      layoutGraphElk(nodes, baseEdgesRef.current, layoutDir, groupBySchema, collapsedGroups)
+      layoutGraphElk(nodes, baseEdgesRef.current, layoutDir, groupBy, collapsedGroups)
         .then((r) => {
           if (gen !== layoutGenRef.current) return
           laidOutRef.current = r.nodes
@@ -382,7 +382,7 @@ function ErdCanvas() {
           if (gen === layoutGenRef.current) setError((e as Error).message)
         })
     },
-    [layoutDir, groupBySchema, collapsedGroups],
+    [layoutDir, groupBy, collapsedGroups],
   )
 
   // Structural re-layout: new graph, keys-only, inferred toggle, direction, grouping
@@ -405,7 +405,7 @@ function ErdCanvas() {
     // Only a single-table toggle acts; bulk/none changes (e.g. a graph reload) fall through
     // to the fresh layout the structural effect produced.
     if (added.length + removed.length !== 1) return
-    if (groupBySchema) {
+    if (groupBy !== 'none') {
       runLayout(false) // re-cluster so the schema box grows/shrinks with the table
       return
     }
@@ -439,7 +439,7 @@ function ErdCanvas() {
         return inLane(n) ? { ...n, position: { x: n.position.x, y: n.position.y + shift } } : n
       })
     })
-  }, [expandedTables, layoutDir, groupBySchema, runLayout])
+  }, [expandedTables, layoutDir, groupBy, runLayout])
 
   // Compute the currently-visible set based on selection + mode.
   // The shortest join path between the two chosen endpoints (tracing mode), or null.
@@ -859,15 +859,33 @@ function ErdCanvas() {
               Auto-arranged with ELK. Left → right suits these wide table cards; top → bottom
               stacks them vertically.
             </div>
-            <Switch
-              label="Group by schema"
-              checked={groupBySchema}
-              onChange={() => setGroupBySchema((v) => !v)}
-            />
+          </div>
+
+          <SectionLabel>Group by</SectionLabel>
+          <div style={styles.card}>
+            <div style={{ display: 'flex', gap: 4 }}>
+              {(
+                [
+                  ['none', 'None'],
+                  ['schema', 'Schema'],
+                  ['catalog', 'Catalog'],
+                ] as [GroupBy, string][]
+              ).map(([g, label]) => (
+                <button
+                  key={g}
+                  onClick={() => setGroupBy(g)}
+                  style={{ ...sidebarRow(groupBy === g), flex: 1, justifyContent: 'center' }}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
             <div style={styles.hint}>
-              {groupBySchema
-                ? 'Tables are clustered into a labeled box per catalog.schema.'
-                : 'Cluster tables into a container per catalog.schema.'}
+              {groupBy === 'none'
+                ? 'Cluster tables into a labeled box per schema, or per catalog for a multi-catalog overview.'
+                : groupBy === 'schema'
+                  ? 'A box per catalog.schema. Click a box header to collapse that schema.'
+                  : 'A box per catalog (all its schemas together). Click a box header to collapse it.'}
             </div>
           </div>
 

@@ -63,6 +63,9 @@ function getElk(): Promise<ElkInstance> {
 // not its edge routes.
 
 export type LayoutDirection = 'LR' | 'TB'
+// How tables are clustered into boxes: not at all, one box per catalog.schema, or one
+// box per catalog (all its schemas' tables together -- for multi-catalog overviews).
+export type GroupBy = 'none' | 'schema' | 'catalog'
 
 const LAYOUT_OPTIONS: Record<string, string> = {
   'elk.algorithm': 'layered',
@@ -82,7 +85,7 @@ export async function layoutGraphElk(
   nodes: Node<TableNodeData | SchemaNodeData>[],
   edges: Edge[],
   direction: LayoutDirection,
-  groupBySchema = false,
+  groupBy: GroupBy = 'none',
   collapsed: Set<string> = new Set(),
 ): Promise<LayoutResult> {
   if (nodes.length === 0) return { nodes: [], groups: [] }
@@ -106,7 +109,7 @@ export async function layoutGraphElk(
       return { ...n, sourcePosition, targetPosition, width, height, position: p }
     })
 
-  if (!groupBySchema) {
+  if (groupBy === 'none') {
     const graph = {
       id: 'root',
       layoutOptions: { ...LAYOUT_OPTIONS, 'elk.direction': dir },
@@ -130,7 +133,11 @@ export async function layoutGraphElk(
   const byGroup = new Map<string, Node<TableNodeData | SchemaNodeData>[]>()
   const groupIdOf = new Map<string, string>() // table id -> its group id
   for (const n of nodes) {
-    const key = 'columns' in n.data ? `${n.data.catalog}.${n.data.schema}` : `__ungrouped.${n.id}`
+    const key = !('columns' in n.data)
+      ? `__ungrouped.${n.id}`
+      : groupBy === 'catalog'
+        ? n.data.catalog
+        : `${n.data.catalog}.${n.data.schema}`
     let list = byGroup.get(key)
     if (!list) byGroup.set(key, (list = []))
     list.push(n)

@@ -63,7 +63,7 @@ export function GroupBoxNode({ data }: NodeProps<GroupBoxData>) {
       >
         <span aria-hidden style={{ opacity: 0.9 }}>{data.collapsed ? '▸' : '▾'}</span>
         <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>
-          {data.catalog}.{data.schema}
+          {data.schema ? `${data.catalog}.${data.schema}` : data.catalog}
         </span>
         <span style={{ opacity: 0.75, fontWeight: 600 }}>· {data.count}</span>
       </button>
