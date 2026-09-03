@@ -1,0 +1,16 @@
+import { createContext } from 'react'
+import type { HoveredKey } from './edgeDisplay'
+
+// Lets a TableNode report which PK/FK column the pointer is over, without threading
+// callbacks through React Flow node `data` (which would churn every node's data object on
+// each hover). The setters here are stable (useCallback in App), so providing them via
+// context re-renders nothing on its own -- only the resulting highlight/label state does.
+export interface ErdInteraction {
+  onKeyEnter: (key: HoveredKey) => void
+  onKeyLeave: () => void
+}
+
+export const ErdInteractionContext = createContext<ErdInteraction>({
+  onKeyEnter: () => {},
+  onKeyLeave: () => {},
+})

@@ -4,7 +4,6 @@ import ReactFlow, {
   Background,
   Controls,
   MiniMap,
-  MarkerType,
   Panel,
   ReactFlowProvider,
   useReactFlow,
@@ -23,6 +22,13 @@ import { InfoPanel } from './InfoPanel'
 import { AdminPanel } from './AdminPanel'
 import { CatalogSchemaPicker } from './CatalogSchemaPicker'
 import { connectedComponent, directNeighbors, layoutGraph } from './graphUtils'
+import {
+  activeEdgeIds,
+  computeEdgeVisual,
+  highlightedColumnsByNode,
+  type HoveredKey,
+} from './edgeDisplay'
+import { ErdInteractionContext } from './erdContext'
 // Only the ExportScope type is imported eagerly (types are erased at build time, so this
 // pulls no code). The export implementation -- which drags in html-to-image, js-yaml and
 // fflate (~hundreds of KB) -- is dynamically imported inside the export handlers, so it's
@@ -62,9 +68,12 @@ function ErdCanvas() {
   // null = "All" -- no filter, everything in scope.
   const [selectedPairs, setSelectedPairs] = useState<Set<string> | null>(null)
   const [selectedId, setSelectedId] = useState<string | null>(null)
-  // Which edge the cursor is over -- its relationship label shows on hover (labels are
-  // otherwise hidden to keep the canvas uncluttered; see RelationshipEdge.tsx).
+  // Transient hover state -- what the pointer is currently over. Either a relationship edge
+  // or a PK/FK key column reveals that relationship's join-key detail and highlights the
+  // two columns it connects. Cleared on mouse-out; never persisted (clicking a table
+  // focuses it but does NOT reveal labels -- see displayEdges).
   const [hoveredEdgeId, setHoveredEdgeId] = useState<string | null>(null)
+  const [hoveredKey, setHoveredKey] = useState<HoveredKey | null>(null)
   const [filterMode, setFilterMode] = useState<FilterMode>('neighbors')
   const [search, setSearch] = useState('')
   // Heuristic undeclared-relationship edges are always fetched but hidden by default,
@@ -121,6 +130,8 @@ function ErdCanvas() {
     let cancelled = false
     setError(null)
     setSelectedId(null)
+    setHoveredEdgeId(null)
+    setHoveredKey(null)
 
     // An explicit, empty selection (nothing checked) means "show nothing" -- not the
     // same as null ("All"). The backend has no way to express "no pairs = empty" (a bare
@@ -168,6 +179,24 @@ function ErdCanvas() {
   const scopedGraphEdges = useMemo(
     () => (graph ? graph.edges.filter((e) => showInferred || !e.inferred) : []),
     [graph, showInferred],
+  )
+
+  // The relationship(s) whose detail is revealed right now -- driven purely by transient
+  // hover (a hovered edge, or a hovered PK/FK key column), never by selection.
+  const activeEdgeSet = useMemo(
+    () => activeEdgeIds(hoveredEdgeId, hoveredKey, scopedGraphEdges),
+    [hoveredEdgeId, hoveredKey, scopedGraphEdges],
+  )
+  // Columns to highlight on both endpoints of each active edge (matching-column highlight).
+  const highlightColsByNode = useMemo(
+    () => highlightedColumnsByNode(activeEdgeSet, scopedGraphEdges),
+    [activeEdgeSet, scopedGraphEdges],
+  )
+
+  // Stable interaction handlers passed to table nodes via context (see erdContext.ts).
+  const interaction = useMemo(
+    () => ({ onKeyEnter: (key: HoveredKey) => setHoveredKey(key), onKeyLeave: () => setHoveredKey(null) }),
+    [],
   )
 
   // Base (laid-out) nodes + edges derived from the loaded graph.
@@ -223,10 +252,14 @@ function ErdCanvas() {
       // those edges fall back to the SchemaNode's default centered handle (undefined).
       sourceHandle: graph.view === 'detail' ? e.fk_columns[0] : undefined,
       targetHandle: graph.view === 'detail' ? e.pk_columns[0] : undefined,
-      data: { inferred: e.inferred },
-      label: e.inferred
-        ? `${e.fk_columns.join(', ')} → ${e.pk_columns.join(', ')} (inferred)`
-        : `${e.fk_columns.join(', ')} → ${e.pk_columns.join(', ')}`,
+      // Structured join columns (not a pre-joined string) so RelationshipEdge can reflow a
+      // long/composite mapping onto stacked lines, and draw crow's-foot cardinality (the
+      // FK/source end is "many", the PK/target end is "one").
+      data: {
+        inferred: e.inferred,
+        fkCols: e.fk_columns,
+        pkCols: e.pk_columns,
+      },
       // Custom type, not the built-in 'smoothstep' -- its label renders through
       // EdgeLabelRenderer (a layer above nodes) instead of inline SVG <text> (a layer
       // below nodes), so labels aren't hidden under table cards. See RelationshipEdge.tsx.
@@ -234,12 +267,6 @@ function ErdCanvas() {
       // Inferred edges render above declared ones so a dashed line that happens to
       // overlap a solid one is never fully hidden underneath it.
       zIndex: e.inferred ? 1 : 0,
-      markerEnd: {
-        type: MarkerType.ArrowClosed,
-        width: 16,
-        height: 16,
-        color: e.inferred ? 'var(--db-red)' : '#98a2b3',
-      },
       style: {
         stroke: e.inferred ? 'var(--db-red)' : '#98a2b3',
         strokeWidth: e.inferred ? 2 : 1.5,
@@ -269,32 +296,31 @@ function ErdCanvas() {
         dimmed: visibleSet ? !visibleSet.has(n.id) : false,
         selected: n.id === selectedId,
         color: lookupCatalogColor(catalogColorMap, n.data.catalog),
+        highlightedCols: highlightColsByNode.get(n.id),
       },
     }))
-  }, [baseNodes, visibleSet, selectedId, catalogColorMap])
+  }, [baseNodes, visibleSet, selectedId, catalogColorMap, highlightColsByNode])
 
   const displayEdges = useMemo<Edge[]>(() => {
+    const hasSelection = Boolean(selectedId)
     return baseEdges.map((e) => {
-      const inSet =
-        !visibleSet || (visibleSet.has(e.source) && visibleSet.has(e.target))
       const inferred = Boolean((e.data as { inferred?: boolean } | undefined)?.inferred)
-      // Show the column-mapping label when this edge is hovered, or when a table is
-      // focused (a click-to-filter selection) and this edge is part of it -- so focusing
-      // a table reveals all its relationships' columns at once, while the default view
-      // stays clean.
-      const showLabel = e.id === hoveredEdgeId || (Boolean(selectedId) && inSet)
+      // Label visibility is HOVER-ONLY (computeEdgeVisual reads activeEdgeSet, not
+      // selection): clicking a table focuses it but no longer paints its join-key labels
+      // persistently -- the core behavior change from the review.
+      const v = computeEdgeVisual({ edge: e, active: activeEdgeSet, visibleSet, hasSelection })
       return {
         ...e,
-        data: { ...(e.data as object), showLabel },
+        data: { ...(e.data as object), showLabel: v.showLabel },
         style: {
           ...e.style,
-          opacity: inSet ? 1 : 0.1,
-          stroke: inSet ? (inferred ? 'var(--db-red)' : '#98a2b3') : '#e4e7ec',
+          opacity: v.opacity,
+          stroke: v.dimmed ? '#e4e7ec' : inferred ? 'var(--db-red)' : '#98a2b3',
         },
-        animated: Boolean(selectedId) && inSet,
+        animated: v.animated,
       }
     })
-  }, [baseEdges, visibleSet, selectedId, hoveredEdgeId])
+  }, [baseEdges, visibleSet, selectedId, activeEdgeSet])
 
   const onNodeClick: NodeMouseHandler = useCallback((_, node) => {
     const data = node.data as TableNodeData | SchemaNodeData
@@ -408,6 +434,7 @@ function ErdCanvas() {
   }, [graph])
 
   return (
+    <ErdInteractionContext.Provider value={interaction}>
     <div style={styles.app}>
       {/* Top bar */}
       <header style={styles.topbar}>
@@ -669,6 +696,7 @@ function ErdCanvas() {
 
       <GeniePanel />
     </div>
+    </ErdInteractionContext.Provider>
   )
 }
 

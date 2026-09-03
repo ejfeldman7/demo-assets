@@ -34,7 +34,11 @@ export function layoutGraph(
   edges: Edge[],
 ): Node<TableNodeData | SchemaNodeData>[] {
   const g = new dagre.graphlib.Graph()
-  g.setGraph({ rankdir: 'LR', nodesep: 40, ranksep: 90, marginx: 20, marginy: 20 })
+  // Loosened spacing so adjacent cards don't crowd and a hovered relationship's detail box
+  // has room to sit between tables without overhanging a neighbor (part of the overlap fix
+  // from the review). nodesep = gap between cards in the same rank; ranksep = gap between
+  // ranks (columns, since rankdir is LR).
+  g.setGraph({ rankdir: 'LR', nodesep: 70, ranksep: 130, marginx: 24, marginy: 24 })
   g.setDefaultEdgeLabel(() => ({}))
 
   nodes.forEach((n) => {

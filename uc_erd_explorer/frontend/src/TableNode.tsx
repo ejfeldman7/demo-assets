@@ -1,7 +1,44 @@
-import { useEffect, useMemo } from 'react'
+import { useContext, useEffect, useMemo } from 'react'
 import { Handle, Position, useUpdateNodeInternals, type NodeProps } from 'reactflow'
 import type { ColorPair } from './catalogColors'
+import { ErdInteractionContext } from './erdContext'
 import type { ColumnMeta, TableNodeData, TagValue } from './types'
+
+// A small key glyph, matching Databricks Catalog Explorer's use of a key icon for PK/FK
+// columns (instead of text "PK"/"FK" badges). Color-coded gold (PK) / blue (FK), but the
+// distinction is never color-only: each carries a title + aria-label naming the key type.
+function KeyIcon({ kind }: { kind: 'pk' | 'fk' }) {
+  // PK = gold, FK = blue. The gold is deliberately a true amber-gold (#ca8a04), NOT the
+  // red-orange it used to be (#b54708) -- that read as red and clashed with the red brand
+  // accent, the red inferred edges, and red-family catalog headers. #ca8a04 clears the 3:1
+  // non-text contrast bar on white, and PK vs FK is also cued by shape (filled vs outline),
+  // never by color alone.
+  const color = kind === 'pk' ? '#ca8a04' : '#175cd3'
+  const label = kind === 'pk' ? 'Primary key' : 'Foreign key'
+  return (
+    <svg
+      width={13}
+      height={13}
+      viewBox="0 0 24 24"
+      role="img"
+      aria-label={label}
+      fill="none"
+      stroke={color}
+      strokeWidth={2.2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      style={{ flexShrink: 0 }}
+    >
+      <title>{label}</title>
+      {/* An actual key: a ring "bow" + an angled shaft ending in two teeth (bit). The bow
+          is filled for a PK, hollow for an FK -- a shape/fill cue so PK vs FK never relies
+          on color alone. */}
+      <circle cx={7.5} cy={15.5} r={5.5} fill={kind === 'pk' ? color : 'none'} />
+      <path d="M21 2 L11.4 11.6" />
+      <path d="M15.5 7.5 L18.5 10.5 L22 7 L19 4" />
+    </svg>
+  )
+}
 
 // Deterministic tag -> color mapping. Well-known governance keywords get a fixed,
 // attention-appropriate color; anything else falls back to a stable hash-based pick
@@ -51,13 +88,22 @@ function TagBadge({ tag, small }: { tag: TagValue; small?: boolean }) {
 }
 
 export interface TableNodeProps extends NodeProps<TableNodeData> {
-  data: TableNodeData & { dimmed?: boolean; selected?: boolean; color?: ColorPair }
+  data: TableNodeData & {
+    dimmed?: boolean
+    selected?: boolean
+    color?: ColorPair
+    // Columns to highlight because an active (hovered) relationship connects to them --
+    // this is what lights up the matching column on the *other* table (extra B).
+    highlightedCols?: Set<string>
+  }
 }
 
 export function TableNode({ id, data }: TableNodeProps) {
   const colors = data.color ?? { bar: '#475467', soft: '#f2f4f7' }
   const dimmed = data.dimmed
   const selected = data.selected
+  const highlightedCols = data.highlightedCols
+  const { onKeyEnter, onKeyLeave } = useContext(ErdInteractionContext)
   const updateNodeInternals = useUpdateNodeInternals()
 
   // Keys at the top of each table: primary keys first, then foreign keys, then the rest
@@ -152,9 +198,17 @@ export function TableNode({ id, data }: TableNodeProps) {
         </div>
       )}
       <div>
-        {displayColumns.map((col) => (
+        {displayColumns.map((col) => {
+          const isKey = col.is_pk || col.is_fk
+          const highlighted = highlightedCols?.has(col.name) ?? false
+          return (
           <div
             key={col.name}
+            // Hovering a PK/FK column reveals just that relationship (and highlights the
+            // matching column on the other table). Non-key columns take no handlers, so
+            // hovering them does nothing -- detail comes only from lines and keys.
+            onMouseEnter={isKey ? () => onKeyEnter({ nodeId: id, column: col.name }) : undefined}
+            onMouseLeave={isKey ? onKeyLeave : undefined}
             style={{
               display: 'flex',
               alignItems: 'center',
@@ -162,6 +216,11 @@ export function TableNode({ id, data }: TableNodeProps) {
               padding: '4px 11px',
               borderTop: '1px solid #f2f4f7',
               lineHeight: '16px',
+              // Highlight the row when an active relationship connects to this column.
+              background: highlighted ? colors.soft : undefined,
+              boxShadow: highlighted ? `inset 3px 0 0 ${colors.bar}` : undefined,
+              cursor: isKey ? 'pointer' : 'default',
+              transition: 'background 0.12s ease',
               // Anchor point for this row's per-column handles (positioned absolutely at
               // the row's left/right center by React Flow).
               position: 'relative',
@@ -184,37 +243,9 @@ export function TableNode({ id, data }: TableNodeProps) {
               isConnectable={false}
               style={columnHandleStyle(colors.bar)}
             />
-            <span style={{ display: 'flex', gap: 3, minWidth: 34 }}>
-              {col.is_pk && (
-                <span
-                  title="Primary key"
-                  style={{
-                    fontSize: 9,
-                    fontWeight: 700,
-                    color: '#b54708',
-                    background: '#fef0c7',
-                    borderRadius: 4,
-                    padding: '0 4px',
-                  }}
-                >
-                  PK
-                </span>
-              )}
-              {col.is_fk && (
-                <span
-                  title="Foreign key"
-                  style={{
-                    fontSize: 9,
-                    fontWeight: 700,
-                    color: '#175cd3',
-                    background: '#eff8ff',
-                    borderRadius: 4,
-                    padding: '0 4px',
-                  }}
-                >
-                  FK
-                </span>
-              )}
+            <span style={{ display: 'flex', alignItems: 'center', gap: 3, minWidth: 26 }}>
+              {col.is_pk && <KeyIcon kind="pk" />}
+              {col.is_fk && <KeyIcon kind="fk" />}
             </span>
             <span
               title={col.comment ?? undefined}
@@ -240,7 +271,8 @@ export function TableNode({ id, data }: TableNodeProps) {
             )}
             <span style={{ color: '#98a2b3', fontSize: 10 }}>{col.type}</span>
           </div>
-        ))}
+          )
+        })}
       </div>
     </div>
   )
