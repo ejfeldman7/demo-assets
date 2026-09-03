@@ -11,10 +11,13 @@ export interface ErdInteraction {
   // Toggle a table's expanded state (show all columns vs the capped view). Changing it
   // re-runs layout, since the card's height changes.
   onToggleExpand: (nodeId: string) => void
+  // Collapse/expand a schema group box (grouped mode): hides/shows its tables.
+  onToggleGroup: (groupId: string) => void
 }
 
 export const ErdInteractionContext = createContext<ErdInteraction>({
   onKeyEnter: () => {},
   onKeyLeave: () => {},
   onToggleExpand: () => {},
+  onToggleGroup: () => {},
 })

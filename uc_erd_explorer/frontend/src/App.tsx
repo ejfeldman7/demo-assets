@@ -106,6 +106,8 @@ function ErdCanvas() {
   // layout). Off by default -- the flat view is the baseline.
   const [groupBySchema, setGroupBySchema] = useState(false)
   const [groupBoxes, setGroupBoxes] = useState<GroupBox[]>([])
+  // Collapsed schema group ids ("group:catalog.schema") -- their tables are hidden.
+  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set())
 
   const { fitView, setCenter, getNode } = useReactFlow()
   const laidOutRef = useRef<Node<TableNodeData | SchemaNodeData>[]>([])
@@ -235,6 +237,13 @@ function ErdCanvas() {
           next.has(nodeId) ? next.delete(nodeId) : next.add(nodeId)
           return next
         }),
+      onToggleGroup: (groupId: string) =>
+        // Collapsing/expanding a schema re-clusters (via runLayout's collapsedGroups dep).
+        setCollapsedGroups((prev) => {
+          const next = new Set(prev)
+          next.has(groupId) ? next.delete(groupId) : next.add(groupId)
+          return next
+        }),
     }),
     [],
   )
@@ -357,7 +366,7 @@ function ErdCanvas() {
       }
       const gen = ++layoutGenRef.current
       if (!fit) skipFitRef.current = true
-      layoutGraphElk(nodes, baseEdgesRef.current, layoutDir, groupBySchema)
+      layoutGraphElk(nodes, baseEdgesRef.current, layoutDir, groupBySchema, collapsedGroups)
         .then((r) => {
           if (gen !== layoutGenRef.current) return
           laidOutRef.current = r.nodes
@@ -368,11 +377,12 @@ function ErdCanvas() {
           if (gen === layoutGenRef.current) setError((e as Error).message)
         })
     },
-    [layoutDir, groupBySchema],
+    [layoutDir, groupBySchema, collapsedGroups],
   )
 
-  // Structural re-layout: new graph, keys-only, inferred toggle, direction, or grouping
-  // toggle (the last two arrive via runLayout's deps). NOT per-table column expansion.
+  // Structural re-layout: new graph, keys-only, inferred toggle, direction, grouping
+  // toggle, or a schema collapse/expand (the last three arrive via runLayout's deps). NOT
+  // per-table column expansion.
   useEffect(() => {
     runLayout(true)
   }, [graph, keysOnly, showInferred, runLayout])
@@ -458,9 +468,11 @@ function ErdCanvas() {
       draggable: false,
       zIndex: 0,
       data: {
+        id: g.id,
         catalog: g.catalog,
         schema: g.schema,
         count: g.count,
+        collapsed: g.collapsed,
         color: lookupCatalogColor(catalogColorMap, g.catalog),
       },
     }))
@@ -479,7 +491,12 @@ function ErdCanvas() {
 
   const displayEdges = useMemo<Edge[]>(() => {
     const hasSelection = Boolean(selectedId) || Boolean(tracePath)
-    return baseEdges.map((e) => {
+    // In grouped mode a collapsed schema's tables aren't rendered (not in baseNodes), so
+    // drop any edge that would dangle on a hidden endpoint.
+    const visibleNodeIds = new Set(baseNodes.map((n) => n.id))
+    return baseEdges
+      .filter((e) => visibleNodeIds.has(e.source) && visibleNodeIds.has(e.target))
+      .map((e) => {
       const inferred = Boolean((e.data as { inferred?: boolean } | undefined)?.inferred)
       // Label visibility is HOVER-ONLY (computeEdgeVisual reads activeEdgeSet, not
       // selection): clicking a table focuses it but no longer paints its join-key labels
@@ -502,7 +519,7 @@ function ErdCanvas() {
         animated: tracePath ? onPath : v.animated,
       }
     })
-  }, [baseEdges, visibleSet, selectedId, activeEdgeSet, tracePath, pathEdgeIds])
+  }, [baseEdges, baseNodes, visibleSet, selectedId, activeEdgeSet, tracePath, pathEdgeIds])
 
   const onNodeClick: NodeMouseHandler = useCallback(
     (_, node) => {

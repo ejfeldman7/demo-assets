@@ -26,7 +26,12 @@ export interface GroupBox {
   y: number
   width: number
   height: number
+  collapsed: boolean
 }
+
+// A collapsed schema box is just its header -- a small fixed leaf in the layout.
+const COLLAPSED_W = 260
+const COLLAPSED_H = 46
 
 export interface LayoutResult {
   nodes: Node<TableNodeData | SchemaNodeData>[]
@@ -78,6 +83,7 @@ export async function layoutGraphElk(
   edges: Edge[],
   direction: LayoutDirection,
   groupBySchema = false,
+  collapsed: Set<string> = new Set(),
 ): Promise<LayoutResult> {
   if (nodes.length === 0) return { nodes: [], groups: [] }
 
@@ -89,8 +95,11 @@ export async function layoutGraphElk(
   const dir = direction === 'LR' ? 'RIGHT' : 'DOWN'
   const elk = await getElk()
 
-  const applyPositions = (posById: Map<string, { x: number; y: number }>) =>
-    nodes.map((n) => {
+  const applyPositions = (
+    posById: Map<string, { x: number; y: number }>,
+    list: Node<TableNodeData | SchemaNodeData>[],
+  ) =>
+    list.map((n) => {
       const { width, height } = nodeSize(n.data)
       const p = posById.get(n.id) ?? { x: 0, y: 0 }
       // Explicit width/height so getNodesBounds() (PNG/SVG export) has a real footprint.
@@ -109,7 +118,7 @@ export async function layoutGraphElk(
     }
     const laid = await elk.layout(graph)
     const posById = new Map((laid.children ?? []).map((c) => [c.id, { x: c.x ?? 0, y: c.y ?? 0 }]))
-    return { nodes: applyPositions(posById), groups: [] }
+    return { nodes: applyPositions(posById, nodes), groups: [] }
   }
 
   // Grouped: cluster tables into a compound node per catalog.schema. ELK lays out each
@@ -119,12 +128,16 @@ export async function layoutGraphElk(
   // (group origin + child offset) -- tables stay top-level React Flow nodes, so the rest of
   // the app (column push, edges, selection) is untouched; the box is a separate render node.
   const byGroup = new Map<string, Node<TableNodeData | SchemaNodeData>[]>()
+  const groupIdOf = new Map<string, string>() // table id -> its group id
   for (const n of nodes) {
     const key = 'columns' in n.data ? `${n.data.catalog}.${n.data.schema}` : `__ungrouped.${n.id}`
     let list = byGroup.get(key)
     if (!list) byGroup.set(key, (list = []))
     list.push(n)
+    groupIdOf.set(n.id, `group:${key}`)
   }
+  const isCollapsed = (groupId: string) => collapsed.has(groupId)
+
   const graph = {
     id: 'root',
     // The schema boxes are mostly disconnected (FKs usually live within a schema), so the
@@ -135,19 +148,27 @@ export async function layoutGraphElk(
       'elk.spacing.nodeNode': '48',
       'elk.aspectRatio': '1.7',
     },
-    children: [...byGroup.entries()].map(([key, tables]) => ({
-      id: `group:${key}`,
-      layoutOptions: {
-        ...LAYOUT_OPTIONS,
-        'elk.direction': dir,
-        'elk.padding': '[top=42.0,left=16.0,bottom=16.0,right=16.0]',
-      },
-      children: tables.map((n) => {
-        const { width, height } = nodeSize(n.data)
-        return { id: n.id, width, height }
-      }),
-    })),
-    edges: edges.map((e) => ({ id: e.id, sources: [e.source], targets: [e.target] })),
+    children: [...byGroup.entries()].map(([key, tables]) => {
+      const gid = `group:${key}`
+      // A collapsed group is a fixed-size leaf (header only) -- its tables are omitted.
+      if (isCollapsed(gid)) return { id: gid, width: COLLAPSED_W, height: COLLAPSED_H }
+      return {
+        id: gid,
+        layoutOptions: {
+          ...LAYOUT_OPTIONS,
+          'elk.direction': dir,
+          'elk.padding': '[top=42.0,left=16.0,bottom=16.0,right=16.0]',
+        },
+        children: tables.map((n) => {
+          const { width, height } = nodeSize(n.data)
+          return { id: n.id, width, height }
+        }),
+      }
+    }),
+    // Drop edges touching a collapsed group's (now-hidden) tables; the rest lay out as usual.
+    edges: edges
+      .filter((e) => !isCollapsed(groupIdOf.get(e.source) ?? '') && !isCollapsed(groupIdOf.get(e.target) ?? ''))
+      .map((e) => ({ id: e.id, sources: [e.source], targets: [e.target] })),
   }
   const laid = await elk.layout(graph)
   const posById = new Map<string, { x: number; y: number }>()
@@ -155,19 +176,23 @@ export async function layoutGraphElk(
   for (const g of laid.children ?? []) {
     const gx = g.x ?? 0
     const gy = g.y ?? 0
-    for (const c of g.children ?? []) posById.set(c.id, { x: gx + (c.x ?? 0), y: gy + (c.y ?? 0) })
+    const collapsedFlag = isCollapsed(g.id)
+    if (!collapsedFlag) for (const c of g.children ?? []) posById.set(c.id, { x: gx + (c.x ?? 0), y: gy + (c.y ?? 0) })
     const key = g.id.replace(/^group:/, '')
     const dot = key.indexOf('.')
     groups.push({
       id: g.id,
       catalog: dot >= 0 ? key.slice(0, dot) : key,
       schema: dot >= 0 ? key.slice(dot + 1) : '',
-      count: (g.children ?? []).length,
+      count: byGroup.get(key)?.length ?? 0,
       x: gx,
       y: gy,
       width: g.width ?? 0,
       height: g.height ?? 0,
+      collapsed: collapsedFlag,
     })
   }
-  return { nodes: applyPositions(posById), groups }
+  // Only visible tables (collapsed groups' tables are hidden) become React Flow nodes.
+  const visibleTables = nodes.filter((n) => !isCollapsed(groupIdOf.get(n.id) ?? ''))
+  return { nodes: applyPositions(posById, visibleTables), groups }
 }
