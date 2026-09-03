@@ -4,7 +4,6 @@ import ReactFlow, {
   Background,
   Controls,
   MiniMap,
-  MarkerType,
   Panel,
   ReactFlowProvider,
   useReactFlow,
@@ -21,8 +20,21 @@ import { RelationshipEdge } from './RelationshipEdge'
 import { GeniePanel } from './GeniePanel'
 import { InfoPanel } from './InfoPanel'
 import { AdminPanel } from './AdminPanel'
+import { ThemeToggle, useResolvedDark } from './ThemeToggle'
 import { CatalogSchemaPicker } from './CatalogSchemaPicker'
-import { connectedComponent, directNeighbors, layoutGraph } from './graphUtils'
+import { COLUMN_CAP, ROW_HEIGHT, connectedComponent, directNeighbors, nodeSize, shortestPath, visibleColumns } from './graphUtils'
+import { layoutGraphElk, type GroupBy, type LayoutDirection } from './elkLayout'
+import {
+  activeEdgeIds,
+  computeEdgeVisual,
+  highlightedColumnsByNode,
+  type HoveredKey,
+} from './edgeDisplay'
+import { ErdInteractionContext } from './erdContext'
+import { CommandPalette } from './CommandPalette'
+import { GroupBoxNode } from './GroupBox'
+import type { GroupBox } from './elkLayout'
+import type { TableEntry } from './search'
 // Only the ExportScope type is imported eagerly (types are erased at build time, so this
 // pulls no code). The export implementation -- which drags in html-to-image, js-yaml and
 // fflate (~hundreds of KB) -- is dynamically imported inside the export handlers, so it's
@@ -39,7 +51,7 @@ import type {
   TableNodeData,
 } from './types'
 
-const nodeTypes = { table: TableNode, schema: SchemaNode }
+const nodeTypes = { table: TableNode, schema: SchemaNode, groupBox: GroupBoxNode }
 const edgeTypes = { relationship: RelationshipEdge }
 
 function isSchemaNodeData(data: TableNodeData | SchemaNodeData): data is SchemaNodeData {
@@ -62,10 +74,18 @@ function ErdCanvas() {
   // null = "All" -- no filter, everything in scope.
   const [selectedPairs, setSelectedPairs] = useState<Set<string> | null>(null)
   const [selectedId, setSelectedId] = useState<string | null>(null)
-  // Which edge the cursor is over -- its relationship label shows on hover (labels are
-  // otherwise hidden to keep the canvas uncluttered; see RelationshipEdge.tsx).
+  // Transient hover state -- what the pointer is currently over. Either a relationship edge
+  // or a PK/FK key column reveals that relationship's join-key detail and highlights the
+  // two columns it connects. Cleared on mouse-out; never persisted (clicking a table
+  // focuses it but does NOT reveal labels -- see displayEdges).
   const [hoveredEdgeId, setHoveredEdgeId] = useState<string | null>(null)
+  const [hoveredKey, setHoveredKey] = useState<HoveredKey | null>(null)
   const [filterMode, setFilterMode] = useState<FilterMode>('neighbors')
+  // Join-path tracing: when `tracing` is on, clicking two tables sets the from/to endpoints
+  // and the shortest FK path between them is highlighted (rest dimmed).
+  const [tracing, setTracing] = useState(false)
+  const [traceFrom, setTraceFrom] = useState<string | null>(null)
+  const [traceTo, setTraceTo] = useState<string | null>(null)
   const [search, setSearch] = useState('')
   // Heuristic undeclared-relationship edges are always fetched but hidden by default,
   // so first load renders identically to before this feature existed.
@@ -76,9 +96,25 @@ function ErdCanvas() {
   // a header-only card (no columns); that's expected and called out in the sidebar hint.
   const [keysOnly, setKeysOnly] = useState(false)
   const [erStudioDialect, setErStudioDialect] = useState<Dialect>('sqlserver')
+  const [paletteOpen, setPaletteOpen] = useState(false)
+  // ELK layout flow direction: 'LR' (left-to-right, default -- reads best for these wide
+  // column-listing cards) or 'TB' (top-to-bottom).
+  const [layoutDir, setLayoutDir] = useState<LayoutDirection>('LR')
+  // Tables whose full column list is expanded (past the COLUMN_CAP row cap). Per-table so
+  // an analyst can pin a wide fact table open while everything else stays compact.
+  const [expandedTables, setExpandedTables] = useState<Set<string>>(new Set())
+  // Grouping dimension: 'none' (flat, the baseline), 'schema' (a box per catalog.schema),
+  // or 'catalog' (a box per catalog -- for multi-catalog overviews). ELK compound layout.
+  const [groupBy, setGroupBy] = useState<GroupBy>('none')
+  const [groupBoxes, setGroupBoxes] = useState<GroupBox[]>([])
+  // Collapsed schema group ids ("group:catalog.schema") -- their tables are hidden.
+  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set())
 
   const { fitView, setCenter, getNode } = useReactFlow()
   const laidOutRef = useRef<Node<TableNodeData | SchemaNodeData>[]>([])
+  // One-shot flag: skip the next fit-view (set when a baseNodes change came from an
+  // expand/collapse push rather than a fresh layout, so toggling doesn't re-zoom).
+  const skipFitRef = useRef(false)
 
   // Load the catalog/schema tree whenever the Prod/Test environment changes, to
   // populate the picker with that environment's actual (possibly _ts-suffixed) catalogs.
@@ -121,6 +157,16 @@ function ErdCanvas() {
     let cancelled = false
     setError(null)
     setSelectedId(null)
+    setHoveredEdgeId(null)
+    setHoveredKey(null)
+    // Drop trace endpoints too -- they name tables in the OLD scope; carrying them into a
+    // new catalog/schema/env would trace stale ids (misleading "different components", or
+    // silently highlighting same-named tables the user never picked here).
+    setTraceFrom(null)
+    setTraceTo(null)
+    // Fresh data scope -> fresh view: clear any schema collapses (they name schemas in the
+    // OLD scope, and a schema the user just picked shouldn't load collapsed/empty).
+    setCollapsedGroups(new Set())
 
     // An explicit, empty selection (nothing checked) means "show nothing" -- not the
     // same as null ("All"). The backend has no way to express "no pairs = empty" (a bare
@@ -159,7 +205,8 @@ function ErdCanvas() {
   // Colors assigned per the catalogs actually present in the current (already
   // catalog/schema-scoped) graph -- see catalogColors.ts for why this is computed fresh
   // per graph rather than from a fixed name->color lookup.
-  const catalogColorMap = useMemo(() => buildCatalogColorMap(graph?.catalogs ?? []), [graph])
+  const isDark = useResolvedDark()
+  const catalogColorMap = useMemo(() => buildCatalogColorMap(graph?.catalogs ?? [], isDark), [graph, isDark])
 
   // Edges filtered to the current inferred-visibility toggle -- used for both rendering
   // and click-to-filter connectivity, so a hidden inferred edge never silently changes
@@ -170,10 +217,66 @@ function ErdCanvas() {
     [graph, showInferred],
   )
 
-  // Base (laid-out) nodes + edges derived from the loaded graph.
-  const { baseNodes, baseEdges } = useMemo(() => {
+  // The column each visible edge anchors to, per node (fk_columns[0] on the source,
+  // pk_columns[0] on the target). Fed to visibleColumns so the cap never slices off an
+  // anchor column and dangles its edge -- crucial for inferred edges, whose columns aren't
+  // flagged is_fk. Keyed on scopedGraphEdges so it tracks the inferred-visibility toggle.
+  const anchorColsByNode = useMemo(() => {
+    const m = new Map<string, Set<string>>()
+    const add = (id: string, col: string | undefined) => {
+      if (!col) return
+      let s = m.get(id)
+      if (!s) m.set(id, (s = new Set()))
+      s.add(col)
+    }
+    for (const e of scopedGraphEdges) {
+      add(e.source, e.fk_columns[0])
+      add(e.target, e.pk_columns[0])
+    }
+    return m
+  }, [scopedGraphEdges])
+
+  // The relationship(s) whose detail is revealed right now -- driven purely by transient
+  // hover (a hovered edge, or a hovered PK/FK key column), never by selection.
+  const activeEdgeSet = useMemo(
+    () => activeEdgeIds(hoveredEdgeId, hoveredKey, scopedGraphEdges),
+    [hoveredEdgeId, hoveredKey, scopedGraphEdges],
+  )
+  // Columns to highlight on both endpoints of each active edge (matching-column highlight).
+  const highlightColsByNode = useMemo(
+    () => highlightedColumnsByNode(activeEdgeSet, scopedGraphEdges),
+    [activeEdgeSet, scopedGraphEdges],
+  )
+
+  // Stable interaction handlers passed to table nodes via context (see erdContext.ts).
+  const interaction = useMemo(
+    () => ({
+      onKeyEnter: (key: HoveredKey) => setHoveredKey(key),
+      onKeyLeave: () => setHoveredKey(null),
+      onToggleExpand: (nodeId: string) =>
+        // The local-push effect keys off this state change to grow the card in place and
+        // nudge only its lane -- no re-layout, no re-fit.
+        setExpandedTables((prev) => {
+          const next = new Set(prev)
+          next.has(nodeId) ? next.delete(nodeId) : next.add(nodeId)
+          return next
+        }),
+      onToggleGroup: (groupId: string) =>
+        // Collapsing/expanding a schema re-clusters (via runLayout's collapsedGroups dep).
+        setCollapsedGroups((prev) => {
+          const next = new Set(prev)
+          next.has(groupId) ? next.delete(groupId) : next.add(groupId)
+          return next
+        }),
+    }),
+    [],
+  )
+
+  // Un-positioned nodes + edges derived from the loaded graph (synchronous). ELK then
+  // positions them asynchronously in the effect below -> baseNodes state.
+  const { rawNodes, baseEdges } = useMemo(() => {
     if (!graph) {
-      return { baseNodes: [] as Node<TableNodeData | SchemaNodeData>[], baseEdges: [] as Edge[] }
+      return { rawNodes: [] as Node<TableNodeData | SchemaNodeData>[], baseEdges: [] as Edge[] }
     }
 
     // "Keys only" filters each table's columns to PK/FK before layout, so node heights
@@ -197,20 +300,33 @@ function ErdCanvas() {
       }
     }
 
-    const rawNodes: Node<TableNodeData | SchemaNodeData>[] = graph.nodes.map((n) => ({
-      id: n.id,
-      type: graph.view === 'schema_summary' ? 'schema' : 'table',
-      position: { x: 0, y: 0 },
-      data:
-        keysOnlyActive && 'columns' in n
-          ? {
-              ...n,
-              columns: n.columns.filter(
-                (c) => c.is_pk || c.is_fk || inferredFkColsByNode[n.id]?.has(c.name),
-              ),
-            }
-          : n,
-    }))
+    const rawNodes: Node<TableNodeData | SchemaNodeData>[] = graph.nodes.map((n) => {
+      // Schema-summary nodes have no columns -- pass through unchanged.
+      if (!('columns' in n)) {
+        return { id: n.id, type: 'schema', position: { x: 0, y: 0 }, data: n }
+      }
+      // Keys-only first (a view filter), then the row cap. baseCols is the full set this
+      // card would show uncapped; visibleColumns orders PK->FK->rest and caps it.
+      const baseCols = keysOnlyActive
+        ? n.columns.filter((c) => c.is_pk || c.is_fk || inferredFkColsByNode[n.id]?.has(c.name))
+        : n.columns
+      const expanded = expandedTables.has(n.id)
+      const { visible, hidden } = visibleColumns(baseCols, expanded, anchorColsByNode.get(n.id))
+      return {
+        id: n.id,
+        type: 'table',
+        position: { x: 0, y: 0 },
+        data: {
+          ...n,
+          columns: visible,
+          hiddenColumnCount: hidden,
+          // Footer (the +N more / show fewer control) shown whenever the uncapped set
+          // exceeds the cap -- so an expanded card keeps a "show fewer" control.
+          hasColumnFooter: baseCols.length > COLUMN_CAP,
+          expanded,
+        },
+      }
+    })
 
     const edges: Edge[] = scopedGraphEdges.map((e) => ({
       id: e.id,
@@ -223,10 +339,14 @@ function ErdCanvas() {
       // those edges fall back to the SchemaNode's default centered handle (undefined).
       sourceHandle: graph.view === 'detail' ? e.fk_columns[0] : undefined,
       targetHandle: graph.view === 'detail' ? e.pk_columns[0] : undefined,
-      data: { inferred: e.inferred },
-      label: e.inferred
-        ? `${e.fk_columns.join(', ')} → ${e.pk_columns.join(', ')} (inferred)`
-        : `${e.fk_columns.join(', ')} → ${e.pk_columns.join(', ')}`,
+      // Structured join columns (not a pre-joined string) so RelationshipEdge can reflow a
+      // long/composite mapping onto stacked lines, and draw crow's-foot cardinality (the
+      // FK/source end is "many", the PK/target end is "one").
+      data: {
+        inferred: e.inferred,
+        fkCols: e.fk_columns,
+        pkCols: e.pk_columns,
+      },
       // Custom type, not the built-in 'smoothstep' -- its label renders through
       // EdgeLabelRenderer (a layer above nodes) instead of inline SVG <text> (a layer
       // below nodes), so labels aren't hidden under table cards. See RelationshipEdge.tsx.
@@ -234,84 +354,245 @@ function ErdCanvas() {
       // Inferred edges render above declared ones so a dashed line that happens to
       // overlap a solid one is never fully hidden underneath it.
       zIndex: e.inferred ? 1 : 0,
-      markerEnd: {
-        type: MarkerType.ArrowClosed,
-        width: 16,
-        height: 16,
-        color: e.inferred ? 'var(--db-red)' : '#98a2b3',
-      },
       style: {
-        stroke: e.inferred ? 'var(--db-red)' : '#98a2b3',
+        stroke: e.inferred ? 'var(--db-red)' : 'var(--text-subtle)',
         strokeWidth: e.inferred ? 2 : 1.5,
         strokeDasharray: e.inferred ? '6 4' : undefined,
       },
     }))
 
-    const laidOut = layoutGraph(rawNodes, edges)
-    laidOutRef.current = laidOut
-    return { baseNodes: laidOut, baseEdges: edges }
-  }, [graph, scopedGraphEdges, keysOnly])
+    return { rawNodes, baseEdges: edges }
+  }, [graph, scopedGraphEdges, keysOnly, expandedTables, anchorColsByNode])
+
+  // rawNodes/baseEdges reflect the current column-expansion state, so they change on every
+  // expand toggle. The ELK layout reads them through refs (not effect deps) so a single
+  // table's expand/collapse does NOT trigger a full re-layout -- only structural changes do
+  // (see the local-push effect for what expansion does instead).
+  const rawNodesRef = useRef(rawNodes)
+  rawNodesRef.current = rawNodes
+  const baseEdgesRef = useRef(baseEdges)
+  baseEdgesRef.current = baseEdges
+
+  // Positioned nodes from ELK's async layout (+ the schema group boxes when grouping is on).
+  const [baseNodes, setBaseNodes] = useState<Node<TableNodeData | SchemaNodeData>[]>([])
+
+  // A layout "generation" so a superseded async layout never overwrites a newer one (two
+  // effects can now trigger a layout, so a shared counter replaces per-effect cancel flags).
+  const layoutGenRef = useRef(0)
+  const runLayout = useCallback(
+    (fit: boolean) => {
+      const nodes = rawNodesRef.current
+      if (nodes.length === 0) {
+        laidOutRef.current = []
+        setBaseNodes([])
+        setGroupBoxes([])
+        return
+      }
+      const gen = ++layoutGenRef.current
+      // Grouping is only meaningful in the detail view; in schema-summary the nodes ARE
+      // schemas (no columns), so grouping them would emit bogus "__ungrouped" boxes.
+      const effectiveGroupBy = graph?.view === 'detail' ? groupBy : 'none'
+      layoutGraphElk(nodes, baseEdgesRef.current, layoutDir, effectiveGroupBy, collapsedGroups)
+        .then((r) => {
+          if (gen !== layoutGenRef.current) return
+          // Set the skip-fit flag here (not synchronously) so ONLY the layout that actually
+          // applies decides whether to fit -- a superseded no-fit layout can't suppress the
+          // fit a later structural layout intended.
+          skipFitRef.current = !fit
+          laidOutRef.current = r.nodes
+          setBaseNodes(r.nodes)
+          setGroupBoxes(r.groups)
+        })
+        .catch((e) => {
+          if (gen === layoutGenRef.current) setError((e as Error).message)
+        })
+    },
+    [graph, layoutDir, groupBy, collapsedGroups],
+  )
+
+  // Structural re-layout: new graph, keys-only, inferred toggle, direction, grouping
+  // toggle, or a schema collapse/expand (the last three arrive via runLayout's deps). NOT
+  // per-table column expansion.
+  useEffect(() => {
+    runLayout(true)
+  }, [graph, keysOnly, showInferred, runLayout])
+
+  // Expand/collapse a single table. FLAT mode: keep every card in place and apply a local
+  // vertical push -- shift only the cards below the toggled one in its lane by the exact
+  // height delta (no re-layout, no re-fit, no overlap). GROUPED mode: a height change must
+  // also resize the schema box, so re-cluster instead (still no re-fit).
+  const prevExpandedRef = useRef(expandedTables)
+  useEffect(() => {
+    const prev = prevExpandedRef.current
+    prevExpandedRef.current = expandedTables
+    const added = [...expandedTables].filter((id) => !prev.has(id))
+    const removed = [...prev].filter((id) => !expandedTables.has(id))
+    // Only a single-table toggle acts; bulk/none changes (e.g. a graph reload) fall through
+    // to the fresh layout the structural effect produced.
+    if (added.length + removed.length !== 1) return
+    if (groupBy !== 'none') {
+      runLayout(false) // re-cluster so the schema box grows/shrinks with the table
+      return
+    }
+    const toggledId = added[0] ?? removed[0]
+    const expanding = added.length === 1
+
+    setBaseNodes((nodes) => {
+      const toggled = nodes.find((n) => n.id === toggledId)
+      const raw = rawNodesRef.current.find((n) => n.id === toggledId)
+      if (!toggled || !raw || !('columns' in raw.data)) return nodes
+      const rawData = raw.data as TableNodeData & { hiddenColumnCount?: number }
+      // |full columns - cap| rows appear/disappear. On expand, rawData.columns is the full
+      // set (hidden 0); on collapse it's the capped set + hiddenColumnCount.
+      const fullCount = rawData.columns.length + (expanding ? 0 : rawData.hiddenColumnCount ?? 0)
+      const delta = Math.max(0, fullCount - COLUMN_CAP) * ROW_HEIGHT
+      const { width: newW, height: newH } = nodeSize(rawData)
+      skipFitRef.current = true
+      if (delta === 0) {
+        return nodes.map((n) => (n.id === toggledId ? { ...n, data: raw.data, width: newW, height: newH } : n))
+      }
+      const shift = expanding ? delta : -delta
+      const tW = toggled.width ?? 240
+      const inLane = (n: Node<TableNodeData | SchemaNodeData>) => {
+        if (n.id === toggledId || n.position.y <= toggled.position.y) return false
+        if (layoutDir === 'TB') return true // block-shift everything below the toggled card
+        const nW = n.width ?? 240 // LR: same column = horizontal overlap with the toggled card
+        return n.position.x < toggled.position.x + tW && n.position.x + nW > toggled.position.x
+      }
+      return nodes.map((n) => {
+        if (n.id === toggledId) return { ...n, data: raw.data, width: newW, height: newH }
+        return inLane(n) ? { ...n, position: { x: n.position.x, y: n.position.y + shift } } : n
+      })
+    })
+  }, [expandedTables, layoutDir, groupBy, runLayout])
 
   // Compute the currently-visible set based on selection + mode.
+  // The shortest join path between the two chosen endpoints (tracing mode), or null.
+  const tracePath = useMemo(
+    () => (tracing && traceFrom && traceTo ? shortestPath(traceFrom, traceTo, scopedGraphEdges) : null),
+    [tracing, traceFrom, traceTo, scopedGraphEdges],
+  )
+  const pathEdgeIds = useMemo(() => new Set(tracePath?.edgeIds ?? []), [tracePath])
+
   const visibleSet = useMemo<Set<string> | null>(() => {
+    // Tracing takes over the dim/focus: show only the path's tables.
+    if (tracePath) return new Set(tracePath.nodeIds)
     if (!selectedId || !graph) return null
     return filterMode === 'neighbors'
       ? directNeighbors(selectedId, scopedGraphEdges)
       : connectedComponent(selectedId, scopedGraphEdges)
-  }, [selectedId, filterMode, graph, scopedGraphEdges])
+  }, [tracePath, selectedId, filterMode, graph, scopedGraphEdges])
 
-  // Apply dim/selection styling + catalog color to nodes.
-  const displayNodes = useMemo<Node<TableNodeData | SchemaNodeData>[]>(() => {
-    return baseNodes.map((n) => ({
+  // Schema group boxes (grouped mode only) rendered FIRST so the opaque table cards paint
+  // on top; inert (non-selectable/draggable) background containers, not parents of the
+  // tables. Then the tables with dim/selection/highlight/color applied.
+  const displayNodes = useMemo<Node[]>(() => {
+    const boxes: Node[] = groupBoxes.map((g) => ({
+      id: g.id,
+      type: 'groupBox',
+      position: { x: g.x, y: g.y },
+      width: g.width,
+      height: g.height,
+      style: { width: g.width, height: g.height },
+      selectable: false,
+      draggable: false,
+      zIndex: 0,
+      data: {
+        id: g.id,
+        catalog: g.catalog,
+        schema: g.schema,
+        count: g.count,
+        collapsed: g.collapsed,
+        color: lookupCatalogColor(catalogColorMap, g.catalog),
+      },
+    }))
+    const tables = baseNodes.map((n) => ({
       ...n,
       data: {
         ...n.data,
         dimmed: visibleSet ? !visibleSet.has(n.id) : false,
         selected: n.id === selectedId,
         color: lookupCatalogColor(catalogColorMap, n.data.catalog),
+        highlightedCols: highlightColsByNode.get(n.id),
       },
     }))
-  }, [baseNodes, visibleSet, selectedId, catalogColorMap])
+    return [...boxes, ...tables]
+  }, [baseNodes, groupBoxes, visibleSet, selectedId, catalogColorMap, highlightColsByNode])
 
   const displayEdges = useMemo<Edge[]>(() => {
-    return baseEdges.map((e) => {
-      const inSet =
-        !visibleSet || (visibleSet.has(e.source) && visibleSet.has(e.target))
+    const hasSelection = Boolean(selectedId) || Boolean(tracePath)
+    // In grouped mode a collapsed schema's tables aren't rendered (not in baseNodes), so
+    // drop any edge that would dangle on a hidden endpoint.
+    const visibleNodeIds = new Set(baseNodes.map((n) => n.id))
+    return baseEdges
+      .filter((e) => visibleNodeIds.has(e.source) && visibleNodeIds.has(e.target))
+      .map((e) => {
       const inferred = Boolean((e.data as { inferred?: boolean } | undefined)?.inferred)
-      // Show the column-mapping label when this edge is hovered, or when a table is
-      // focused (a click-to-filter selection) and this edge is part of it -- so focusing
-      // a table reveals all its relationships' columns at once, while the default view
-      // stays clean.
-      const showLabel = e.id === hoveredEdgeId || (Boolean(selectedId) && inSet)
+      // Label visibility is HOVER-ONLY (computeEdgeVisual reads activeEdgeSet, not
+      // selection): clicking a table focuses it but no longer paints its join-key labels
+      // persistently -- the core behavior change from the review.
+      const v = computeEdgeVisual({ edge: e, active: activeEdgeSet, visibleSet, hasSelection })
+      const onPath = pathEdgeIds.has(e.id)
+      // In trace mode ONLY the path edges are prominent -- every other edge is dimmed, even
+      // one whose endpoints both happen to be path tables (a chord), so the highlighted
+      // path is unambiguous. Otherwise, dim/emphasis follow the click-to-focus selection.
+      const dimmed = tracePath ? !onPath : v.dimmed
       return {
         ...e,
-        data: { ...(e.data as object), showLabel },
+        data: { ...(e.data as object), showLabel: v.showLabel },
         style: {
           ...e.style,
-          opacity: inSet ? 1 : 0.1,
-          stroke: inSet ? (inferred ? 'var(--db-red)' : '#98a2b3') : '#e4e7ec',
+          opacity: dimmed ? 0.1 : 1,
+          stroke: dimmed ? 'var(--edge-dim)' : onPath ? 'var(--db-blue)' : inferred ? 'var(--db-red)' : 'var(--edge)',
+          strokeWidth: onPath ? 2.5 : e.style?.strokeWidth,
         },
-        animated: Boolean(selectedId) && inSet,
+        animated: tracePath ? onPath : v.animated,
       }
     })
-  }, [baseEdges, visibleSet, selectedId, hoveredEdgeId])
+  }, [baseEdges, baseNodes, visibleSet, selectedId, activeEdgeSet, tracePath, pathEdgeIds])
 
-  const onNodeClick: NodeMouseHandler = useCallback((_, node) => {
-    const data = node.data as TableNodeData | SchemaNodeData
-    if (isSchemaNodeData(data)) {
-      // "Expand" a collapsed schema node by selecting just that schema in the tree
-      // picker -- the same pairs-based mechanism the sidebar picker uses, which
-      // re-fetches /api/graph scoped to it and always returns full table-level detail.
-      setSelectedPairs(new Set([node.id]))
-      return
-    }
-    setSelectedId((cur) => (cur === node.id ? null : node.id))
-  }, [])
+  const onNodeClick: NodeMouseHandler = useCallback(
+    (_, node) => {
+      // Group boxes collapse via their own header button; a click anywhere else on the box
+      // must be ignored. (They carry no `columns`, so without this they'd fall into the
+      // schema-summary branch below and get sent to /api/graph as a bogus pair.)
+      if (node.type === 'groupBox') return
+      const data = node.data as TableNodeData | SchemaNodeData
+      if (isSchemaNodeData(data)) {
+        // "Expand" a collapsed schema node by selecting just that schema in the tree
+        // picker -- the same pairs-based mechanism the sidebar picker uses, which
+        // re-fetches /api/graph scoped to it and always returns full table-level detail.
+        setSelectedPairs(new Set([node.id]))
+        return
+      }
+      if (tracing) {
+        // First click sets "from"; second sets "to"; a third starts a fresh trace.
+        if (!traceFrom || (traceFrom && traceTo)) {
+          setTraceFrom(node.id)
+          setTraceTo(null)
+        } else if (node.id !== traceFrom) {
+          setTraceTo(node.id)
+        }
+        return
+      }
+      setSelectedId((cur) => (cur === node.id ? null : node.id))
+    },
+    [tracing, traceFrom, traceTo],
+  )
 
   const reset = useCallback(() => {
     setSelectedId(null)
+    setTraceFrom(null)
+    setTraceTo(null)
     setTimeout(() => fitView({ padding: 0.15, duration: 400 }), 0)
   }, [fitView])
+
+  const toggleTracing = useCallback(() => {
+    setTraceFrom(null)
+    setTraceTo(null)
+    if (!tracing) setSelectedId(null) // entering trace mode: drop any click-to-focus selection
+    setTracing((on) => !on)
+  }, [tracing])
 
   // Disabled in the collapsed schema-summary view -- there's no table/column detail to
   // export until a schema is expanded, and an image of two big summary boxes isn't
@@ -359,19 +640,23 @@ function ErdCanvas() {
     m.exportGraphAsErStudioZip(scoped, erStudioDialect, 'erd-erstudio-export')
   }, [canExport, graph, exportScope, erStudioDialect])
 
-  // Fit view when a fresh graph loads.
+  // Fit view when a fresh layout lands -- but NOT when the re-layout was an expand/collapse
+  // (skipFitRef), so toggling a table's columns doesn't re-zoom the whole canvas.
   useEffect(() => {
-    if (baseNodes.length > 0) {
-      setTimeout(() => fitView({ padding: 0.15, duration: 400 }), 50)
+    if (baseNodes.length === 0) return
+    if (skipFitRef.current) {
+      skipFitRef.current = false
+      return
     }
+    setTimeout(() => fitView({ padding: 0.15, duration: 400 }), 50)
   }, [baseNodes, fitView])
 
   const runSearch = useCallback(() => {
     const q = search.trim().toLowerCase()
     if (!q) return
-    // Only meaningful for actual table nodes -- in the collapsed schema-summary view
-    // there are no table names to search yet (select a schema to expand it first).
-    const nodes = laidOutRef.current.filter(
+    // Search the currently-VISIBLE table nodes (baseNodes) -- always up to date, and it
+    // excludes tables inside a collapsed group, which have no node to pan to anyway.
+    const nodes = baseNodes.filter(
       (n): n is Node<TableNodeData> => !isSchemaNodeData(n.data),
     )
     // Prefer an exact table-name match (so "materials" hits factory.materials,
@@ -386,10 +671,46 @@ function ErdCanvas() {
           zoom: 1.1,
           duration: 500,
         })
-        setSelectedId(match.id)
+        if (!tracing) setSelectedId(match.id)
       }
     }
-  }, [search, getNode, setCenter])
+  }, [search, getNode, setCenter, tracing, baseNodes])
+
+  // Table list for the Cmd+K quick-find palette -- the currently-VISIBLE table nodes, so a
+  // pick always has a node to pan to (tables in a collapsed group are excluded, matching
+  // what's on the canvas; schema-summary nodes have no columns and are skipped).
+  const tableEntries = useMemo<TableEntry[]>(() => {
+    return baseNodes
+      .filter((n): n is Node<TableNodeData> => !isSchemaNodeData(n.data))
+      .map((n) => ({ id: n.id, catalog: n.data.catalog, schema: n.data.schema, table: n.data.table }))
+  }, [baseNodes])
+
+  // Pan/zoom to a table and focus it -- shared by the palette and the sidebar search.
+  const jumpToNode = useCallback(
+    (id: string) => {
+      const node = getNode(id)
+      if (node) {
+        setCenter(node.position.x + 120, node.position.y + 80, { zoom: 1.1, duration: 500 })
+        // In trace mode we only pan to the table (so the user can click it as an endpoint);
+        // applying click-to-focus here would fight the trace dimming.
+        if (!tracing) setSelectedId(id)
+      }
+    },
+    [getNode, setCenter, tracing],
+  )
+
+  // Cmd/Ctrl+K opens the quick-find palette (Lineage-Explorer-style navigation for large
+  // graphs). Registered globally so it works regardless of focus.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && (e.key === 'k' || e.key === 'K')) {
+        e.preventDefault()
+        setPaletteOpen((o) => !o)
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [])
 
   const selectedTable = selectedId
     ? selectedId.split('.').slice(1).join('.')
@@ -408,6 +729,7 @@ function ErdCanvas() {
   }, [graph])
 
   return (
+    <ErdInteractionContext.Provider value={interaction}>
     <div style={styles.app}>
       {/* Top bar */}
       <header style={styles.topbar}>
@@ -424,6 +746,7 @@ function ErdCanvas() {
             {workspaceName}
           </div>
         )}
+        <ThemeToggle />
         <AdminPanel />
         <InfoPanel />
         <div style={styles.avatar}>EF</div>
@@ -487,6 +810,9 @@ function ErdCanvas() {
                 Go
               </button>
             </div>
+            <div style={styles.hint}>
+              Press <kbd style={styles.kbdHint}>⌘K</kbd> / <kbd style={styles.kbdHint}>Ctrl K</kbd> for quick find.
+            </div>
           </div>
 
           <SectionLabel>Filter mode</SectionLabel>
@@ -517,6 +843,75 @@ function ErdCanvas() {
             >
               Reset view
             </button>
+          </div>
+
+          <SectionLabel>Join path</SectionLabel>
+          <div style={styles.card}>
+            <Switch label="Trace join path" checked={tracing} onChange={toggleTracing} />
+            <div style={styles.hint}>
+              {!tracing
+                ? 'Highlight the shortest FK path between two tables.'
+                : !traceFrom
+                  ? 'Click the first table…'
+                  : !traceTo
+                    ? `From ${traceFrom.split('.').pop()} — now click the target table.`
+                    : tracePath
+                      ? tracePath.nodeIds.map((n) => n.split('.').pop()).join(' → ')
+                      : `No path between ${traceFrom.split('.').pop()} and ${traceTo.split('.').pop()} — they're in different components.`}
+            </div>
+            {tracing && (traceFrom || traceTo) && (
+              <button
+                onClick={() => {
+                  setTraceFrom(null)
+                  setTraceTo(null)
+                }}
+                style={styles.resetBtn}
+              >
+                Clear path
+              </button>
+            )}
+          </div>
+
+          <SectionLabel>Layout</SectionLabel>
+          <div style={styles.card}>
+            {(['LR', 'TB'] as LayoutDirection[]).map((d) => (
+              <button key={d} onClick={() => setLayoutDir(d)} style={sidebarRow(layoutDir === d)}>
+                <span style={{ flex: 1 }}>{d === 'LR' ? 'Left → right' : 'Top → bottom'}</span>
+                {layoutDir === d && <span style={styles.check}>✓</span>}
+              </button>
+            ))}
+            <div style={styles.hint}>
+              Auto-arranged with ELK. Left → right suits these wide table cards; top → bottom
+              stacks them vertically.
+            </div>
+          </div>
+
+          <SectionLabel>Group by</SectionLabel>
+          <div style={styles.card}>
+            <div style={{ display: 'flex', gap: 4 }}>
+              {(
+                [
+                  ['none', 'None'],
+                  ['schema', 'Schema'],
+                  ['catalog', 'Catalog'],
+                ] as [GroupBy, string][]
+              ).map(([g, label]) => (
+                <button
+                  key={g}
+                  onClick={() => setGroupBy(g)}
+                  style={{ ...sidebarRow(groupBy === g), flex: 1, justifyContent: 'center' }}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+            <div style={styles.hint}>
+              {groupBy === 'none'
+                ? 'Cluster tables into a labeled box per schema, or per catalog for a multi-catalog overview.'
+                : groupBy === 'schema'
+                  ? 'A box per catalog.schema. Click a box header to collapse that schema.'
+                  : 'A box per catalog (all its schemas together). Click a box header to collapse it.'}
+            </div>
           </div>
 
           <SectionLabel>Columns</SectionLabel>
@@ -583,7 +978,13 @@ function ErdCanvas() {
             nodeTypes={nodeTypes}
             edgeTypes={edgeTypes}
             onNodeClick={onNodeClick}
-            onPaneClick={() => setSelectedId(null)}
+            onPaneClick={() => {
+              // Clicking empty canvas clears focus AND any traced path (in trace mode this
+              // resets the endpoints so the next node click starts a fresh trace).
+              setSelectedId(null)
+              setTraceFrom(null)
+              setTraceTo(null)
+            }}
             onEdgeMouseEnter={(_, edge) => setHoveredEdgeId(edge.id)}
             onEdgeMouseLeave={() => setHoveredEdgeId(null)}
             fitView
@@ -591,13 +992,13 @@ function ErdCanvas() {
             proOptions={{ hideAttribution: true }}
             style={{ background: 'var(--bg)' }}
           >
-            <Background color="#e4e7ec" gap={22} />
+            <Background color="var(--canvas-dot)" gap={22} />
             <Controls />
             <MiniMap
               nodeColor={(n) =>
                 lookupCatalogColor(catalogColorMap, (n.data as TableNodeData | SchemaNodeData)?.catalog ?? '').bar
               }
-              maskColor="rgba(246,247,249,0.7)"
+              maskColor={isDark ? 'rgba(15,20,24,0.7)' : 'rgba(246,247,249,0.7)'}
               pannable
               zoomable
             />
@@ -668,7 +1069,14 @@ function ErdCanvas() {
       </div>
 
       <GeniePanel />
+      <CommandPalette
+        open={paletteOpen}
+        tables={tableEntries}
+        onSelect={jumpToNode}
+        onClose={() => setPaletteOpen(false)}
+      />
     </div>
+    </ErdInteractionContext.Provider>
   )
 }
 
@@ -725,7 +1133,7 @@ function Switch({
           height: 19,
           flexShrink: 0,
           borderRadius: 999,
-          background: checked ? 'var(--db-red)' : '#d0d5dd',
+          background: checked ? 'var(--db-red)' : 'var(--border-strong)',
           transition: 'background 0.15s ease',
         }}
       >
@@ -737,7 +1145,7 @@ function Switch({
             width: 15,
             height: 15,
             borderRadius: '50%',
-            background: '#fff',
+            background: 'var(--on-accent)',
             boxShadow: '0 1px 2px rgba(16,24,40,0.2)',
             transition: 'left 0.15s ease',
           }}
@@ -767,10 +1175,10 @@ function sidebarRow(active: boolean): CSSProperties {
 
 function exportBtn(enabled: boolean): CSSProperties {
   return {
-    border: '1px solid var(--border, #e4e7ec)',
+    border: '1px solid var(--border)',
     borderRadius: 6,
-    background: '#fff',
-    color: enabled ? 'var(--text)' : '#c0c5cd',
+    background: 'var(--surface)',
+    color: enabled ? 'var(--text)' : 'var(--text-subtle)',
     fontSize: 11,
     fontWeight: 600,
     padding: '4px 8px',
@@ -781,10 +1189,10 @@ function exportBtn(enabled: boolean): CSSProperties {
 
 function exportDialectSelect(enabled: boolean): CSSProperties {
   return {
-    border: '1px solid var(--border, #e4e7ec)',
+    border: '1px solid var(--border)',
     borderRadius: 6,
-    background: '#fff',
-    color: enabled ? 'var(--text)' : '#c0c5cd',
+    background: 'var(--surface)',
+    color: enabled ? 'var(--text)' : 'var(--text-subtle)',
     fontSize: 11,
     fontWeight: 600,
     padding: '4px 6px',
@@ -798,8 +1206,8 @@ const styles: Record<string, CSSProperties> = {
     flexDirection: 'column',
     gap: 6,
     width: 236,
-    background: '#fff',
-    border: '1px solid #e4e7ec',
+    background: 'var(--surface)',
+    border: '1px solid var(--border)',
     borderRadius: 8,
     padding: '8px',
     boxShadow: '0 1px 2px rgba(16,24,40,0.06), 0 1px 3px rgba(16,24,40,0.1)',
@@ -813,7 +1221,7 @@ const styles: Record<string, CSSProperties> = {
   exportLabel: {
     fontSize: 10.5,
     fontWeight: 700,
-    color: '#98a2b3',
+    color: 'var(--text-subtle)',
     textTransform: 'uppercase',
     letterSpacing: 0.4,
   },
@@ -835,7 +1243,7 @@ const styles: Record<string, CSSProperties> = {
     flexShrink: 0,
     fontSize: 10,
     fontWeight: 600,
-    color: '#98a2b3',
+    color: 'var(--text-subtle)',
   },
   app: {
     width: '100vw',
@@ -851,7 +1259,7 @@ const styles: Record<string, CSSProperties> = {
     height: 52,
     padding: '0 18px',
     background: 'var(--db-navy)',
-    color: '#fff',
+    color: 'var(--on-accent)',
     flexShrink: 0,
   },
   brandMark: { display: 'flex', alignItems: 'center', gap: 8 },
@@ -885,7 +1293,7 @@ const styles: Record<string, CSSProperties> = {
     height: 30,
     borderRadius: '50%',
     background: 'var(--db-red)',
-    color: '#fff',
+    color: 'var(--on-accent)',
     fontSize: 11,
     fontWeight: 700,
     display: 'flex',
@@ -923,7 +1331,7 @@ const styles: Record<string, CSSProperties> = {
     gap: 2,
   },
   catalogCard: {
-    background: 'linear-gradient(135deg,#ffffff,#faf6f4)',
+    background: 'linear-gradient(135deg,var(--surface),var(--surface-subtle))',
     border: '1px solid var(--border)',
     borderRadius: 'var(--radius)',
     padding: '12px 14px',
@@ -953,7 +1361,7 @@ const styles: Record<string, CSSProperties> = {
     border: 'none',
     borderRadius: 8,
     background: 'var(--db-blue)',
-    color: '#fff',
+    color: 'var(--on-accent)',
     padding: '0 14px',
     fontSize: 13,
     fontWeight: 600,
@@ -964,6 +1372,16 @@ const styles: Record<string, CSSProperties> = {
     color: 'var(--text-muted)',
     padding: '6px 10px 2px',
     lineHeight: 1.4,
+  },
+  kbdHint: {
+    display: 'inline-block',
+    padding: '0 4px',
+    border: '1px solid var(--border-strong)',
+    borderRadius: 4,
+    background: 'var(--surface)',
+    fontSize: 10,
+    fontFamily: 'inherit',
+    color: 'var(--text-muted)',
   },
   resetBtn: {
     marginTop: 6,

@@ -15,9 +15,32 @@ import asyncio
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
-from ..config import get_metadata_source, get_snapshot_job_id, get_workspace_client
+from ..config import (
+    get_admin_emails,
+    get_metadata_source,
+    get_snapshot_job_id,
+    get_user_email,
+    get_workspace_client,
+)
 from ..graph import get_snapshot_freshness
 from .graph import _capture_user
+
+
+def _require_admin() -> None:
+    """Gate state-changing admin actions (the refresh job spends compute). If
+    ERD_ADMIN_EMAILS is set, the caller's forwarded email must be on it; if it's unset,
+    admin stays open -- the internal-demo default where app access == trust. Set
+    ERD_ADMIN_EMAILS on any shared/multi-role/customer deployment to lock this down.
+    Runs after _capture_user (the router-level dependency), which populates the email."""
+    allow = get_admin_emails()
+    if not allow:
+        return
+    email = (get_user_email() or "").lower()
+    if email not in allow:
+        raise HTTPException(
+            status_code=403,
+            detail="You're not authorized to trigger a snapshot refresh.",
+        )
 
 # Same per-request identity capture the graph router uses: in on-behalf-of-user mode the
 # snapshot-freshness read goes through get_query_client(), which needs the forwarded user
@@ -41,7 +64,7 @@ async def snapshot_status():
     }
 
 
-@router.post("/refresh-snapshot")
+@router.post("/refresh-snapshot", dependencies=[Depends(_require_admin)])
 async def refresh_snapshot():
     """Trigger the refresh_erd_snapshot job via Jobs run-now. Returns the run id + page
     URL so the caller can poll /refresh-snapshot/status and link out to the run."""

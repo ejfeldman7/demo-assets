@@ -69,6 +69,24 @@ _SNAPSHOT = "snapshot"
 # on-behalf-of-user mode (so privilege-filtered results are never shared across users).
 _CACHE: Dict[Tuple[str, frozenset, frozenset], Tuple[float, Dict[str, Any]]] = {}
 
+# Hard cap on cached entries. The TTL only gates freshness on read, so without this an
+# expired entry lingers forever -- bounded in SP mode (a handful of pair combos) but
+# unbounded in on-behalf-of-user mode, where the key includes the user, so it would grow
+# with users x selections into a slow memory leak on a long-lived process.
+_MAX_CACHE_ENTRIES = 256
+
+
+def _cache_put(key: Tuple[str, frozenset, frozenset], payload: Dict[str, Any]) -> None:
+    """Store a graph payload, first sweeping expired entries, then evicting the
+    oldest-inserted (dict preserves insertion order) if still over the cap."""
+    now = time.time()
+    ttl = get_cache_ttl_seconds()
+    for expired in [k for k, (ts, _) in _CACHE.items() if now - ts >= ttl]:
+        del _CACHE[expired]
+    while len(_CACHE) >= _MAX_CACHE_ENTRIES:
+        _CACHE.pop(next(iter(_CACHE)))
+    _CACHE[key] = (now, payload)
+
 # Shared, BOUNDED threadpool for the per-load metadata queries. build_graph fans out ~5
 # independent information_schema queries per load; running them concurrently instead of
 # sequentially is the single biggest win on the live-query path. Bounding it (a fixed,
@@ -583,7 +601,7 @@ def build_graph(pairs: Optional[List[Tuple[str, str]]] = None, env: str = "prod"
             # always gets full detail regardless of how many tables are in scope overall.
             if not pairs and collapse_threshold and len(tables) > collapse_threshold:
                 payload = build_schema_summary(catalogs, tables, source)
-                _CACHE[key] = (time.time(), payload)
+                _cache_put(key, payload)
                 logger.info(
                     "build_graph view=schema_summary source=%s nodes=%d edges=%d %.0fms",
                     source, len(payload["nodes"]), len(payload["edges"]),
@@ -720,7 +738,7 @@ def build_graph(pairs: Optional[List[Tuple[str, str]]] = None, env: str = "prod"
         "nodes": nodes,
         "edges": edges,
     }
-    _CACHE[key] = (time.time(), payload)
+    _cache_put(key, payload)
     logger.info(
         "build_graph view=detail source=%s nodes=%d edges=%d %.0fms",
         source, len(nodes), len(edges), (time.perf_counter() - build_started) * 1000,

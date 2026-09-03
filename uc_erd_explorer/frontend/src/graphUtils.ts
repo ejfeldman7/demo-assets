@@ -1,73 +1,69 @@
-import dagre from 'dagre'
-import type { Node, Edge } from 'reactflow'
-import { Position } from 'reactflow'
-import type { GraphEdge, SchemaNodeData, TableNodeData } from './types'
+import type { ColumnMeta, GraphEdge, SchemaNodeData, TableNodeData } from './types'
 
-// Approximate node dimensions for dagre (a card = header + optional tag row + one row
-// per column; a collapsed schema card is a fixed size).
+// Max column rows a card shows before capping. Beyond this, a card would grow taller than
+// the viewport and blow up the auto-layout's bounding box (fit-view shrinks everything,
+// export/minimap balloon). A "+N more columns" footer expands it on demand. Chosen ~12 to
+// match how Lucidchart/Vertabelo cap wide tables.
+export const COLUMN_CAP = 12
+const FOOTER_HEIGHT = 26
+
+/**
+ * The columns a card actually renders, ordered PK -> FK -> anchor -> rest (stable within
+ * each group), capped at COLUMN_CAP unless expanded. `anchor` names columns an edge
+ * connects to (fk_columns[0]/pk_columns[0]); ranking them with the keys guarantees they
+ * survive the cap so a relationship line never loses its per-column handle. This matters
+ * for INFERRED edges especially: their columns aren't flagged is_fk, so without `anchor`
+ * a >COLUMN_CAP table could slice off an inferred FK column and dangle its dashed edge.
+ * Returns the visible slice plus how many were hidden.
+ */
+export function visibleColumns(
+  columns: ColumnMeta[],
+  expanded: boolean,
+  anchor?: Set<string>,
+): { visible: ColumnMeta[]; hidden: number } {
+  const rank = (c: ColumnMeta) => (c.is_pk ? 0 : c.is_fk || anchor?.has(c.name) ? 1 : 2)
+  const sorted = columns
+    .map((c, i) => ({ c, i }))
+    .sort((a, b) => rank(a.c) - rank(b.c) || a.i - b.i)
+    .map((x) => x.c)
+  if (expanded || sorted.length <= COLUMN_CAP) return { visible: sorted, hidden: 0 }
+  return { visible: sorted.slice(0, COLUMN_CAP), hidden: sorted.length - COLUMN_CAP }
+}
+
+// Approximate node dimensions for auto-layout (a card = header + optional tag row + one
+// row per column; a collapsed schema card is a fixed size). Consumed by the ELK layout
+// (elkLayout.ts) to give each node a footprint, and re-attached to the laid-out node so
+// getNodesBounds() (the PNG/SVG export) has a real box per node, not just a point.
+// Calibrated against the actual rendered card (TableNode): a column row measures ~25px
+// and the header+card chrome ~36px. These MUST NOT under-estimate -- ELK spaces nodes by
+// their declared box, so an under-estimate lets tall cards overlap their neighbors (the
+// reported bug). A few px of headroom is harmless (it only adds gap).
 const NODE_WIDTH = 240
-const ROW_HEIGHT = 22
-const HEADER_HEIGHT = 40
-const TAGS_ROW_HEIGHT = 28
-const CARD_PADDING = 12
+export const ROW_HEIGHT = 25
+const HEADER_HEIGHT = 36
+const TAGS_ROW_HEIGHT = 30
+const CARD_PADDING = 4
 const SCHEMA_NODE_WIDTH = 220
-const SCHEMA_NODE_HEIGHT = 84
+const SCHEMA_NODE_HEIGHT = 88
 
 function isSchemaNode(data: TableNodeData | SchemaNodeData): data is SchemaNodeData {
   return !('columns' in data)
 }
 
-function nodeSize(data: TableNodeData | SchemaNodeData): { width: number; height: number } {
+export function nodeSize(
+  data: (TableNodeData | SchemaNodeData) & { hasColumnFooter?: boolean },
+): { width: number; height: number } {
   if (isSchemaNode(data)) {
     return { width: SCHEMA_NODE_WIDTH, height: SCHEMA_NODE_HEIGHT }
   }
   const tagsHeight = data.tags.length > 0 ? TAGS_ROW_HEIGHT : 0
-  return { width: NODE_WIDTH, height: HEADER_HEIGHT + tagsHeight + data.columns.length * ROW_HEIGHT + CARD_PADDING }
-}
-
-/**
- * Run dagre auto-layout. Left-to-right reads more clearly than top-down for
- * these ~22 wide table cards, and keeps the two schemas visually flowing.
- */
-export function layoutGraph(
-  nodes: Node<TableNodeData | SchemaNodeData>[],
-  edges: Edge[],
-): Node<TableNodeData | SchemaNodeData>[] {
-  const g = new dagre.graphlib.Graph()
-  g.setGraph({ rankdir: 'LR', nodesep: 40, ranksep: 90, marginx: 20, marginy: 20 })
-  g.setDefaultEdgeLabel(() => ({}))
-
-  nodes.forEach((n) => {
-    const { width, height } = nodeSize(n.data)
-    g.setNode(n.id, { width, height })
-  })
-  edges.forEach((e) => {
-    g.setEdge(e.source, e.target)
-  })
-
-  dagre.layout(g)
-
-  return nodes.map((n) => {
-    const pos = g.node(n.id)
-    const { width, height } = nodeSize(n.data)
-    return {
-      ...n,
-      targetPosition: Position.Left,
-      sourcePosition: Position.Right,
-      // Explicit width/height, not just position -- getNodesBounds() (used by the PNG/
-      // SVG export) needs these on the node object itself to compute an accurate
-      // bounding box. Without them it has no footprint per node to work with, only a
-      // point, which undersizes the exported image and clips the far/bottom edge of
-      // whatever nodes happen to be at the layout's extremes.
-      width,
-      height,
-      // dagre gives center; React Flow wants top-left.
-      position: {
-        x: pos.x - width / 2,
-        y: pos.y - height / 2,
-      },
-    }
-  })
+  // The "+N more / show fewer" footer is part of the card, so its height must be in the
+  // box ELK lays out around -- otherwise it'd overlap the card below.
+  const footerHeight = data.hasColumnFooter ? FOOTER_HEIGHT : 0
+  return {
+    width: NODE_WIDTH,
+    height: HEADER_HEIGHT + tagsHeight + data.columns.length * ROW_HEIGHT + footerHeight + CARD_PADDING,
+  }
 }
 
 /** Build an undirected adjacency map from the edge list. */
@@ -90,6 +86,59 @@ export function directNeighbors(nodeId: string, edges: GraphEdge[]): Set<string>
   const result = new Set<string>([nodeId])
   ;(adj.get(nodeId) ?? new Set()).forEach((n) => result.add(n))
   return result
+}
+
+/**
+ * Shortest join path between two tables over the (undirected) relationship graph -- "how
+ * does A connect to B?". BFS, so the fewest hops. Returns the node ids along the path and
+ * the edge ids linking them, or null if they're in different connected components.
+ */
+export function shortestPath(
+  sourceId: string,
+  targetId: string,
+  edges: GraphEdge[],
+): { nodeIds: string[]; edgeIds: string[] } | null {
+  if (sourceId === targetId) return { nodeIds: [sourceId], edgeIds: [] }
+  const adj = new Map<string, { to: string; edgeId: string }[]>()
+  const link = (a: string, b: string, id: string) => {
+    let l = adj.get(a)
+    if (!l) adj.set(a, (l = []))
+    l.push({ to: b, edgeId: id })
+  }
+  for (const e of edges) {
+    link(e.source, e.target, e.id)
+    link(e.target, e.source, e.id)
+  }
+  const prev = new Map<string, { node: string; edgeId: string }>()
+  const visited = new Set<string>([sourceId])
+  // Head-index cursor rather than Array.shift() (which is O(n) per dequeue) so BFS stays
+  // O(V+E) on large scoped graphs.
+  const queue = [sourceId]
+  let head = 0
+  while (head < queue.length) {
+    const cur = queue[head++]
+    if (cur === targetId) break
+    for (const { to, edgeId } of adj.get(cur) ?? []) {
+      if (!visited.has(to)) {
+        visited.add(to)
+        prev.set(to, { node: cur, edgeId })
+        queue.push(to)
+      }
+    }
+  }
+  if (!visited.has(targetId)) return null
+  const nodeIds = [targetId]
+  const edgeIds: string[] = []
+  let cur = targetId
+  while (cur !== sourceId) {
+    const p = prev.get(cur)!
+    edgeIds.push(p.edgeId)
+    nodeIds.push(p.node)
+    cur = p.node
+  }
+  nodeIds.reverse()
+  edgeIds.reverse()
+  return { nodeIds, edgeIds }
 }
 
 /** Full connected component (BFS transitive closure) containing the node. */

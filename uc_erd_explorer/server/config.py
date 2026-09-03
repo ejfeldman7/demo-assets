@@ -36,6 +36,10 @@ _AUTH_SP = "service_principal"
 # global.
 _user_token: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar("erd_user_token", default=None)
 _user_key: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar("erd_user_key", default=None)
+# The forwarded user email (x-forwarded-email), kept separately from the cache key so the
+# admin gate can match it against ERD_ADMIN_EMAILS. Databricks Apps forward it in both
+# auth modes; absent in local dev.
+_user_email: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar("erd_user_email", default=None)
 
 
 def get_auth_mode() -> str:
@@ -46,16 +50,33 @@ def get_auth_mode() -> str:
     return _AUTH_OBO if raw in (_AUTH_OBO, "obo", "user", "on-behalf-of-user") else _AUTH_SP
 
 
-def set_user_context(token: Optional[str], email: Optional[str]) -> Tuple[object, object]:
+def set_user_context(token: Optional[str], email: Optional[str]) -> Tuple[object, object, object]:
     """Record the forwarded user token + identity for the current request; returns reset
     tokens for reset_user_context() to restore in a finally block."""
     key = email or (token[:16] if token else None)
-    return _user_token.set(token), _user_key.set(key)
+    return _user_token.set(token), _user_key.set(key), _user_email.set(email)
 
 
-def reset_user_context(tokens: Tuple[object, object]) -> None:
+def reset_user_context(tokens: Tuple[object, object, object]) -> None:
     _user_token.reset(tokens[0])
     _user_key.reset(tokens[1])
+    _user_email.reset(tokens[2])
+
+
+def get_user_email() -> Optional[str]:
+    """The forwarded email of the logged-in user for this request, or None (local dev)."""
+    return _user_email.get()
+
+
+def get_admin_emails() -> set[str]:
+    """Lowercased allow-list from ERD_ADMIN_EMAILS (comma-separated). An empty result set
+    means no restriction -> admin actions are open. "*" is the explicit open sentinel (the
+    deploy-time default, since Databricks Apps reject an empty-string env value), and a
+    bare empty string means the same; set specific emails to lock admin down."""
+    raw = (os.environ.get("ERD_ADMIN_EMAILS") or "").strip()
+    if raw in ("", "*"):
+        return set()
+    return {e.strip().lower() for e in raw.split(",") if e.strip()}
 
 
 def get_user_cache_key() -> str:

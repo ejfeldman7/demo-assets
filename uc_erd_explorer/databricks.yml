@@ -92,6 +92,18 @@ variables:
       and each user needs CAN_USE on the SQL warehouse. Deploy OBO with
       --var="auth_mode=on_behalf_of_user".
     default: "service_principal"
+  erd_admin_emails:
+    description: >-
+      Comma-separated allow-list of user emails permitted to trigger the in-app snapshot
+      refresh (the "Refresh snapshot now" button runs a Jobs run-now that spends compute).
+      "*" (default) leaves the admin action open to any app user -- fine for a
+      single-user/internal deployment where app access == trust. Set specific emails (e.g.
+      --var="erd_admin_emails=you@example.com,teammate@example.com") on any shared,
+      multi-role, or customer deployment so only listed users can trigger a refresh.
+      NOTE: must stay NON-EMPTY -- an empty string renders as a null env value the
+      Databricks Apps API rejects; server/config.py's get_admin_emails() treats "*" (and
+      empty) as "no restriction".
+    default: "*"
   user_api_scopes:
     description: >-
       User authorization scopes the app requests on behalf of the logged-in user (OBO).
@@ -163,6 +175,8 @@ resources:
             value: ${var.erd_test_catalog_suffix}
           - name: "ERD_AUTH_MODE"
             value: ${var.auth_mode}
+          - name: "ERD_ADMIN_EMAILS"
+            value: ${var.erd_admin_emails}
           - name: "ERD_METADATA_SOURCE"
             value: ${var.erd_metadata_source}
           - name: "ERD_METADATA_LOCATION"
