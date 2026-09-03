@@ -31,6 +31,8 @@ import {
 } from './edgeDisplay'
 import { ErdInteractionContext } from './erdContext'
 import { CommandPalette } from './CommandPalette'
+import { GroupBoxNode } from './GroupBox'
+import type { GroupBox } from './elkLayout'
 import type { TableEntry } from './search'
 // Only the ExportScope type is imported eagerly (types are erased at build time, so this
 // pulls no code). The export implementation -- which drags in html-to-image, js-yaml and
@@ -48,7 +50,7 @@ import type {
   TableNodeData,
 } from './types'
 
-const nodeTypes = { table: TableNode, schema: SchemaNode }
+const nodeTypes = { table: TableNode, schema: SchemaNode, groupBox: GroupBoxNode }
 const edgeTypes = { relationship: RelationshipEdge }
 
 function isSchemaNodeData(data: TableNodeData | SchemaNodeData): data is SchemaNodeData {
@@ -100,6 +102,10 @@ function ErdCanvas() {
   // Tables whose full column list is expanded (past the COLUMN_CAP row cap). Per-table so
   // an analyst can pin a wide fact table open while everything else stays compact.
   const [expandedTables, setExpandedTables] = useState<Set<string>>(new Set())
+  // "Group by schema": cluster tables into a labeled box per catalog.schema (ELK compound
+  // layout). Off by default -- the flat view is the baseline.
+  const [groupBySchema, setGroupBySchema] = useState(false)
+  const [groupBoxes, setGroupBoxes] = useState<GroupBox[]>([])
 
   const { fitView, setCenter, getNode } = useReactFlow()
   const laidOutRef = useRef<Node<TableNodeData | SchemaNodeData>[]>([])
@@ -334,47 +340,60 @@ function ErdCanvas() {
   const baseEdgesRef = useRef(baseEdges)
   baseEdgesRef.current = baseEdges
 
-  // Positioned nodes, produced by ELK's async layout. Structural deps ONLY (new graph,
-  // keys-only, inferred toggle, direction) -- never per-table expansion. A cancel flag
-  // guards against an out-of-order result from a superseded layout overwriting a newer one.
+  // Positioned nodes from ELK's async layout (+ the schema group boxes when grouping is on).
   const [baseNodes, setBaseNodes] = useState<Node<TableNodeData | SchemaNodeData>[]>([])
-  useEffect(() => {
-    let cancelled = false
-    const nodes = rawNodesRef.current
-    if (nodes.length === 0) {
-      laidOutRef.current = []
-      setBaseNodes([])
-      return
-    }
-    layoutGraphElk(nodes, baseEdgesRef.current, layoutDir)
-      .then((laid) => {
-        if (cancelled) return
-        laidOutRef.current = laid
-        setBaseNodes(laid)
-      })
-      .catch((e) => {
-        if (!cancelled) setError((e as Error).message)
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [graph, keysOnly, showInferred, layoutDir])
 
-  // Expand/collapse a single table WITHOUT re-laying-out. Expansion only ever changes a
-  // card's height, so we keep every card in place and apply a local vertical push: shift
-  // the cards that would otherwise collide -- those below the toggled card in its layout
-  // lane -- by exactly the height delta. In LR the lane is the toggled card's column (same
-  // x-band), so only that column nudges; in TB everything below shifts down as a block.
-  // No re-layout, no re-fit, no overlap.
+  // A layout "generation" so a superseded async layout never overwrites a newer one (two
+  // effects can now trigger a layout, so a shared counter replaces per-effect cancel flags).
+  const layoutGenRef = useRef(0)
+  const runLayout = useCallback(
+    (fit: boolean) => {
+      const nodes = rawNodesRef.current
+      if (nodes.length === 0) {
+        laidOutRef.current = []
+        setBaseNodes([])
+        setGroupBoxes([])
+        return
+      }
+      const gen = ++layoutGenRef.current
+      if (!fit) skipFitRef.current = true
+      layoutGraphElk(nodes, baseEdgesRef.current, layoutDir, groupBySchema)
+        .then((r) => {
+          if (gen !== layoutGenRef.current) return
+          laidOutRef.current = r.nodes
+          setBaseNodes(r.nodes)
+          setGroupBoxes(r.groups)
+        })
+        .catch((e) => {
+          if (gen === layoutGenRef.current) setError((e as Error).message)
+        })
+    },
+    [layoutDir, groupBySchema],
+  )
+
+  // Structural re-layout: new graph, keys-only, inferred toggle, direction, or grouping
+  // toggle (the last two arrive via runLayout's deps). NOT per-table column expansion.
+  useEffect(() => {
+    runLayout(true)
+  }, [graph, keysOnly, showInferred, runLayout])
+
+  // Expand/collapse a single table. FLAT mode: keep every card in place and apply a local
+  // vertical push -- shift only the cards below the toggled one in its lane by the exact
+  // height delta (no re-layout, no re-fit, no overlap). GROUPED mode: a height change must
+  // also resize the schema box, so re-cluster instead (still no re-fit).
   const prevExpandedRef = useRef(expandedTables)
   useEffect(() => {
     const prev = prevExpandedRef.current
     prevExpandedRef.current = expandedTables
     const added = [...expandedTables].filter((id) => !prev.has(id))
     const removed = [...prev].filter((id) => !expandedTables.has(id))
-    // Only a single-table toggle gets a local push; bulk/none changes (e.g. a graph
-    // reload) just fall through to the fresh layout the ELK effect produced.
+    // Only a single-table toggle acts; bulk/none changes (e.g. a graph reload) fall through
+    // to the fresh layout the structural effect produced.
     if (added.length + removed.length !== 1) return
+    if (groupBySchema) {
+      runLayout(false) // re-cluster so the schema box grows/shrinks with the table
+      return
+    }
     const toggledId = added[0] ?? removed[0]
     const expanding = added.length === 1
 
@@ -405,7 +424,7 @@ function ErdCanvas() {
         return inLane(n) ? { ...n, position: { x: n.position.x, y: n.position.y + shift } } : n
       })
     })
-  }, [expandedTables, layoutDir])
+  }, [expandedTables, layoutDir, groupBySchema, runLayout])
 
   // Compute the currently-visible set based on selection + mode.
   // The shortest join path between the two chosen endpoints (tracing mode), or null.
@@ -424,9 +443,28 @@ function ErdCanvas() {
       : connectedComponent(selectedId, scopedGraphEdges)
   }, [tracePath, selectedId, filterMode, graph, scopedGraphEdges])
 
-  // Apply dim/selection styling + catalog color to nodes.
-  const displayNodes = useMemo<Node<TableNodeData | SchemaNodeData>[]>(() => {
-    return baseNodes.map((n) => ({
+  // Schema group boxes (grouped mode only) rendered FIRST so the opaque table cards paint
+  // on top; inert (non-selectable/draggable) background containers, not parents of the
+  // tables. Then the tables with dim/selection/highlight/color applied.
+  const displayNodes = useMemo<Node[]>(() => {
+    const boxes: Node[] = groupBoxes.map((g) => ({
+      id: g.id,
+      type: 'groupBox',
+      position: { x: g.x, y: g.y },
+      width: g.width,
+      height: g.height,
+      style: { width: g.width, height: g.height },
+      selectable: false,
+      draggable: false,
+      zIndex: 0,
+      data: {
+        catalog: g.catalog,
+        schema: g.schema,
+        count: g.count,
+        color: lookupCatalogColor(catalogColorMap, g.catalog),
+      },
+    }))
+    const tables = baseNodes.map((n) => ({
       ...n,
       data: {
         ...n.data,
@@ -436,7 +474,8 @@ function ErdCanvas() {
         highlightedCols: highlightColsByNode.get(n.id),
       },
     }))
-  }, [baseNodes, visibleSet, selectedId, catalogColorMap, highlightColsByNode])
+    return [...boxes, ...tables]
+  }, [baseNodes, groupBoxes, visibleSet, selectedId, catalogColorMap, highlightColsByNode])
 
   const displayEdges = useMemo<Edge[]>(() => {
     const hasSelection = Boolean(selectedId) || Boolean(tracePath)
@@ -792,6 +831,16 @@ function ErdCanvas() {
             <div style={styles.hint}>
               Auto-arranged with ELK. Left → right suits these wide table cards; top → bottom
               stacks them vertically.
+            </div>
+            <Switch
+              label="Group by schema"
+              checked={groupBySchema}
+              onChange={() => setGroupBySchema((v) => !v)}
+            />
+            <div style={styles.hint}>
+              {groupBySchema
+                ? 'Tables are clustered into a labeled box per catalog.schema.'
+                : 'Cluster tables into a container per catalog.schema.'}
             </div>
           </div>
 
