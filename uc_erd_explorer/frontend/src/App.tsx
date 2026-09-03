@@ -493,7 +493,14 @@ function ErdCanvas() {
       position: { x: g.x, y: g.y },
       width: g.width,
       height: g.height,
-      style: { width: g.width, height: g.height },
+      // pointerEvents 'none': the group box is a background container that spans its whole
+      // area in the nodes layer, which paints ABOVE the edges layer -- with default
+      // pointer-events it swallows hover/click on every edge (and the empty space) under it,
+      // so edge-hover-to-reveal-join-keys silently died inside any group. Making it
+      // non-interactive lets those events fall through to the edges beneath; the collapse
+      // header re-enables pointer events on itself (see GroupBox.tsx). The table cards inside
+      // are their own nodes with their own pointer events, so they stay fully interactive.
+      style: { width: g.width, height: g.height, pointerEvents: 'none' },
       selectable: false,
       draggable: false,
       zIndex: 0,
