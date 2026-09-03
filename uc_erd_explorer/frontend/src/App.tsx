@@ -21,7 +21,7 @@ import { GeniePanel } from './GeniePanel'
 import { InfoPanel } from './InfoPanel'
 import { AdminPanel } from './AdminPanel'
 import { CatalogSchemaPicker } from './CatalogSchemaPicker'
-import { connectedComponent, directNeighbors } from './graphUtils'
+import { COLUMN_CAP, connectedComponent, directNeighbors, visibleColumns } from './graphUtils'
 import { layoutGraphElk, type LayoutDirection } from './elkLayout'
 import {
   activeEdgeIds,
@@ -92,9 +92,16 @@ function ErdCanvas() {
   // ELK layout flow direction: 'LR' (left-to-right, default -- reads best for these wide
   // column-listing cards) or 'TB' (top-to-bottom).
   const [layoutDir, setLayoutDir] = useState<LayoutDirection>('LR')
+  // Tables whose full column list is expanded (past the COLUMN_CAP row cap). Per-table so
+  // an analyst can pin a wide fact table open while everything else stays compact.
+  const [expandedTables, setExpandedTables] = useState<Set<string>>(new Set())
 
   const { fitView, setCenter, getNode } = useReactFlow()
   const laidOutRef = useRef<Node<TableNodeData | SchemaNodeData>[]>([])
+  // Layout anchoring for expand/collapse (see the layout effect): the table to keep in
+  // place across a re-layout, and a one-shot flag to skip that pass's fit-view.
+  const expandAnchorRef = useRef<string | null>(null)
+  const skipFitRef = useRef(false)
 
   // Load the catalog/schema tree whenever the Prod/Test environment changes, to
   // populate the picker with that environment's actual (possibly _ts-suffixed) catalogs.
@@ -202,7 +209,20 @@ function ErdCanvas() {
 
   // Stable interaction handlers passed to table nodes via context (see erdContext.ts).
   const interaction = useMemo(
-    () => ({ onKeyEnter: (key: HoveredKey) => setHoveredKey(key), onKeyLeave: () => setHoveredKey(null) }),
+    () => ({
+      onKeyEnter: (key: HoveredKey) => setHoveredKey(key),
+      onKeyLeave: () => setHoveredKey(null),
+      onToggleExpand: (nodeId: string) => {
+        // Mark this table as the layout anchor so the imminent re-layout keeps it in place
+        // (and skips the fit-view), instead of the card jumping to a new position.
+        expandAnchorRef.current = nodeId
+        setExpandedTables((prev) => {
+          const next = new Set(prev)
+          next.has(nodeId) ? next.delete(nodeId) : next.add(nodeId)
+          return next
+        })
+      },
+    }),
     [],
   )
 
@@ -234,20 +254,33 @@ function ErdCanvas() {
       }
     }
 
-    const rawNodes: Node<TableNodeData | SchemaNodeData>[] = graph.nodes.map((n) => ({
-      id: n.id,
-      type: graph.view === 'schema_summary' ? 'schema' : 'table',
-      position: { x: 0, y: 0 },
-      data:
-        keysOnlyActive && 'columns' in n
-          ? {
-              ...n,
-              columns: n.columns.filter(
-                (c) => c.is_pk || c.is_fk || inferredFkColsByNode[n.id]?.has(c.name),
-              ),
-            }
-          : n,
-    }))
+    const rawNodes: Node<TableNodeData | SchemaNodeData>[] = graph.nodes.map((n) => {
+      // Schema-summary nodes have no columns -- pass through unchanged.
+      if (!('columns' in n)) {
+        return { id: n.id, type: 'schema', position: { x: 0, y: 0 }, data: n }
+      }
+      // Keys-only first (a view filter), then the row cap. baseCols is the full set this
+      // card would show uncapped; visibleColumns orders PK->FK->rest and caps it.
+      const baseCols = keysOnlyActive
+        ? n.columns.filter((c) => c.is_pk || c.is_fk || inferredFkColsByNode[n.id]?.has(c.name))
+        : n.columns
+      const expanded = expandedTables.has(n.id)
+      const { visible, hidden } = visibleColumns(baseCols, expanded)
+      return {
+        id: n.id,
+        type: 'table',
+        position: { x: 0, y: 0 },
+        data: {
+          ...n,
+          columns: visible,
+          hiddenColumnCount: hidden,
+          // Footer (the +N more / show fewer control) shown whenever the uncapped set
+          // exceeds the cap -- so an expanded card keeps a "show fewer" control.
+          hasColumnFooter: baseCols.length > COLUMN_CAP,
+          expanded,
+        },
+      }
+    })
 
     const edges: Edge[] = scopedGraphEdges.map((e) => ({
       id: e.id,
@@ -283,11 +316,17 @@ function ErdCanvas() {
     }))
 
     return { rawNodes, baseEdges: edges }
-  }, [graph, scopedGraphEdges, keysOnly])
+  }, [graph, scopedGraphEdges, keysOnly, expandedTables])
 
   // Positioned nodes, produced by ELK's async layout. Re-run whenever the raw nodes,
   // edges, or flow direction change. A cancel flag guards against an out-of-order result
   // from a superseded layout (e.g. rapid keysOnly/direction toggles) overwriting a newer one.
+  // When a single table is expanded/collapsed, ELK still re-lays-out everything (so
+  // neighbors reflow and nothing overlaps), but we DON'T want the card the user clicked to
+  // jump or the view to re-zoom. expandAnchorRef (set in onToggleExpand) names that table:
+  // the new layout is translated so it stays exactly where it was, and skipFitRef
+  // suppresses the fit-view for that pass. Structural changes (new graph, keys-only,
+  // direction) leave both unset and fit normally.
   const [baseNodes, setBaseNodes] = useState<Node<TableNodeData | SchemaNodeData>[]>([])
   useEffect(() => {
     let cancelled = false
@@ -299,6 +338,22 @@ function ErdCanvas() {
     layoutGraphElk(rawNodes, baseEdges, layoutDir)
       .then((laid) => {
         if (cancelled) return
+        const anchorId = expandAnchorRef.current
+        if (anchorId) {
+          // Shift the whole new layout so the toggled card returns to its prior position
+          // (relative positions are preserved, so it stays overlap-free).
+          const oldNode = laidOutRef.current.find((n) => n.id === anchorId)
+          const newNode = laid.find((n) => n.id === anchorId)
+          if (oldNode && newNode) {
+            const dx = newNode.position.x - oldNode.position.x
+            const dy = newNode.position.y - oldNode.position.y
+            if (dx || dy) {
+              for (const n of laid) n.position = { x: n.position.x - dx, y: n.position.y - dy }
+            }
+          }
+          skipFitRef.current = true
+          expandAnchorRef.current = null
+        }
         laidOutRef.current = laid
         setBaseNodes(laid)
       })
@@ -416,11 +471,15 @@ function ErdCanvas() {
     m.exportGraphAsErStudioZip(scoped, erStudioDialect, 'erd-erstudio-export')
   }, [canExport, graph, exportScope, erStudioDialect])
 
-  // Fit view when a fresh graph loads.
+  // Fit view when a fresh layout lands -- but NOT when the re-layout was an expand/collapse
+  // (skipFitRef), so toggling a table's columns doesn't re-zoom the whole canvas.
   useEffect(() => {
-    if (baseNodes.length > 0) {
-      setTimeout(() => fitView({ padding: 0.15, duration: 400 }), 50)
+    if (baseNodes.length === 0) return
+    if (skipFitRef.current) {
+      skipFitRef.current = false
+      return
     }
+    setTimeout(() => fitView({ padding: 0.15, duration: 400 }), 50)
   }, [baseNodes, fitView])
 
   const runSearch = useCallback(() => {

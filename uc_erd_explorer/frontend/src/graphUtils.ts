@@ -1,4 +1,30 @@
-import type { GraphEdge, SchemaNodeData, TableNodeData } from './types'
+import type { ColumnMeta, GraphEdge, SchemaNodeData, TableNodeData } from './types'
+
+// Max column rows a card shows before capping. Beyond this, a card would grow taller than
+// the viewport and blow up the auto-layout's bounding box (fit-view shrinks everything,
+// export/minimap balloon). A "+N more columns" footer expands it on demand. Chosen ~12 to
+// match how Lucidchart/Vertabelo cap wide tables.
+export const COLUMN_CAP = 12
+const FOOTER_HEIGHT = 26
+
+/**
+ * The columns a card actually renders, ordered PK -> FK -> rest (stable within each group),
+ * capped at COLUMN_CAP unless expanded. Ordering PK/FK first is what guarantees the edge
+ * anchor columns (fk_columns[0]/pk_columns[0]) survive the cap, so relationship lines never
+ * lose their handle. Returns the visible slice plus how many were hidden.
+ */
+export function visibleColumns(
+  columns: ColumnMeta[],
+  expanded: boolean,
+): { visible: ColumnMeta[]; hidden: number } {
+  const rank = (c: ColumnMeta) => (c.is_pk ? 0 : c.is_fk ? 1 : 2)
+  const sorted = columns
+    .map((c, i) => ({ c, i }))
+    .sort((a, b) => rank(a.c) - rank(b.c) || a.i - b.i)
+    .map((x) => x.c)
+  if (expanded || sorted.length <= COLUMN_CAP) return { visible: sorted, hidden: 0 }
+  return { visible: sorted.slice(0, COLUMN_CAP), hidden: sorted.length - COLUMN_CAP }
+}
 
 // Approximate node dimensions for auto-layout (a card = header + optional tag row + one
 // row per column; a collapsed schema card is a fixed size). Consumed by the ELK layout
@@ -20,12 +46,20 @@ function isSchemaNode(data: TableNodeData | SchemaNodeData): data is SchemaNodeD
   return !('columns' in data)
 }
 
-export function nodeSize(data: TableNodeData | SchemaNodeData): { width: number; height: number } {
+export function nodeSize(
+  data: (TableNodeData | SchemaNodeData) & { hasColumnFooter?: boolean },
+): { width: number; height: number } {
   if (isSchemaNode(data)) {
     return { width: SCHEMA_NODE_WIDTH, height: SCHEMA_NODE_HEIGHT }
   }
   const tagsHeight = data.tags.length > 0 ? TAGS_ROW_HEIGHT : 0
-  return { width: NODE_WIDTH, height: HEADER_HEIGHT + tagsHeight + data.columns.length * ROW_HEIGHT + CARD_PADDING }
+  // The "+N more / show fewer" footer is part of the card, so its height must be in the
+  // box ELK lays out around -- otherwise it'd overlap the card below.
+  const footerHeight = data.hasColumnFooter ? FOOTER_HEIGHT : 0
+  return {
+    width: NODE_WIDTH,
+    height: HEADER_HEIGHT + tagsHeight + data.columns.length * ROW_HEIGHT + footerHeight + CARD_PADDING,
+  }
 }
 
 /** Build an undirected adjacency map from the edge list. */

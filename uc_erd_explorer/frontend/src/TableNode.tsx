@@ -1,8 +1,8 @@
-import { useContext, useEffect, useMemo } from 'react'
+import { useContext, useEffect } from 'react'
 import { Handle, Position, useUpdateNodeInternals, type NodeProps } from 'reactflow'
 import type { ColorPair } from './catalogColors'
 import { ErdInteractionContext } from './erdContext'
-import type { ColumnMeta, TableNodeData, TagValue } from './types'
+import type { TableNodeData, TagValue } from './types'
 
 // A small key glyph, matching Databricks Catalog Explorer's use of a key icon for PK/FK
 // columns (instead of text "PK"/"FK" badges). Color-coded gold (PK) / blue (FK), but the
@@ -95,6 +95,12 @@ export interface TableNodeProps extends NodeProps<TableNodeData> {
     // Columns to highlight because an active (hovered) relationship connects to them --
     // this is what lights up the matching column on the *other* table (extra B).
     highlightedCols?: Set<string>
+    // Column-cap state (set in App). `columns` is already the visible (ordered, capped)
+    // slice; hiddenColumnCount is how many are hidden; hasColumnFooter gates the footer;
+    // expanded says whether the full set is shown.
+    hiddenColumnCount?: number
+    hasColumnFooter?: boolean
+    expanded?: boolean
   }
 }
 
@@ -103,20 +109,13 @@ export function TableNode({ id, data }: TableNodeProps) {
   const dimmed = data.dimmed
   const selected = data.selected
   const highlightedCols = data.highlightedCols
-  const { onKeyEnter, onKeyLeave } = useContext(ErdInteractionContext)
+  const { onKeyEnter, onKeyLeave, onToggleExpand } = useContext(ErdInteractionContext)
   const updateNodeInternals = useUpdateNodeInternals()
 
-  // Keys at the top of each table: primary keys first, then foreign keys, then the rest
-  // (stable within each group). This is DISPLAY ONLY -- the exported model/DDL still uses
-  // the payload's true ordinal order, since export.ts reads the GraphResponse, not this
-  // rendered node.
-  const displayColumns = useMemo(() => {
-    const rank = (c: ColumnMeta) => (c.is_pk ? 0 : c.is_fk ? 1 : 2)
-    return data.columns
-      .map((c, i) => ({ c, i }))
-      .sort((a, b) => rank(a.c) - rank(b.c) || a.i - b.i)
-      .map((x) => x.c)
-  }, [data.columns])
+  // App already delivers `columns` ordered (PK -> FK -> rest) and capped via
+  // visibleColumns(), so the node renders them as-is. (Ordering is display-only; the
+  // exported model/DDL still uses the payload's true ordinal order via export.ts.)
+  const displayColumns = data.columns
 
   // Each column row carries its own source/target handle (id = column name) so edges
   // anchor to the actual related field, not the card's vertical center. React Flow caches
@@ -274,6 +273,34 @@ export function TableNode({ id, data }: TableNodeProps) {
           )
         })}
       </div>
+      {data.hasColumnFooter && (
+        // "nodrag" so clicking the control doesn't start a node drag; stopPropagation so it
+        // doesn't also fire the table's click-to-focus. Toggling re-runs layout in App.
+        <button
+          className="nodrag"
+          onClick={(e) => {
+            e.stopPropagation()
+            onToggleExpand(id)
+          }}
+          title={data.expanded ? 'Collapse to the capped view' : 'Show all columns'}
+          style={{
+            width: '100%',
+            border: 'none',
+            borderTop: '1px solid #f2f4f7',
+            background: '#fbfcfd',
+            color: 'var(--db-blue)',
+            fontSize: 10.5,
+            fontWeight: 600,
+            padding: '5px 11px',
+            cursor: 'pointer',
+            textAlign: 'left',
+          }}
+        >
+          {data.expanded
+            ? '− Show fewer'
+            : `+ ${data.hiddenColumnCount} more column${data.hiddenColumnCount === 1 ? '' : 's'}`}
+        </button>
+      )}
     </div>
   )
 }

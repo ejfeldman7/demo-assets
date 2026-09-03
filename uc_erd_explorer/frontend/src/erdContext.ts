@@ -8,9 +8,13 @@ import type { HoveredKey } from './edgeDisplay'
 export interface ErdInteraction {
   onKeyEnter: (key: HoveredKey) => void
   onKeyLeave: () => void
+  // Toggle a table's expanded state (show all columns vs the capped view). Changing it
+  // re-runs layout, since the card's height changes.
+  onToggleExpand: (nodeId: string) => void
 }
 
 export const ErdInteractionContext = createContext<ErdInteraction>({
   onKeyEnter: () => {},
   onKeyLeave: () => {},
+  onToggleExpand: () => {},
 })
