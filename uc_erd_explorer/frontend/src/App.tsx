@@ -150,6 +150,11 @@ function ErdCanvas() {
     setSelectedId(null)
     setHoveredEdgeId(null)
     setHoveredKey(null)
+    // Drop trace endpoints too -- they name tables in the OLD scope; carrying them into a
+    // new catalog/schema/env would trace stale ids (misleading "different components", or
+    // silently highlighting same-named tables the user never picked here).
+    setTraceFrom(null)
+    setTraceTo(null)
 
     // An explicit, empty selection (nothing checked) means "show nothing" -- not the
     // same as null ("All"). The backend has no way to express "no pairs = empty" (a bare
@@ -441,18 +446,21 @@ function ErdCanvas() {
       // selection): clicking a table focuses it but no longer paints its join-key labels
       // persistently -- the core behavior change from the review.
       const v = computeEdgeVisual({ edge: e, active: activeEdgeSet, visibleSet, hasSelection })
-      // Edges on the traced join path are emphasized (blue, thicker, animated).
       const onPath = pathEdgeIds.has(e.id)
+      // In trace mode ONLY the path edges are prominent -- every other edge is dimmed, even
+      // one whose endpoints both happen to be path tables (a chord), so the highlighted
+      // path is unambiguous. Otherwise, dim/emphasis follow the click-to-focus selection.
+      const dimmed = tracePath ? !onPath : v.dimmed
       return {
         ...e,
         data: { ...(e.data as object), showLabel: v.showLabel },
         style: {
           ...e.style,
-          opacity: v.opacity,
-          stroke: v.dimmed ? '#e4e7ec' : onPath ? 'var(--db-blue)' : inferred ? 'var(--db-red)' : '#98a2b3',
+          opacity: dimmed ? 0.1 : 1,
+          stroke: dimmed ? '#e4e7ec' : onPath ? 'var(--db-blue)' : inferred ? 'var(--db-red)' : '#98a2b3',
           strokeWidth: onPath ? 2.5 : e.style?.strokeWidth,
         },
-        animated: v.animated || onPath,
+        animated: tracePath ? onPath : v.animated,
       }
     })
   }, [baseEdges, visibleSet, selectedId, activeEdgeSet, tracePath, pathEdgeIds])
@@ -484,17 +492,17 @@ function ErdCanvas() {
 
   const reset = useCallback(() => {
     setSelectedId(null)
+    setTraceFrom(null)
+    setTraceTo(null)
     setTimeout(() => fitView({ padding: 0.15, duration: 400 }), 0)
   }, [fitView])
 
   const toggleTracing = useCallback(() => {
-    setTracing((on) => {
-      setTraceFrom(null)
-      setTraceTo(null)
-      if (!on) setSelectedId(null) // entering trace mode: drop any click-to-focus selection
-      return !on
-    })
-  }, [])
+    setTraceFrom(null)
+    setTraceTo(null)
+    if (!tracing) setSelectedId(null) // entering trace mode: drop any click-to-focus selection
+    setTracing((on) => !on)
+  }, [tracing])
 
   // Disabled in the collapsed schema-summary view -- there's no table/column detail to
   // export until a schema is expanded, and an image of two big summary boxes isn't
@@ -573,10 +581,10 @@ function ErdCanvas() {
           zoom: 1.1,
           duration: 500,
         })
-        setSelectedId(match.id)
+        if (!tracing) setSelectedId(match.id)
       }
     }
-  }, [search, getNode, setCenter])
+  }, [search, getNode, setCenter, tracing])
 
   // Table list for the Cmd+K quick-find palette -- only meaningful in the detail view
   // (schema-summary has no table nodes to jump to).
@@ -593,10 +601,12 @@ function ErdCanvas() {
       const node = getNode(id)
       if (node) {
         setCenter(node.position.x + 120, node.position.y + 80, { zoom: 1.1, duration: 500 })
-        setSelectedId(id)
+        // In trace mode we only pan to the table (so the user can click it as an endpoint);
+        // applying click-to-focus here would fight the trace dimming.
+        if (!tracing) setSelectedId(id)
       }
     },
-    [getNode, setCenter],
+    [getNode, setCenter, tracing],
   )
 
   // Cmd/Ctrl+K opens the quick-find palette (Lineage-Explorer-style navigation for large
@@ -849,7 +859,13 @@ function ErdCanvas() {
             nodeTypes={nodeTypes}
             edgeTypes={edgeTypes}
             onNodeClick={onNodeClick}
-            onPaneClick={() => setSelectedId(null)}
+            onPaneClick={() => {
+              // Clicking empty canvas clears focus AND any traced path (in trace mode this
+              // resets the endpoints so the next node click starts a fresh trace).
+              setSelectedId(null)
+              setTraceFrom(null)
+              setTraceTo(null)
+            }}
             onEdgeMouseEnter={(_, edge) => setHoveredEdgeId(edge.id)}
             onEdgeMouseLeave={() => setHoveredEdgeId(null)}
             fitView

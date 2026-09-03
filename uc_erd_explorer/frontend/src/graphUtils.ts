@@ -107,9 +107,12 @@ export function shortestPath(
   }
   const prev = new Map<string, { node: string; edgeId: string }>()
   const visited = new Set<string>([sourceId])
+  // Head-index cursor rather than Array.shift() (which is O(n) per dequeue) so BFS stays
+  // O(V+E) on large scoped graphs.
   const queue = [sourceId]
-  while (queue.length > 0) {
-    const cur = queue.shift()!
+  let head = 0
+  while (head < queue.length) {
+    const cur = queue[head++]
     if (cur === targetId) break
     for (const { to, edgeId } of adj.get(cur) ?? []) {
       if (!visited.has(to)) {
