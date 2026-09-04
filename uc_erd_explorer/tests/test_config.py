@@ -143,6 +143,66 @@ class TestGetGenieSpaceId:
         assert config.get_genie_space_id() == "abc-123"
 
 
+class TestResolveGenieSpaceId:
+    @pytest.fixture(autouse=True)
+    def _reset_cache(self):
+        """Clear the module-level discovery cache before each test so cases don't leak."""
+        config._genie_space_cache.update(id=None, ts=0.0, resolved=False)
+        yield
+        config._genie_space_cache.update(id=None, ts=0.0, resolved=False)
+
+    def test_managed_marker_matches_setup_script(self):
+        # The app finds the space by the marker setup/create_genie_space.py embeds; if the
+        # two ever drift, auto-discovery silently breaks. Lock them together.
+        import create_genie_space
+
+        assert config.GENIE_MANAGED_MARKER == create_genie_space.MANAGED_MARKER
+
+    def test_explicit_env_wins_without_discovery(self, monkeypatch):
+        monkeypatch.setenv("GENIE_SPACE_ID", "explicit-99")
+        called = []
+        monkeypatch.setattr(config, "_discover_managed_genie_space", lambda: called.append(1) or "discovered")
+        assert config.resolve_genie_space_id() == "explicit-99"
+        assert called == []  # explicit config short-circuits before any API call
+
+    def test_discovers_when_env_unset(self, monkeypatch):
+        monkeypatch.setattr(config, "_discover_managed_genie_space", lambda: "found-space-1")
+        assert config.resolve_genie_space_id() == "found-space-1"
+
+    def test_discovery_result_is_cached(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(config, "_discover_managed_genie_space", lambda: calls.append(1) or "sp-1")
+        assert config.resolve_genie_space_id() == "sp-1"
+        assert config.resolve_genie_space_id() == "sp-1"
+        assert len(calls) == 1  # second call served from cache, no re-list
+
+    def test_miss_is_cached_briefly(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(config, "_discover_managed_genie_space", lambda: calls.append(1) or None)
+        assert config.resolve_genie_space_id() is None
+        assert config.resolve_genie_space_id() is None
+        assert len(calls) == 1  # a miss within the short TTL isn't re-listed on every ask
+
+    def test_miss_re_lists_after_ttl(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(config, "_discover_managed_genie_space", lambda: calls.append(1) or None)
+        assert config.resolve_genie_space_id() is None
+        # Age the cached miss past its TTL -> next call re-discovers (picks up a space
+        # created by setup_genie_space after the app started).
+        config._genie_space_cache["ts"] -= config._GENIE_DISCOVERY_MISS_TTL + 1
+        config.resolve_genie_space_id()
+        assert len(calls) == 2
+
+    def test_discovery_never_raises_on_api_error(self, monkeypatch):
+        # _discover_managed_genie_space swallows errors -> None, so a broken list call reads
+        # as "not configured", never a 500 out of the Genie route.
+        def boom():
+            raise RuntimeError("genie list exploded")
+
+        monkeypatch.setattr(config, "get_workspace_client", boom)
+        assert config._discover_managed_genie_space() is None
+
+
 class TestGetCacheTtlSeconds:
     def test_default(self):
         assert config.get_cache_ttl_seconds() == 3600

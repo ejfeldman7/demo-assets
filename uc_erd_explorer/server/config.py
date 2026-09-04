@@ -5,11 +5,16 @@ Local dev:  WorkspaceClient(profile=DATABRICKS_PROFILE or your CLI's DEFAULT pro
 Deployed:   WorkspaceClient()  — auto-injected service-principal credentials
 """
 import contextvars
+import logging
 import os
+import threading
+import time
 from functools import lru_cache
 from typing import List, Optional, Tuple
 
 from databricks.sdk import WorkspaceClient
+
+logger = logging.getLogger("erd")
 
 # Detect environment: Databricks Apps sets DATABRICKS_APP_NAME.
 IS_DATABRICKS_APP = bool(os.environ.get("DATABRICKS_APP_NAME"))
@@ -239,6 +244,75 @@ def get_genie_space_id() -> Optional[str]:
     if not raw or raw == "not-configured":
         return None
     return raw
+
+
+# Must stay identical to setup/create_genie_space.py's MANAGED_MARKER: that script embeds
+# this string in the Genie Space description, and the app finds the space by it below.
+# A drift between the two silently breaks auto-discovery, so a test asserts they match.
+GENIE_MANAGED_MARKER = "[erd-explorer-managed]"
+
+# Auto-discovery cache. A found id is stable, so cache it long; a miss is cached briefly so
+# the app picks up a space created by `setup_genie_space` within about a minute, without
+# re-listing on every /api/genie/ask in the meantime.
+_GENIE_DISCOVERY_TTL = 3600.0
+_GENIE_DISCOVERY_MISS_TTL = 60.0
+_genie_space_cache = {"id": None, "ts": 0.0, "resolved": False}
+_genie_cache_lock = threading.Lock()
+
+
+def _discover_managed_genie_space() -> Optional[str]:
+    """List Genie spaces as the app's own identity (never the OBO user -- Genie always runs
+    as the SP) and return the id of the one this deployment manages, matched by
+    GENIE_MANAGED_MARKER in its description -- the marker setup/create_genie_space.py embeds.
+    The app SP sees the space because that same setup step grants it CAN_RUN. Best-effort:
+    returns None on any error (missing permission, API hiccup) so discovery failing just
+    reads as 'not configured yet', never a 500."""
+    try:
+        w = get_workspace_client()
+        page_token = None
+        while True:
+            query = {"page_size": 100}
+            if page_token:
+                query["page_token"] = page_token
+            resp = w.api_client.do(method="GET", path="/api/2.0/genie/spaces", query=query)
+            for space in resp.get("spaces", []):
+                if GENIE_MANAGED_MARKER in (space.get("description") or ""):
+                    return space.get("space_id") or space.get("id")
+            page_token = resp.get("next_page_token")
+            if not page_token:
+                return None
+    except Exception as e:  # noqa: BLE001
+        logger.warning("Genie space auto-discovery failed (treating as not configured): %s", e)
+        return None
+
+
+def resolve_genie_space_id() -> Optional[str]:
+    """The Genie Space the chat should talk to. An explicit GENIE_SPACE_ID env always wins
+    (and short-circuits before any API call); otherwise the app auto-discovers the space the
+    setup job created, matched by its managed marker -- so a deployment only has to run
+    `databricks bundle run setup_genie_space`, with no copy-the-id-and-redeploy step and
+    nothing to reset on the next `bundle deploy`. Returns None when neither is available
+    (chat then shows the friendly "not configured" message).
+
+    BLOCKING on a cache miss (it lists Genie spaces), so callers must run it off the event
+    loop -- see server/routes/genie.py (asyncio.to_thread). Result is cached (see the TTLs)."""
+    explicit = get_genie_space_id()
+    if explicit:
+        return explicit
+    now = time.time()
+    with _genie_cache_lock:
+        if _genie_space_cache["resolved"]:
+            ttl = _GENIE_DISCOVERY_TTL if _genie_space_cache["id"] else _GENIE_DISCOVERY_MISS_TTL
+            if now - _genie_space_cache["ts"] < ttl:
+                return _genie_space_cache["id"]
+    # Discover outside the lock so a slow list doesn't serialize concurrent asks; a rare
+    # duplicate lookup under a cold cache is harmless.
+    discovered = _discover_managed_genie_space()
+    with _genie_cache_lock:
+        _genie_space_cache.update(id=discovered, ts=time.time(), resolved=True)
+    if discovered:
+        logger.info("Auto-discovered managed Genie Space: %s", discovered)
+    return discovered
 
 
 def get_snapshot_job_id() -> Optional[str]:
