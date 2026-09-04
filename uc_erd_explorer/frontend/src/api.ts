@@ -62,6 +62,73 @@ export async function fetchRefreshRunStatus(runId: number): Promise<RefreshRunSt
   return res.json()
 }
 
+export interface AuditFinding {
+  severity: 'warn' | 'info'
+  category: string
+  title: string
+  detail: string
+  count: number
+  objects: string[]
+}
+
+export interface AuditResponse {
+  available: boolean
+  reason?: string
+  summary: Record<string, number>
+  findings: AuditFinding[]
+}
+
+/** Deterministic schema-health audit over the current scope (same pairs/env as the graph). */
+export async function fetchAudit(pairs?: string[], env: CatalogEnv = 'prod'): Promise<AuditResponse> {
+  const params = new URLSearchParams({ env })
+  if (pairs && pairs.length > 0) params.set('pairs', pairs.join(','))
+  const res = await fetch(`/api/audit?${params.toString()}`)
+  if (!res.ok) {
+    const detail = await res.json().catch(() => null)
+    throw new Error(detail?.detail ?? `Audit failed: ${res.status} ${res.statusText}`)
+  }
+  return res.json()
+}
+
+export interface DbxmetagenStatus {
+  present: boolean
+  location: string | null
+  tables_found: string[]
+  repo_url: string
+}
+
+/** Whether dbxmetagen's output is present for the in-scope catalogs (best-effort, read-only). */
+export async function fetchDbxmetagen(env: CatalogEnv = 'prod'): Promise<DbxmetagenStatus> {
+  const res = await fetch(`/api/integrations/dbxmetagen?env=${env}`)
+  if (!res.ok) throw new Error(`dbxmetagen check failed: ${res.status}`)
+  return res.json()
+}
+
+export interface PredictedEdge {
+  id: string
+  source: string
+  target: string
+  fk_columns: string[]
+  pk_columns: string[]
+  predicted: true
+  confidence: number | null
+  is_fk: boolean
+  reasoning: string | null
+}
+
+export interface DbxmetagenFkResponse {
+  present: boolean
+  location: string | null
+  edges: PredictedEdge[]
+}
+
+/** dbxmetagen's confidence-scored FK predictions as overlay edges (empty if absent). */
+export async function fetchDbxmetagenFkPredictions(env: CatalogEnv = 'prod'): Promise<DbxmetagenFkResponse> {
+  const res = await fetch(`/api/integrations/dbxmetagen/fk-predictions?env=${env}`)
+  if (!res.ok) throw new Error(`dbxmetagen FK predictions failed: ${res.status}`)
+  return res.json()
+}
+
 export interface GenieResponse {
   conversation_id: string
   message_id: string

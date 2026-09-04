@@ -64,6 +64,11 @@ automatically.
   no formal constraint declared) and renders them as dashed, distinctly colored edges,
   clearly labeled "inferred" — off by default, one click to show, never presented as
   equivalent to a real constraint.
+- **Schema health audit**: an on-demand, deterministic pass over the current scope (no
+  writes, no LLM) that flags tables with no primary key, orphan tables (no declared
+  relationships), undocumented tables, column-documentation coverage, and columns whose
+  names look like personal data but carry no tag — a structural, diagram-native read of
+  where a schema needs attention.
 - **Keys-only column view**: a sidebar toggle that collapses every table to just its
   primary- and foreign-key columns, so wide tables (dozens of columns) stay readable. A
   table with no declared PK/FK renders as a header-only card — expected, and called out
@@ -413,6 +418,8 @@ the notebook re-run) to catch up.
 | `erd_test_catalog_suffix` | `ERD_TEST_CATALOG_SUFFIX` | `_ts` | Suffix appended to each `erd_catalogs` entry when the frontend's Prod/Test toggle is set to Test (e.g. `edp_customer` → `edp_customer_ts`) |
 | `erd_rate_limit_per_min` | `ERD_RATE_LIMIT_PER_MIN` | `120` | Max `/api/graph` + `/api/schema-tree` requests per minute **per identity** (user email in OBO, else client IP) before `429`; `0` disables. In-process (per container). See "Abuse protection" below |
 | `erd_genie_rate_limit_per_min` | `ERD_GENIE_RATE_LIMIT_PER_MIN` | `20` | Max `/api/genie/ask` requests per minute per identity before `429` — tighter, since each ask spends a Genie call; `0` disables |
+| *(env only, optional)* | `ERD_DBXMETAGEN_LOCATION` (`"catalog.schema"`) | unset (auto-scan) | Where dbxmetagen writes its output tables. Unset = the app auto-scans the in-scope catalogs for dbxmetagen's signature tables. Set it to point straight at a known output schema. See "Related: … dbxmetagen" |
+| *(env only, optional)* | `ERD_DBXMETAGEN_MIN_CONFIDENCE` | `0.5` | Minimum `final_confidence` for a dbxmetagen FK prediction to appear in the overlay |
 | `auth_mode` | `ERD_AUTH_MODE` | `service_principal` | Which identity the ERD queries run as. `service_principal` (default) queries as the app's own SP, bounded by `erd_catalogs`. `on_behalf_of_user` queries as the **logged-in user**, filtered by their own UC privileges — see "On-behalf-of-user authorization" below |
 | `user_api_scopes` | *(app config, not an env var)* | `[]` | User authorization scopes the app requests for OBO; set to `["sql"]` for `on_behalf_of_user`. A **complex** (list) value the CLI can't set via `--var`, so it's declared at the bundle **target** level — see below |
 
@@ -735,9 +742,20 @@ The two are complementary. dbxmetagen applies its reviewed comments and tags to 
 Catalog's **native** metadata, and this app already reads those — so descriptions and tags
 dbxmetagen writes back show up on the diagram automatically, no extra configuration. Choose
 this app when you want a fast, read-only way to see and share a schema; add dbxmetagen when
-you want to generate and govern the metadata itself. (Surfacing dbxmetagen's own richer
-outputs — its confidence-scored FK predictions and domain classifications, which live in its
-tables rather than UC-native fields — as an enhanced overlay is a planned enhancement.)
+you want to generate and govern the metadata itself.
+
+**The app is dbxmetagen-aware.** It checks (read-only, best-effort) whether dbxmetagen's
+output tables are present for the catalogs in scope:
+
+- **Not present** → a sidebar note recommends dbxmetagen with a link, so a viewer knows where
+  AI-generated docs, PII tagging, and FK prediction come from.
+- **Present** → a "dbxmetagen metadata detected" note, plus a **Show FK predictions** toggle
+  that overlays dbxmetagen's confidence-scored foreign-key predictions (from its
+  `fk_predictions` table) as a distinct violet edge layer, with the score on hover — a
+  companion to the declared and inferred edges. Detection looks for dbxmetagen's signature
+  tables in the in-scope catalogs; set `ERD_DBXMETAGEN_LOCATION` (`catalog.schema`) to point at
+  a specific output schema, and `ERD_DBXMETAGEN_MIN_CONFIDENCE` (default `0.5`) to tune the
+  overlay's threshold. This is a smarter *read* only — the app still never writes.
 
 ## Project structure
 

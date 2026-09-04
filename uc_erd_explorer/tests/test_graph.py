@@ -105,6 +105,25 @@ class TestInternalSchemaExclusionSql:
         sql = graph._internal_schema_exclusion_sql("cat", "sch")
         assert "bad; catalog" not in sql
 
+    def test_excludes_dbxmetagen_output_schema_when_detected(self, monkeypatch):
+        # When dbxmetagen's output schema is set on the context, it's excluded from the graph
+        # so its bookkeeping tables don't render as nodes / skew the audit.
+        monkeypatch.setattr(graph, "get_metadata_location", lambda: ("megacorp", "erd_meta"))
+        token = graph._dbxmetagen_meta.set(("megacorp", "dbxmetagen"))
+        try:
+            sql = graph._internal_schema_exclusion_sql("cat", "sch")
+            assert "NOT (cat = 'megacorp' AND sch = 'dbxmetagen')" in sql
+        finally:
+            graph._dbxmetagen_meta.reset(token)
+
+    def test_no_dbxmetagen_exclusion_when_unset(self, monkeypatch):
+        monkeypatch.setattr(graph, "get_metadata_location", lambda: ("megacorp", "erd_meta"))
+        token = graph._dbxmetagen_meta.set(None)
+        try:
+            assert "dbxmetagen" not in graph._internal_schema_exclusion_sql("cat", "sch")
+        finally:
+            graph._dbxmetagen_meta.reset(token)
+
 
 def _col(catalog, schema, table, column, full_type, ordinal=1, comment=None):
     return [catalog, schema, table, column, full_type, ordinal, comment]

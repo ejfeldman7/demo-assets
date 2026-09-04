@@ -16,7 +16,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from server.config import get_catalogs
-from server.routes import admin, genie, graph
+from server.routes import admin, genie, graph, insights
 
 # Logging setup so the per-query/per-request timing (logger name "erd", used here and in
 # server/graph.py) actually surfaces in `databricks apps logs`. Under `uvicorn app:app`,
@@ -75,6 +75,7 @@ async def health_check():
 app.include_router(graph.router, prefix="/api")
 app.include_router(genie.router, prefix="/api")
 app.include_router(admin.router, prefix="/api")
+app.include_router(insights.router, prefix="/api")
 
 
 class _CachedStaticFiles(StaticFiles):
