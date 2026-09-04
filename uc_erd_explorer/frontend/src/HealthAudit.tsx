@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { CSSProperties } from 'react'
 import { fetchAudit, type AuditFinding, type AuditResponse } from './api'
 import type { CatalogEnv } from './types'
@@ -10,23 +10,30 @@ export function HealthAudit({ pairs, env }: { pairs?: string[]; env: CatalogEnv 
   const [loading, setLoading] = useState(false)
   const [data, setData] = useState<AuditResponse | null>(null)
   const [error, setError] = useState<string | null>(null)
+  // Monotonic request token: only the latest run's response is allowed to paint, so a slow
+  // request from a previous scope can't land on top of the current one.
+  const reqRef = useRef(0)
 
-  // Clear stale results whenever the audited scope changes.
+  // Clear stale results whenever the audited scope changes, and invalidate any in-flight run.
   const scopeKey = `${pairs?.slice().sort().join(',') ?? ''}|${env}`
   useEffect(() => {
+    reqRef.current += 1
     setData(null)
     setError(null)
+    setLoading(false)
   }, [scopeKey])
 
   async function run() {
+    const rid = (reqRef.current += 1)
     setLoading(true)
     setError(null)
     try {
-      setData(await fetchAudit(pairs, env))
+      const result = await fetchAudit(pairs, env)
+      if (reqRef.current === rid) setData(result)
     } catch (e) {
-      setError((e as Error).message)
+      if (reqRef.current === rid) setError((e as Error).message)
     } finally {
-      setLoading(false)
+      if (reqRef.current === rid) setLoading(false)
     }
   }
 

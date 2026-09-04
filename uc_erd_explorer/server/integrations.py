@@ -51,6 +51,12 @@ def _detect(catalogs: Optional[List[str]]) -> Dict[str, Any]:
     result: Dict[str, Any] = {"present": False, "location": None, "tables_found": [], "repo_url": DBXMETAGEN_REPO_URL}
     try:
         location = get_dbxmetagen_location()
+        # Validate the explicit location's identifiers before interpolating them into SQL
+        # (same guard the FK-prediction path uses). A malformed value is ignored -- fall back
+        # to auto-scanning the in-scope catalogs rather than running/again-swallowing bad SQL.
+        if location and not all(_IDENTIFIER_RE.match(p) for p in location):
+            logger.warning("ERD_DBXMETAGEN_LOCATION %r has invalid identifiers; ignoring it", location)
+            location = None
         names_in = _in_clause(list(_SIGNATURE_TABLES))
         if location:
             cat, sch = location
@@ -122,10 +128,13 @@ def fetch_fk_predictions(catalogs: Optional[List[str]]) -> Dict[str, Any]:
     edges: List[Dict[str, Any]] = []
     try:
         min_conf = _fk_min_confidence()
+        # Cap the fetch: the frontend only draws predictions whose endpoints are on the current
+        # diagram, so an unbounded fk_predictions table would just waste bandwidth/work. 500
+        # highest-confidence pairs is far more than any diagram renders.
         rows = _rows(_execute(
             "SELECT src_table, src_column, dst_table, dst_column, final_confidence, is_fk, "
             f"ai_reasoning FROM {location}.fk_predictions WHERE final_confidence >= {min_conf} "
-            "ORDER BY final_confidence DESC",
+            "ORDER BY final_confidence DESC LIMIT 500",
             "dbxmetagen_fk_predictions", "30s",
         ))
         for (src_table, src_column, dst_table, dst_column, confidence, is_fk, reasoning) in rows:

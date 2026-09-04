@@ -28,14 +28,17 @@ _PII_PATTERNS = [
 ]
 _PII_RE = re.compile("|".join(re.escape(p) for p in _PII_PATTERNS))
 
-# A column named exactly one of these is a benign identifier, not personal data, even though
-# it may contain a fragment above (e.g. "address_id" is a surrogate key, not an address).
+# A column ending in "_id" is usually a benign surrogate/foreign key, not personal data, even
+# when it contains a fragment above (e.g. "address_id" is a key, not an address) -- so those
+# are excluded. The exception: identifiers that ARE personal data in their own right
+# (national_id, tax_id) must still be flagged despite ending in "_id".
 _PII_EXCLUDE_SUFFIXES = ("_id",)
+_PII_SENSITIVE_IDS = ("national_id", "tax_id")
 
 
 def _looks_like_pii(column_name: str) -> bool:
     name = (column_name or "").lower()
-    if name.endswith(_PII_EXCLUDE_SUFFIXES):
+    if name.endswith(_PII_EXCLUDE_SUFFIXES) and not any(s in name for s in _PII_SENSITIVE_IDS):
         return False
     return bool(_PII_RE.search(name))
 

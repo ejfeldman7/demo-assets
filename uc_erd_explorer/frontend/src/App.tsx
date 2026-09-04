@@ -263,8 +263,17 @@ function ErdCanvas() {
       add(e.source, e.fk_columns[0])
       add(e.target, e.pk_columns[0])
     }
+    // Predicted-FK overlay endpoints must be pinned too -- a prediction often points at a
+    // column that is NOT a declared key, so without this it'd be sliced past the cap and
+    // dangle its violet edge (same class of bug the declared/inferred anchors above prevent).
+    if (showPredictions) {
+      for (const p of predictedEdges) {
+        add(p.source, p.fk_columns[0])
+        add(p.target, p.pk_columns[0])
+      }
+    }
     return m
-  }, [scopedGraphEdges])
+  }, [scopedGraphEdges, showPredictions, predictedEdges])
 
   // The relationship(s) whose detail is revealed right now -- driven purely by transient
   // hover (a hovered edge, or a hovered PK/FK key column), never by selection.
@@ -327,6 +336,16 @@ function ErdCanvas() {
         if (!e.inferred) continue
         const set = (inferredFkColsByNode[e.source] ??= new Set())
         for (const col of e.fk_columns) set.add(col)
+      }
+      // Reveal predicted-FK overlay columns in keys-only mode too (both ends), so a shown
+      // violet edge isn't left pointing at a table whose predicted column is hidden.
+      if (showPredictions) {
+        for (const p of predictedEdges) {
+          const s = (inferredFkColsByNode[p.source] ??= new Set())
+          for (const col of p.fk_columns) s.add(col)
+          const t = (inferredFkColsByNode[p.target] ??= new Set())
+          for (const col of p.pk_columns) t.add(col)
+        }
       }
     }
 
@@ -395,9 +414,19 @@ function ErdCanvas() {
     // edges tagged predicted, filtered to endpoints actually on the diagram, above the base
     // edges. Distinct violet + confidence in the hover label (see RelationshipEdge).
     const presentIds = new Set(graph.nodes.map((n) => n.id))
+    // Signatures of DECLARED edges, so a prediction that just restates an existing declared
+    // FK isn't drawn as a redundant violet line over the solid one -- the overlay's value is
+    // the *novel* predictions. (Declared edges are already on the diagram; inferred ones are a
+    // separate toggle.)
+    const declaredSig = new Set(
+      scopedGraphEdges
+        .filter((e) => !e.inferred)
+        .map((e) => `${e.source}|${[...e.fk_columns].sort().join(',')}|${e.target}|${[...e.pk_columns].sort().join(',')}`),
+    )
     const predictedRf: Edge[] = showPredictions
       ? predictedEdges
           .filter((p) => presentIds.has(p.source) && presentIds.has(p.target))
+          .filter((p) => !declaredSig.has(`${p.source}|${[...p.fk_columns].sort().join(',')}|${p.target}|${[...p.pk_columns].sort().join(',')}`))
           .map((p) => ({
             id: p.id,
             source: p.source,

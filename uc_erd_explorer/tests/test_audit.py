@@ -65,6 +65,12 @@ class TestPossiblePii:
         nodes = [node("c.s.t", columns=[col("address_id")])]
         assert audit.possible_pii_untagged(nodes) == []
 
+    def test_sensitive_ids_flagged_despite_id_suffix(self):
+        # national_id / tax_id ARE personal data and must not be swept up by the _id exclusion.
+        assert audit._looks_like_pii("national_id") is True
+        assert audit._looks_like_pii("tax_id") is True
+        assert audit._looks_like_pii("customer_id") is False  # ordinary surrogate key
+
     def test_tagged_pii_not_flagged(self):
         nodes = [node("c.s.cust", columns=[col("email", tags=[{"name": "pii", "value": "email"}])])]
         assert audit.possible_pii_untagged(nodes) == []

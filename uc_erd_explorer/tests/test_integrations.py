@@ -120,3 +120,18 @@ class TestExplicitLocation:
 
     def test_no_env_location_returns_none(self):
         assert integrations.get_dbxmetagen_location() is None
+
+    def test_invalid_location_identifiers_ignored_falls_back_to_scan(self, monkeypatch):
+        # A malformed ERD_DBXMETAGEN_LOCATION must not be interpolated into SQL; detection
+        # ignores it and auto-scans instead (here the scan finds the anchor table).
+        monkeypatch.setenv("ERD_DBXMETAGEN_LOCATION", "bad-cat.sch")  # hyphen -> invalid identifier
+        captured = {}
+
+        def fake_execute(stmt, *a, **k):
+            captured["stmt"] = stmt
+            return object()
+        monkeypatch.setattr(integrations, "_execute", fake_execute)
+        monkeypatch.setattr(integrations, "_rows", lambda _r: [["megacorp", "dbxmetagen", "table_knowledge_base"]])
+        r = integrations.detect_dbxmetagen(["megacorp"])
+        assert "bad-cat" not in captured["stmt"]      # never interpolated
+        assert r["present"] is True and r["location"] == "megacorp.dbxmetagen"
