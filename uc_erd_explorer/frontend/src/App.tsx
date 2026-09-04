@@ -32,6 +32,8 @@ import {
 } from './edgeDisplay'
 import { ErdInteractionContext } from './erdContext'
 import { CommandPalette } from './CommandPalette'
+import { HealthAudit } from './HealthAudit'
+import { DbxmetagenNote } from './DbxmetagenNote'
 import { GroupBoxNode } from './GroupBox'
 import type { GroupBox } from './elkLayout'
 import type { TableEntry } from './search'
@@ -955,6 +957,8 @@ function ErdCanvas() {
             </div>
           </div>
 
+          <HealthAudit pairs={selectedPairs ? Array.from(selectedPairs) : undefined} env={env} />
+
           <div style={styles.statsBox}>
             <Stat
               label="Tables"
@@ -971,6 +975,8 @@ function ErdCanvas() {
               {selectedTable}
             </div>
           )}
+
+          <DbxmetagenNote env={env} />
         </aside>
 
         {/* Canvas */}
