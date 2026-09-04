@@ -158,19 +158,47 @@ def _pair_in_clause(catalog_col: str, schema_col: str, pairs: List[Tuple[str, st
     return f"({catalog_col}, {schema_col}) IN ({tuples})" if tuples else "1=0"
 
 
+# Location (catalog, schema) of dbxmetagen's output schema to exclude from the graph when
+# detected, so its bookkeeping tables (table_knowledge_base, fk_predictions, ...) don't render
+# as nodes or skew the health audit. Set per-build by build_graph()/list_catalog_schemas() and
+# read by _internal_schema_exclusion_sql; a ContextVar so it's carried into the query-pool
+# threads (via _submit_query's copy_context), the same way the OBO identity is.
+_dbxmetagen_meta: contextvars.ContextVar[Optional[Tuple[str, str]]] = contextvars.ContextVar(
+    "erd_dbxmetagen_meta", default=None
+)
+
+
+def _resolve_dbxmetagen_meta(catalogs: Optional[List[str]]) -> Optional[Tuple[str, str]]:
+    """(catalog, schema) of dbxmetagen's detected output schema, or None. Lazy import to avoid
+    a circular import (integrations imports helpers from this module). Best-effort: detection
+    is cached and never raises, but this is guarded so graph building is never blocked by it."""
+    try:
+        from .integrations import detect_dbxmetagen
+        detected = detect_dbxmetagen(catalogs)
+        loc = detected.get("location") if detected.get("present") else None
+        if loc and "." in loc:
+            cat, sch = loc.split(".", 1)
+            return cat.strip(), sch.strip()
+    except Exception:  # noqa: BLE001
+        return None
+    return None
+
+
 def _internal_schema_exclusion_sql(catalog_col: str, schema_col: str) -> str:
     """SQL condition excluding UC's own metadata schema plus THIS deployment's actual
     configured Genie metadata catalog+schema (via get_metadata_location(), which reads
     ERD_METADATA_LOCATION) -- never a hardcoded schema name. Scoped by catalog+schema
     together (not schema name alone), so an unrelated catalog that happens to also have a
-    schema literally named "erd_meta" isn't wrongly excluded.
+    schema literally named "erd_meta" isn't wrongly excluded. Also excludes dbxmetagen's own
+    output schema when it's been detected (its KB / fk_predictions tables are tooling
+    bookkeeping, not user data) -- see _dbxmetagen_meta / build_graph.
     """
     meta_catalog, meta_schema = get_metadata_location()
     if not (_IDENTIFIER_RE.match(meta_catalog) and _IDENTIFIER_RE.match(meta_schema)):
         # Defensive: an invalid configured name can't be excluded via string interpolation
         # into SQL; information_schema exclusion below still applies either way.
         meta_catalog, meta_schema = "", ""
-    return (
+    clause = (
         f"{schema_col} != 'information_schema' "
         f"AND NOT ({catalog_col} = '{meta_catalog}' AND {schema_col} = '{meta_schema}') "
         # Databricks-internal plumbing catalogs (e.g. __databricks_internal_catalog_...)
@@ -178,6 +206,10 @@ def _internal_schema_exclusion_sql(catalog_col: str, schema_col: str) -> str:
         # deliberately name one of these, but worth excluding unconditionally either way.
         f"AND substring({catalog_col}, 1, 2) != '__'"
     )
+    dbx = _dbxmetagen_meta.get()
+    if dbx and _IDENTIFIER_RE.match(dbx[0]) and _IDENTIFIER_RE.match(dbx[1]):
+        clause += f" AND NOT ({catalog_col} = '{dbx[0]}' AND {schema_col} = '{dbx[1]}')"
+    return clause
 
 
 # --- SQL helpers ------------------------------------------------------------
@@ -460,6 +492,8 @@ def list_catalog_schemas(env: str = "prod") -> List[Dict[str, Any]]:
     ERD_CATALOGS allow-list, or every catalog visible if unset), resolved to the test
     catalogs (see _resolve_catalogs) when env == "test"."""
     catalogs = _resolve_catalogs(get_catalogs(), env)
+    # Exclude dbxmetagen's output schema from the picker too (see _internal_schema_exclusion_sql).
+    _dbxmetagen_meta.set(_resolve_dbxmetagen_meta(catalogs))
     catalog_filter = f"AND table_catalog IN {_in_clause(catalogs)}" if catalogs else ""
     source = _resolve_source(env)
     if source == _SNAPSHOT:
@@ -587,6 +621,12 @@ def build_graph(pairs: Optional[List[Tuple[str, str]]] = None, env: str = "prod"
     cached = _CACHE.get(key)
     if cached and (time.time() - cached[0]) < get_cache_ttl_seconds():
         return cached[1]
+
+    # Resolve dbxmetagen's output schema (if detected) so the query builders below exclude it
+    # from the graph -- its bookkeeping tables aren't user data. Set on this build's context;
+    # _submit_query copies the context into the query-pool threads. No reset needed: asyncio
+    # .to_thread runs build_graph in its own copied context, discarded when it returns.
+    _dbxmetagen_meta.set(_resolve_dbxmetagen_meta(catalogs))
 
     build_started = time.perf_counter()
     # Read from the materialized snapshot when enabled (env-gated), else live. The snapshot
