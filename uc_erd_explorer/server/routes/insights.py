@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from ..audit import audit_graph
 from ..config import get_catalogs
 from ..graph import build_graph, _resolve_catalogs
-from ..integrations import detect_dbxmetagen
+from ..integrations import detect_dbxmetagen, fetch_fk_predictions
 from ..ratelimit import graph_rate_limit
 from .graph import _ENV_QUERY, _capture_user
 
@@ -60,3 +60,13 @@ async def get_dbxmetagen(env: str = _ENV_QUERY):
     catalogs = _resolve_catalogs(get_catalogs(), env)
     # detect_dbxmetagen never raises (best-effort); still offloaded since it hits the warehouse.
     return await asyncio.to_thread(detect_dbxmetagen, catalogs)
+
+
+@router.get("/integrations/dbxmetagen/fk-predictions", dependencies=[Depends(graph_rate_limit)])
+async def get_dbxmetagen_fk_predictions(env: str = _ENV_QUERY):
+    """dbxmetagen's confidence-scored FK predictions as overlay edges (read-only, best-effort).
+    Returns {present, location, edges}; empty edges if dbxmetagen or its fk_predictions table
+    isn't there. The frontend filters edges to on-diagram tables and renders them as a
+    distinct, toggleable layer."""
+    catalogs = _resolve_catalogs(get_catalogs(), env)
+    return await asyncio.to_thread(fetch_fk_predictions, catalogs)

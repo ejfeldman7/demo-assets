@@ -21,6 +21,10 @@ export interface RelationshipEdgeData {
   showLabel?: boolean
   fkCols?: string[]
   pkCols?: string[]
+  // dbxmetagen predicted-FK overlay: a distinct violet edge with a confidence score,
+  // shown only when the "dbxmetagen FK predictions" layer is toggled on.
+  predicted?: boolean
+  confidence?: number | null
 }
 
 export function RelationshipEdge({
@@ -43,11 +47,15 @@ export function RelationshipEdge({
     targetPosition,
   })
   const inferred = Boolean(data?.inferred)
+  const predicted = Boolean(data?.predicted)
   const showLabel = Boolean(data?.showLabel)
   const label = showLabel
     ? formatJoinLabel(data?.fkCols ?? [], data?.pkCols ?? [], inferred)
     : null
-  const accent = inferred ? 'var(--db-red)' : 'var(--text-muted)'
+  // Confidence shown on a predicted edge's hover label (e.g. "98%").
+  const confidencePct =
+    predicted && typeof data?.confidence === 'number' ? `${Math.round(data.confidence * 100)}%` : null
+  const accent = predicted ? 'var(--predicted)' : inferred ? 'var(--db-red)' : 'var(--text-muted)'
 
   // Crow's-foot cardinality, drawn directly in the edge layer rather than via SVG <marker>
   // (whose auto-orientation rendered the "many" foot as a plain arrowhead). The layout is
@@ -56,7 +64,7 @@ export function RelationshipEdge({
   // glyphs: a splayed three-prong "many" foot planted at the FK/source node, and a single
   // perpendicular "one" bar at the PK/target node. Passive (pointerEvents none) and dimmed
   // in step with the line.
-  const cardStroke = inferred ? 'var(--db-red)' : 'var(--edge)'
+  const cardStroke = predicted ? 'var(--predicted)' : inferred ? 'var(--db-red)' : 'var(--edge)'
   const markerOpacity = style?.opacity ?? 1
   // The crow's-foot/one-bar glyphs are drawn assuming a HORIZONTAL line at both endpoints
   // (the fixed Left/Right per-column handles). Schema-summary edges in top-to-bottom
@@ -120,11 +128,13 @@ export function RelationshipEdge({
                 <span aria-hidden style={{ opacity: 0.7, lineHeight: 1 }}>↓</span>
                 <span>{label.pk}</span>
                 {label.inferred && <span style={{ fontSize: 8, opacity: 0.9 }}>(inferred)</span>}
+                {predicted && <span style={{ fontSize: 8, opacity: 0.9 }}>predicted{confidencePct ? ` · ${confidencePct}` : ''}</span>}
               </div>
             ) : (
               <span style={{ whiteSpace: 'nowrap' }}>
                 {label.fk} → {label.pk}
                 {label.inferred ? ' (inferred)' : ''}
+                {predicted ? ` · predicted${confidencePct ? ` ${confidencePct}` : ''}` : ''}
               </span>
             )}
           </div>

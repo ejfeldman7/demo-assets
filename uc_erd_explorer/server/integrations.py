@@ -12,12 +12,15 @@ a note recommending it. Detection is a single information_schema lookup for the 
 tables, cached briefly. It never writes and never raises -- any failure reads as "not present"
 so a detection hiccup can't break the graph.
 """
+import logging
 import os
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
 from .config import get_user_cache_key
-from .graph import _execute, _in_clause, _rows
+from .graph import _IDENTIFIER_RE, _execute, _in_clause, _rows
+
+logger = logging.getLogger("erd")
 
 DBXMETAGEN_REPO_URL = "https://github.com/databricks-industry-solutions/dbxmetagen"
 
@@ -88,3 +91,58 @@ def detect_dbxmetagen(catalogs: Optional[List[str]]) -> Dict[str, Any]:
     result = _detect(catalogs)
     _cache[key] = (now, result)
     return result
+
+
+# Minimum final_confidence for a prediction to surface as an overlay edge, configurable so a
+# deployment can tighten/loosen it. dbxmetagen scores 0..1; 0.5 keeps only credible pairs.
+def _fk_min_confidence() -> float:
+    raw = (os.environ.get("ERD_DBXMETAGEN_MIN_CONFIDENCE") or "").strip()
+    try:
+        return min(1.0, max(0.0, float(raw))) if raw else 0.5
+    except ValueError:
+        return 0.5
+
+
+def fetch_fk_predictions(catalogs: Optional[List[str]]) -> Dict[str, Any]:
+    """Read dbxmetagen's confidence-scored foreign-key predictions and shape them as overlay
+    edges. Best-effort and read-only: returns present=False (and no edges) if dbxmetagen isn't
+    detected or the fk_predictions table is missing/unreadable, so the app degrades cleanly.
+
+    Each edge mirrors the app's own edge shape (source/target are 'catalog.schema.table' ids,
+    matching dbxmetagen's fully-qualified src_table/dst_table) plus `predicted: true`, the
+    `confidence` (final_confidence), whether dbxmetagen marked it a real FK (`is_fk`), and its
+    short `reasoning`. The frontend filters these to endpoints actually on the diagram and
+    renders them as a distinct, toggleable layer."""
+    detected = detect_dbxmetagen(catalogs)
+    if not detected.get("present") or not detected.get("location"):
+        return {"present": False, "location": None, "edges": []}
+    location = detected["location"]
+    if not all(_IDENTIFIER_RE.match(p) for p in location.split(".")):
+        return {"present": True, "location": location, "edges": []}
+    edges: List[Dict[str, Any]] = []
+    try:
+        min_conf = _fk_min_confidence()
+        rows = _rows(_execute(
+            "SELECT src_table, src_column, dst_table, dst_column, final_confidence, is_fk, "
+            f"ai_reasoning FROM {location}.fk_predictions WHERE final_confidence >= {min_conf} "
+            "ORDER BY final_confidence DESC",
+            "dbxmetagen_fk_predictions", "30s",
+        ))
+        for (src_table, src_column, dst_table, dst_column, confidence, is_fk, reasoning) in rows:
+            if not src_table or not dst_table:
+                continue
+            edges.append({
+                "id": f"dbxmetagen:{src_table}.{src_column}->{dst_table}.{dst_column}",
+                "source": src_table,
+                "target": dst_table,
+                "fk_columns": [src_column] if src_column else [],
+                "pk_columns": [dst_column] if dst_column else [],
+                "predicted": True,
+                "confidence": round(float(confidence), 3) if confidence is not None else None,
+                "is_fk": bool(is_fk),
+                "reasoning": reasoning,
+            })
+    except Exception as e:  # noqa: BLE001 -- table may not exist yet; degrade to no edges
+        logger.warning("dbxmetagen fk_predictions read failed (no overlay): %s", e)
+        return {"present": True, "location": location, "edges": []}
+    return {"present": True, "location": location, "edges": edges}

@@ -104,6 +104,31 @@ export async function fetchDbxmetagen(env: CatalogEnv = 'prod'): Promise<Dbxmeta
   return res.json()
 }
 
+export interface PredictedEdge {
+  id: string
+  source: string
+  target: string
+  fk_columns: string[]
+  pk_columns: string[]
+  predicted: true
+  confidence: number | null
+  is_fk: boolean
+  reasoning: string | null
+}
+
+export interface DbxmetagenFkResponse {
+  present: boolean
+  location: string | null
+  edges: PredictedEdge[]
+}
+
+/** dbxmetagen's confidence-scored FK predictions as overlay edges (empty if absent). */
+export async function fetchDbxmetagenFkPredictions(env: CatalogEnv = 'prod'): Promise<DbxmetagenFkResponse> {
+  const res = await fetch(`/api/integrations/dbxmetagen/fk-predictions?env=${env}`)
+  if (!res.ok) throw new Error(`dbxmetagen FK predictions failed: ${res.status}`)
+  return res.json()
+}
+
 export interface GenieResponse {
   conversation_id: string
   message_id: string

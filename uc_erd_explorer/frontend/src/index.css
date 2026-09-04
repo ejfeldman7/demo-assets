@@ -28,6 +28,7 @@
   --overlay: rgba(16, 24, 40, 0.35); /* modal backdrop (Cmd+K) */
   --pk: #ca8a04; /* primary-key icon (gold) */
   --fk: #175cd3; /* foreign-key icon (blue) */
+  --predicted: #7c3aed; /* dbxmetagen predicted-FK overlay edge (violet) */
 
   /* Schema accents */
   --schema-factory: #2272b4;
@@ -71,6 +72,7 @@
   --overlay: rgba(0, 0, 0, 0.6);
   --pk: #e0a94a;
   --fk: #5b9be0;
+  --predicted: #a78bfa;
   --schema-factory-soft: rgba(34, 114, 180, 0.22);
   --schema-erp-soft: rgba(124, 58, 237, 0.22);
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
@@ -96,6 +98,7 @@
     --overlay: rgba(0, 0, 0, 0.6);
     --pk: #e0a94a;
     --fk: #5b9be0;
+  --predicted: #a78bfa;
     --schema-factory-soft: rgba(34, 114, 180, 0.22);
     --schema-erp-soft: rgba(124, 58, 237, 0.22);
     --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);

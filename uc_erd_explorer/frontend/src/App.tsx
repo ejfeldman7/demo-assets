@@ -13,7 +13,7 @@ import ReactFlow, {
 } from 'reactflow'
 import 'reactflow/dist/style.css'
 
-import { fetchConfig, fetchGraph, fetchSchemaTree } from './api'
+import { fetchConfig, fetchDbxmetagen, fetchDbxmetagenFkPredictions, fetchGraph, fetchSchemaTree, type PredictedEdge } from './api'
 import { TableNode } from './TableNode'
 import { SchemaNode } from './SchemaNode'
 import { RelationshipEdge } from './RelationshipEdge'
@@ -82,6 +82,34 @@ function ErdCanvas() {
   // focuses it but does NOT reveal labels -- see displayEdges).
   const [hoveredEdgeId, setHoveredEdgeId] = useState<string | null>(null)
   const [hoveredKey, setHoveredKey] = useState<HoveredKey | null>(null)
+  // dbxmetagen integration: whether its output is present (drives the FK-prediction toggle),
+  // whether the overlay is toggled on, and the fetched predicted edges.
+  const [dbxPresent, setDbxPresent] = useState(false)
+  const [showPredictions, setShowPredictions] = useState(false)
+  const [predictedEdges, setPredictedEdges] = useState<PredictedEdge[]>([])
+
+  // Detect dbxmetagen output for the current env (best-effort; drives the FK-prediction toggle).
+  useEffect(() => {
+    let cancelled = false
+    fetchDbxmetagen(env)
+      .then((s) => { if (!cancelled) setDbxPresent(s.present) })
+      .catch(() => { if (!cancelled) setDbxPresent(false) })
+    return () => { cancelled = true }
+  }, [env])
+
+  // Fetch the predicted-FK overlay only while the toggle is on and dbxmetagen is present;
+  // clear it otherwise so stale predictions never linger on the diagram.
+  useEffect(() => {
+    if (!showPredictions || !dbxPresent) {
+      setPredictedEdges([])
+      return
+    }
+    let cancelled = false
+    fetchDbxmetagenFkPredictions(env)
+      .then((r) => { if (!cancelled) setPredictedEdges(r.edges) })
+      .catch(() => { if (!cancelled) setPredictedEdges([]) })
+    return () => { cancelled = true }
+  }, [showPredictions, dbxPresent, env])
   const [filterMode, setFilterMode] = useState<FilterMode>('neighbors')
   // Join-path tracing: when `tracing` is on, clicking two tables sets the from/to endpoints
   // and the shortest FK path between them is highlighted (rest dimmed).
@@ -363,8 +391,28 @@ function ErdCanvas() {
       },
     }))
 
-    return { rawNodes, baseEdges: edges }
-  }, [graph, scopedGraphEdges, keysOnly, expandedTables, anchorColsByNode])
+    // dbxmetagen predicted-FK overlay (only when toggled on). Rendered as extra 'relationship'
+    // edges tagged predicted, filtered to endpoints actually on the diagram, above the base
+    // edges. Distinct violet + confidence in the hover label (see RelationshipEdge).
+    const presentIds = new Set(graph.nodes.map((n) => n.id))
+    const predictedRf: Edge[] = showPredictions
+      ? predictedEdges
+          .filter((p) => presentIds.has(p.source) && presentIds.has(p.target))
+          .map((p) => ({
+            id: p.id,
+            source: p.source,
+            target: p.target,
+            sourceHandle: graph.view === 'detail' ? p.fk_columns[0] : undefined,
+            targetHandle: graph.view === 'detail' ? p.pk_columns[0] : undefined,
+            data: { predicted: true, confidence: p.confidence, fkCols: p.fk_columns, pkCols: p.pk_columns },
+            type: 'relationship',
+            zIndex: 2,
+            style: { stroke: 'var(--predicted)', strokeWidth: 2, strokeDasharray: '2 4' },
+          }))
+      : []
+
+    return { rawNodes, baseEdges: [...edges, ...predictedRf] }
+  }, [graph, scopedGraphEdges, keysOnly, expandedTables, anchorColsByNode, showPredictions, predictedEdges])
 
   // rawNodes/baseEdges reflect the current column-expansion state, so they change on every
   // expand toggle. The ELK layout reads them through refs (not effect deps) so a single
@@ -536,7 +584,9 @@ function ErdCanvas() {
     return baseEdges
       .filter((e) => visibleNodeIds.has(e.source) && visibleNodeIds.has(e.target))
       .map((e) => {
-      const inferred = Boolean((e.data as { inferred?: boolean } | undefined)?.inferred)
+      const data = e.data as { inferred?: boolean; predicted?: boolean } | undefined
+      const inferred = Boolean(data?.inferred)
+      const predicted = Boolean(data?.predicted)
       // Label visibility is HOVER-ONLY (computeEdgeVisual reads activeEdgeSet, not
       // selection): clicking a table focuses it but no longer paints its join-key labels
       // persistently -- the core behavior change from the review.
@@ -552,7 +602,15 @@ function ErdCanvas() {
         style: {
           ...e.style,
           opacity: dimmed ? 0.1 : 1,
-          stroke: dimmed ? 'var(--edge-dim)' : onPath ? 'var(--db-blue)' : inferred ? 'var(--db-red)' : 'var(--edge)',
+          stroke: dimmed
+            ? 'var(--edge-dim)'
+            : onPath
+              ? 'var(--db-blue)'
+              : predicted
+                ? 'var(--predicted)'
+                : inferred
+                  ? 'var(--db-red)'
+                  : 'var(--edge)',
           strokeWidth: onPath ? 2.5 : e.style?.strokeWidth,
         },
         animated: tracePath ? onPath : v.animated,
@@ -956,6 +1014,24 @@ function ErdCanvas() {
                 : 'No undeclared relationships detected via column name/type matching.'}
             </div>
           </div>
+
+          {dbxPresent && (
+            <>
+              <SectionLabel>dbxmetagen predictions</SectionLabel>
+              <div style={styles.card}>
+                <Switch
+                  label="Show FK predictions"
+                  checked={showPredictions}
+                  onChange={() => setShowPredictions((v) => !v)}
+                />
+                <div style={styles.hint}>
+                  dbxmetagen's confidence-scored foreign-key predictions, drawn as a violet
+                  overlay (hover for the score). Detected in this catalog; a companion to the
+                  declared and inferred edges.
+                </div>
+              </div>
+            </>
+          )}
 
           <HealthAudit pairs={selectedPairs ? Array.from(selectedPairs) : undefined} env={env} />
 
