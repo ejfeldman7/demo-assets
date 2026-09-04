@@ -19,7 +19,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field, field_validator
 
-from ..config import get_genie_space_id, get_workspace_client
+from ..config import get_workspace_client, resolve_genie_space_id
 from ..ratelimit import genie_rate_limit
 from ..retry import is_transient, retry_transient
 
@@ -92,12 +92,15 @@ async def _poll_until_done(client, space_id: str, conversation_id: str, message_
 
 @router.post("/ask")
 async def ask(req: AskRequest):
-    space_id = get_genie_space_id()
+    # resolve_genie_space_id() prefers an explicit GENIE_SPACE_ID, else auto-discovers the
+    # space created by the setup job (matched by its managed marker). It lists Genie spaces
+    # on a cache miss, so run it off the event loop.
+    space_id = await asyncio.to_thread(resolve_genie_space_id)
     if not space_id:
         raise HTTPException(
             status_code=503,
-            detail="No Genie Space configured. Run setup/create_scoped_views.py and "
-            "setup/create_genie_space.py, or set GENIE_SPACE_ID.",
+            detail="No Genie Space found yet. Run `databricks bundle run setup_genie_space` "
+            "to create it (the app then auto-discovers it), or set GENIE_SPACE_ID explicitly.",
         )
 
     # DELIBERATE SCOPING NOTE (OBO): Genie always runs as the app's own service principal

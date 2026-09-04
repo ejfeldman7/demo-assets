@@ -6,11 +6,40 @@ asking schema questions in plain English.
 
 ![ERD overview](docs/screenshots/erd-overview.png)
 
+**Read-only by design, light to run.** It reads `system.information_schema` (or scoped
+metadata views) and never writes to Unity Catalog — no comments, tags, or DDL are ever
+applied — so it only needs `SELECT`-level grants. The diagram itself calls no Foundation
+Model (the optional Genie chat is the one LLM feature), and it runs as a single Databricks
+App plus a couple of serverless jobs, so it deploys in minutes on any workspace, including
+serverless-only ones.
+
+Reach for it to *see and share* a Unity Catalog schema — as an interactive ERD, or exported
+to a data-modeling tool — without granting write access or standing up a generation
+platform. For AI-*generated* documentation, PII/PHI/PCI tagging, and a governed write-back
+workflow, see [dbxmetagen](#related-ai-generated-metadata-with-dbxmetagen) below; the two are
+complementary, and any comments and tags dbxmetagen applies to your catalog show up here
+automatically.
+
 ## What it does
 
 - **Renders a live ERD** for one or more Unity Catalog catalogs: every table as a node
-  (with its columns, and PK/FK columns badged), every declared foreign key as a labeled,
-  directional edge from the referencing table to the table it points to.
+  (with its columns, and primary-/foreign-key columns marked with key icons), every
+  declared foreign key as a directional edge from the referencing table to the table it
+  points to, with crow's-foot cardinality (many at the foreign-key end, one at the
+  primary-key end).
+- **Hover to inspect, click to focus**: hover a relationship — its line or either key
+  column — to reveal the exact join mapping (`fk_column → pk_column`, stacked for
+  composite or long keys) and highlight the matching column on both tables. The detail is
+  transient, so the diagram never fills with overlapping labels. Clicking a table instead
+  focuses its neighborhood (see click-to-filter below) without pinning anything.
+- **Quick-find and path tracing**: ⌘K / Ctrl-K opens a fuzzy table finder that pans and
+  zooms to any table by name; "trace join path" highlights the shortest foreign-key path
+  between two tables you pick.
+- **Group and arrange**: cluster tables into labeled boxes by schema or by catalog
+  (each box collapsible to a single node), and switch the auto-layout (ELK) between
+  left-to-right and top-to-bottom to suit wide cards or tall stacks.
+- **Light / dark / system theme**: a theme toggle in the top bar; defaults to following
+  the operating system's preference.
 - **Catalog/schema tree picker**: an "All" toggle plus one row per catalog (tri-state
   checkbox: unchecked / indeterminate / checked) that expands to show its individual
   schemas, each independently selectable — built for a future with many catalogs each
@@ -79,15 +108,33 @@ asking schema questions in plain English.
   [`metadata.csv`](docs/example-exports/erstudio/metadata.csv),
   [`unsupported_types.md`](docs/example-exports/erstudio/unsupported_types.md))
 
-![Click-to-filter](docs/screenshots/erd-click-filter.png)
+Hover a relationship to reveal its join mapping and highlight the matching column on both
+tables (crow's-foot cardinality, PK/FK key icons):
 
-![UC comments and tags](docs/screenshots/erd-comments-tags.png)
+![Hover a relationship to inspect its join keys](docs/screenshots/erd-relationship-hover.png)
+
+⌘K / Ctrl-K quick-find:
+
+![Quick-find any table by name](docs/screenshots/erd-quickfind.png)
+
+Group tables into collapsible boxes by schema (or catalog):
+
+![Group by schema](docs/screenshots/erd-grouping.png)
+
+Light / dark / system theme:
+
+![Dark mode](docs/screenshots/erd-dark-mode.png)
+
+UC comments (ⓘ) and tags surfaced on the diagram, plus a dashed, distinctly-colored
+inferred (undeclared) relationship:
+
+![UC comments and tags on a table card](docs/screenshots/erd-comments-tags.png)
 
 ![Inferred relationships](docs/screenshots/erd-inferred-relationships.png)
 
-![Export panel](docs/screenshots/erd-export-panel.png)
+Ask Genie about the schema (scoped to the approved catalogs):
 
-![Genie chat](docs/screenshots/genie-chat.png)
+![Ask Genie](docs/screenshots/genie-chat.png)
 
 ## Why the Genie scoping matters
 
@@ -179,12 +226,19 @@ against a catalog that already has the demo structure from a previous run.
 
 ## Prerequisites
 
-- A Databricks workspace with Unity Catalog and Databricks Apps enabled
-- The [Databricks CLI](https://docs.databricks.com/dev-tools/cli/index.html) (`databricks bundle` support)
-- A SQL warehouse (serverless recommended)
-- `uv` (Python) and `npm` (Node) for local development / building the frontend
-- Enough Unity Catalog privilege to `GRANT` on your target catalog(s) — either you're an
-  admin, or you can ask one to run the grant step below
+- A Databricks workspace with Unity Catalog and Databricks Apps enabled.
+- A SQL warehouse (serverless is fine).
+- Enough Unity Catalog privilege to `GRANT SELECT` on your target catalog(s) — either you
+  hold it, or a catalog admin runs the one grant step. The app only ever needs **read**
+  grants; it never writes to your catalog.
+- The [Databricks CLI](https://docs.databricks.com/dev-tools/cli/index.html) for the CLI
+  deploy route (Route 1). The notebook route (Route 2) needs no local tooling at all.
+- `uv` and `npm` are only for local development or rebuilding the frontend — **not** for
+  deploying. The built frontend (`frontend/dist/`) is committed, so both routes ship it as-is.
+
+**Deploys on any workspace.** The app runs on Databricks Apps compute and its setup/refresh
+jobs run on serverless job compute — there are no classic-cluster dependencies, so it deploys
+unchanged on serverless-only or otherwise locked-down workspaces.
 
 ## Two ways to deploy
 
@@ -230,14 +284,19 @@ uv run --with databricks-sdk python setup/grant_catalog_access.py \
     --warehouse-id <your-warehouse-id> --profile <your-profile> \
     --app-name erd-explorer-dev --catalogs megacorp,logistics --metadata-location megacorp.erd_meta
 
-# 3. Create the scoped metadata views + Genie Space (idempotent, safe to re-run)
+# 3. Create the scoped metadata views + Genie Space (idempotent, safe to re-run --
+#    reuses the existing space instead of making a new one). The app discovers this
+#    space automatically, so there's no id to copy back or redeploy.
 databricks bundle run setup_genie_space -t dev -p <your-profile>
 
 # 4. Start the app
 databricks bundle run erd_explorer_app -t dev -p <your-profile>
 ```
 
-Open the URL printed by step 4.
+Open the URL printed by step 4. The Genie chat works as soon as step 3 has run — the app
+auto-discovers the space it created (see "Genie Space auto-discovery" below), so you never
+have to paste a space id anywhere. Until then, the chat shows a friendly "not configured"
+message rather than erroring.
 
 **Setting up the Prod/Test toggle's test catalogs** (optional): repeat steps 1/1c/2 once
 more, using the test-suffixed catalog names throughout (e.g. `--catalog megacorp_ts`,
@@ -347,7 +406,7 @@ the notebook re-run) to catch up.
 | `warehouse_id` | `DATABRICKS_WAREHOUSE_ID` | **required, no default** | SQL warehouse used for all `information_schema` queries |
 | `erd_catalogs` | `ERD_CATALOGS` (comma-separated) | `megacorp,logistics` (packaged demo default) | The catalog allow-list — scopes **both** the ERD graph and the Genie Space. Set to an empty string for unscoped mode, see below |
 | `erd_metadata_location` | `ERD_METADATA_LOCATION` (`"catalog.schema"`) | `megacorp.erd_meta` | Where the scoped Genie metadata views live. **Required** if `erd_catalogs` is empty (no catalog to default from) |
-| `genie_space_id` | `GENIE_SPACE_ID` | (set after first setup run) | Which Genie Space the chat panel talks to |
+| `genie_space_id` | `GENIE_SPACE_ID` | `not-configured` (auto-discovered) | Which Genie Space the chat panel talks to. **Usually leave this alone** — the app auto-discovers the space `setup_genie_space` creates (see "Genie Space auto-discovery"). Set it only to pin a specific space or skip discovery |
 | `erd_metadata_source` | `ERD_METADATA_SOURCE` | `information_schema` | Where the graph reads metadata: `information_schema` (live) or `snapshot` (the materialized `erd_snapshot_*` tables — see "Metadata snapshot" below). Falls back to live if the snapshot isn't built yet |
 | `erd_cache_ttl_seconds` | `ERD_CACHE_TTL_SECONDS` | `3600` | How long `/api/graph` results are cached in-memory before re-querying the metadata source |
 | `erd_schema_collapse_threshold` | `ERD_SCHEMA_COLLAPSE_THRESHOLD` | `80` | Table count above which the ERD defaults to one node per schema (click to expand); `0` always renders full detail |
@@ -522,6 +581,12 @@ app-wide; if ever scaled to multiple replicas the limit becomes per-replica. Tra
 warehouse/Genie failures (cold-start, a momentary 429/503, a dropped connection) are also
 retried with jittered backoff (`server/retry.py`) so a blip doesn't surface as a hard 500.
 
+### Accessibility
+
+The UI covers the essentials: labeled controls with visible keyboard focus, dialogs that
+manage focus and close on Escape, PK/FK conveyed by an icon plus text (never color alone),
+and support for the OS "reduce motion" setting.
+
 ## Permissions
 
 Two things need granting. Both are automated now — you don't need to hand-craft or
@@ -552,6 +617,18 @@ to grant on; the app relies on whatever grants its service principal already has
 ACL from Unity Catalog grants. This one is also automated: `setup/create_genie_space.py`
 takes `--grant-to-app <app-name>` (already wired into the DAB job) and grants the app's
 service principal `CAN_RUN` on the space automatically every time the setup job runs.
+
+### Genie Space auto-discovery
+
+You never have to tell the app which Genie Space to use. `setup_genie_space` stamps a
+stable marker into the space's description and grants the app's service principal
+`CAN_RUN` on it; on the first Genie question, the app lists the spaces it can see, matches
+that marker, and uses the space it finds — caching the result. So the flow is just
+**deploy → run `setup_genie_space`**, with no space id to copy back and no redeploy, and
+nothing for a later `bundle deploy` to reset (an explicit `GENIE_SPACE_ID`, if you ever set
+one, always wins and skips discovery). Because discovery relies on the `CAN_RUN` grant to
+make the space visible to the service principal, it only works after `setup_genie_space`
+has run at least once — until then the chat shows the friendly "not configured" message.
 
 **On-behalf-of-user mode** (`auth_mode=on_behalf_of_user`): the ERD queries run as the
 logged-in user, so the app's service principal does **not** need the catalog data grants
@@ -644,6 +721,24 @@ to avoid needing a Databricks service-principal secret in this repo.
   e.g. `__databricks_internal_catalog_...`) are automatically excluded from both the
   graph and Genie's scope — they aren't real user catalogs and would just be noise.
 
+## Related: AI-generated metadata with dbxmetagen
+
+This app is intentionally read-only — it never writes to Unity Catalog. For AI-*generated*
+table/column documentation, PII/PHI/PCI classification, domain classification, and
+confidence-scored foreign-key prediction — with a human-in-the-loop review-and-apply
+workflow — see [dbxmetagen](https://github.com/databricks-industry-solutions/dbxmetagen), a
+Databricks Industry Solutions accelerator. It's a larger install (it needs write access to
+your catalog and a Foundation Model endpoint); this app's read-only footprint is unaffected
+either way.
+
+The two are complementary. dbxmetagen applies its reviewed comments and tags to Unity
+Catalog's **native** metadata, and this app already reads those — so descriptions and tags
+dbxmetagen writes back show up on the diagram automatically, no extra configuration. Choose
+this app when you want a fast, read-only way to see and share a schema; add dbxmetagen when
+you want to generate and govern the metadata itself. (Surfacing dbxmetagen's own richer
+outputs — its confidence-scored FK predictions and domain classifications, which live in its
+tables rather than UC-native fields — as an enhanced overlay is a planned enhancement.)
+
 ## Project structure
 
 ```
@@ -653,7 +748,7 @@ erd-explorer/
 │   ├── config.py                 # dual-mode auth, catalog/metadata-location resolution
 │   ├── graph.py                  # ERD graph builder (queries system.information_schema)
 │   └── routes/{graph,genie}.py   # API routes
-├── frontend/                     # React + Vite + reactflow + dagre SPA
+├── frontend/                     # React + Vite + React Flow + ELK SPA
 │   └── dist/                     # built output -- committed on purpose, see Troubleshooting
 ├── setup/
 │   ├── megacorp_schema.sql, create_megacorp_demo.py   # optional: creates the demo data
@@ -670,6 +765,18 @@ erd-explorer/
 │                                    setup/ functions as Route 1's DAB job)
 └── databricks.yml                # Route 1: Databricks Asset Bundle (app + setup job)
 ```
+
+## Support
+
+This is a field-built accelerator, provided as-is and maintained on a best-effort basis — it
+is not covered by Databricks support. For questions or issues, contact the maintainer or open
+an issue in the repository.
+
+## License
+
+© Databricks, Inc. Provided subject to the Databricks License
+(https://databricks.com/db-license-source). Included or referenced third-party libraries are
+subject to their own licenses.
 
 An internal `DEMO.md` (build history / scope-negotiation notes) exists locally alongside
 this README but is gitignored on purpose -- it's a working record for whoever's building
