@@ -6,6 +6,20 @@ asking schema questions in plain English.
 
 ![ERD overview](docs/screenshots/erd-overview.png)
 
+**Read-only by design, light to run.** It reads `system.information_schema` (or scoped
+metadata views) and never writes to Unity Catalog — no comments, tags, or DDL are ever
+applied — so it only needs `SELECT`-level grants. The diagram itself calls no Foundation
+Model (the optional Genie chat is the one LLM feature), and it runs as a single Databricks
+App plus a couple of serverless jobs, so it deploys in minutes on any workspace, including
+serverless-only ones.
+
+Reach for it to *see and share* a Unity Catalog schema — as an interactive ERD, or exported
+to a data-modeling tool — without granting write access or standing up a generation
+platform. For AI-*generated* documentation, PII/PHI/PCI tagging, and a governed write-back
+workflow, see [dbxmetagen](#related-ai-generated-metadata-with-dbxmetagen) below; the two are
+complementary, and any comments and tags dbxmetagen applies to your catalog show up here
+automatically.
+
 ## What it does
 
 - **Renders a live ERD** for one or more Unity Catalog catalogs: every table as a node
@@ -212,12 +226,19 @@ against a catalog that already has the demo structure from a previous run.
 
 ## Prerequisites
 
-- A Databricks workspace with Unity Catalog and Databricks Apps enabled
-- The [Databricks CLI](https://docs.databricks.com/dev-tools/cli/index.html) (`databricks bundle` support)
-- A SQL warehouse (serverless recommended)
-- `uv` (Python) and `npm` (Node) for local development / building the frontend
-- Enough Unity Catalog privilege to `GRANT` on your target catalog(s) — either you're an
-  admin, or you can ask one to run the grant step below
+- A Databricks workspace with Unity Catalog and Databricks Apps enabled.
+- A SQL warehouse (serverless is fine).
+- Enough Unity Catalog privilege to `GRANT SELECT` on your target catalog(s) — either you
+  hold it, or a catalog admin runs the one grant step. The app only ever needs **read**
+  grants; it never writes to your catalog.
+- The [Databricks CLI](https://docs.databricks.com/dev-tools/cli/index.html) for the CLI
+  deploy route (Route 1). The notebook route (Route 2) needs no local tooling at all.
+- `uv` and `npm` are only for local development or rebuilding the frontend — **not** for
+  deploying. The built frontend (`frontend/dist/`) is committed, so both routes ship it as-is.
+
+**Deploys on any workspace.** The app runs on Databricks Apps compute and its setup/refresh
+jobs run on serverless job compute — there are no classic-cluster dependencies, so it deploys
+unchanged on serverless-only or otherwise locked-down workspaces.
 
 ## Two ways to deploy
 
@@ -700,6 +721,24 @@ to avoid needing a Databricks service-principal secret in this repo.
   e.g. `__databricks_internal_catalog_...`) are automatically excluded from both the
   graph and Genie's scope — they aren't real user catalogs and would just be noise.
 
+## Related: AI-generated metadata with dbxmetagen
+
+This app is intentionally read-only — it never writes to Unity Catalog. For AI-*generated*
+table/column documentation, PII/PHI/PCI classification, domain classification, and
+confidence-scored foreign-key prediction — with a human-in-the-loop review-and-apply
+workflow — see [dbxmetagen](https://github.com/databricks-industry-solutions/dbxmetagen), a
+Databricks Industry Solutions accelerator. It's a larger install (it needs write access to
+your catalog and a Foundation Model endpoint); this app's read-only footprint is unaffected
+either way.
+
+The two are complementary. dbxmetagen applies its reviewed comments and tags to Unity
+Catalog's **native** metadata, and this app already reads those — so descriptions and tags
+dbxmetagen writes back show up on the diagram automatically, no extra configuration. Choose
+this app when you want a fast, read-only way to see and share a schema; add dbxmetagen when
+you want to generate and govern the metadata itself. (Surfacing dbxmetagen's own richer
+outputs — its confidence-scored FK predictions and domain classifications, which live in its
+tables rather than UC-native fields — as an enhanced overlay is a planned enhancement.)
+
 ## Project structure
 
 ```
@@ -709,7 +748,7 @@ erd-explorer/
 │   ├── config.py                 # dual-mode auth, catalog/metadata-location resolution
 │   ├── graph.py                  # ERD graph builder (queries system.information_schema)
 │   └── routes/{graph,genie}.py   # API routes
-├── frontend/                     # React + Vite + reactflow + dagre SPA
+├── frontend/                     # React + Vite + React Flow + ELK SPA
 │   └── dist/                     # built output -- committed on purpose, see Troubleshooting
 ├── setup/
 │   ├── megacorp_schema.sql, create_megacorp_demo.py   # optional: creates the demo data
@@ -726,6 +765,18 @@ erd-explorer/
 │                                    setup/ functions as Route 1's DAB job)
 └── databricks.yml                # Route 1: Databricks Asset Bundle (app + setup job)
 ```
+
+## Support
+
+This is a field-built accelerator, provided as-is and maintained on a best-effort basis — it
+is not covered by Databricks support. For questions or issues, contact the maintainer or open
+an issue in the repository.
+
+## License
+
+© Databricks, Inc. Provided subject to the Databricks License
+(https://databricks.com/db-license-source). Included or referenced third-party libraries are
+subject to their own licenses.
 
 An internal `DEMO.md` (build history / scope-negotiation notes) exists locally alongside
 this README but is gitignored on purpose -- it's a working record for whoever's building
