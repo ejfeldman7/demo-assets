@@ -48,6 +48,15 @@ databricks current-user me "${P[@]}" >/dev/null 2>&1 || \
 ME="$(databricks current-user me "${P[@]}" -o json | jq -r '.userName')"
 ok "authenticated as $ME on $WORKSPACE_HOST"
 
+# WT_ADMINS gates destructive/config actions (kill, budget config, rules, subscribers, poll). If
+# it's empty or still the example placeholder, default it to the deployer so admin actions aren't
+# silently locked for everyone — and warn to set the real team list.
+if [ -z "${WT_ADMINS:-}" ] || [ "${WT_ADMINS:-}" = "you@company.com" ]; then
+  WT_ADMINS="$ME"
+  echo "  WARN: WT_ADMINS was empty/placeholder — defaulting admin access to '$ME'."
+  echo "        Set WT_ADMINS in $CONFIG (comma-separated emails) to grant your team admin rights."
+fi
+
 CATALOG="${UC_SCHEMA%%.*}"
 LAKEBASE_BRANCH_PATH="projects/${LAKEBASE_PROJECT}/branches/${LAKEBASE_BRANCH}"
 LAKEBASE_ENDPOINT="${LAKEBASE_BRANCH_PATH}/endpoints/${LAKEBASE_ENDPOINT_ID}"
@@ -225,8 +234,8 @@ fi
 # ── 11. Render app.yaml + build frontend ─────────────────────────────────────
 say "Render app/app.yaml + build frontend"
 export LAKEBASE_ENDPOINT LAKEBASE_HOST LAKEBASE_SCHEMA WAREHOUSE_ID UC_SCHEMA POLLER_JOB_NAME \
-       WORKSPACE_LABEL SECRET_SCOPE WT_MODEL DASHBOARD_URL DASHBOARD_EMBED_URL APP_SP
-: "${WORKSPACE_LABEL:=$APP_NAME}"; : "${WT_MODEL:=databricks-claude-sonnet-5}"
+       WORKSPACE_LABEL SECRET_SCOPE WT_MODEL WT_ADMINS DASHBOARD_URL DASHBOARD_EMBED_URL APP_SP
+: "${WORKSPACE_LABEL:=$APP_NAME}"; : "${WT_MODEL:=databricks-claude-sonnet-5}"; : "${WT_ADMINS:=}"
 envsubst < app/app.yaml.template > app/app.yaml
 ok "wrote app/app.yaml"
 ( cd app/frontend && npm install --no-audit --no-fund >/dev/null 2>&1 && npm run build >/dev/null )

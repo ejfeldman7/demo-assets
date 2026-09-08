@@ -166,6 +166,8 @@ databricks secrets put-secret <SECRET_SCOPE> smtp_host --string-value smtp.sendg
 | Blank Monitoring iframe | See 4b — approved domains + third-party cookies, or use *Open in Databricks*. |
 | Trends/Dashboard numbers look wrong or the app errors on a number | UC Statement Execution returns numbers as strings; the app coerces them and has an error boundary — re-run the app-deploy step if you edited `uc.py`. |
 | A warehouse permission you set earlier disappeared | Use `warehouses update-permissions` (merge), not `set-permissions` (replace) — setup uses the former. |
+| Budget page/status errors "no valid workspace ids" | `budget_config.workspace_ids` is empty. Setup seeds it to the deploy workspace; if blank, set the workspace(s) on the **Budget** page (or `WORKSPACE_IDS` in `config.env` + re-run bootstrap). |
+| Admin actions (kill / budget / rules) return 403 for everyone | No email in `WT_ADMINS` matches the caller. Set `WT_ADMINS` (comma-separated emails) in `config.env` and re-render/redeploy the app; also grant the team **CAN_USE** on the app. |
 
 ---
 
@@ -181,3 +183,9 @@ databricks bundle destroy -t default $P              # removes the poller job
 # DROP SCHEMA $UC_SCHEMA CASCADE;  (and DROP SCHEMA $LAKEBASE_SCHEMA in Postgres)
 databricks secrets delete-scope "$SECRET_SCOPE" $P   # if you created it
 ```
+
+> **`delete-project` is asynchronous.** If you plan to redeploy under the *same* `LAKEBASE_PROJECT`
+> name, wait until `databricks postgres get-project projects/$LAKEBASE_PROJECT` returns *not found*
+> before re-running setup — otherwise the recreate races a half-deleted project (the project object
+> can linger after its branch/endpoint are gone, and setup fails resolving the endpoint host).
+> Simplest for a clean re-test: use a fresh `LAKEBASE_PROJECT` name.

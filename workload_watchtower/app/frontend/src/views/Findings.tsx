@@ -22,6 +22,7 @@ export function Findings() {
   const [explain, setExplain] = useState<{ findingId: number; context: string } | null>(null);
   const [killing, setKilling] = useState<number | null>(null);
   const toast = useToast();
+  const cfg = useApi(() => api.config());
   const findings = useApi(() => api.findings(status || undefined, 200), { intervalMs: 20000, deps: [status] });
 
   const doKill = async (f: Finding) => {
@@ -114,6 +115,7 @@ export function Findings() {
                     onExplain={() => setExplain({ findingId: f.id, context: f.object_name ?? f.external_id })}
                     onKill={() => doKill(f)}
                     killing={killing === f.id}
+                    isAdmin={!!cfg.data?.is_admin}
                   />
                 ))}
               </tbody>
@@ -138,6 +140,7 @@ function FindingRow({
   onExplain,
   onKill,
   killing,
+  isAdmin,
 }: {
   f: Finding;
   expanded: boolean;
@@ -145,6 +148,7 @@ function FindingRow({
   onExplain: () => void;
   onKill: () => void;
   killing: boolean;
+  isAdmin: boolean;
 }) {
   const Icon = workloadIcon(f.workload_type);
   const hasQuery = !!f.query_text;
@@ -176,7 +180,7 @@ function FindingRow({
         <td className="py-2.5 pr-3 text-text-secondary">{fmtAge(f.last_seen ?? f.first_seen)}</td>
         <td className="py-2.5 pr-4 text-right">
           <div className="inline-flex items-center justify-end gap-1.5">
-            {KILLABLE.includes(f.workload_type) && (
+            {isAdmin && KILLABLE.includes(f.workload_type) && (
               <button
                 onClick={(e) => { e.stopPropagation(); onKill(); }}
                 disabled={killing}

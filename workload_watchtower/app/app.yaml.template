@@ -37,6 +37,12 @@ env:
   # Label shown in the top-right workspace chip / avatar.
   - name: WT_WORKSPACE_LABEL
     value: "${WORKSPACE_LABEL}"
+  # Comma-separated allowlist of emails permitted to perform destructive/config actions (cancel a
+  # workload, change budget config, edit rules/subscribers, trigger a poll). The app authenticates
+  # the caller via the Databricks Apps X-Forwarded-Email header; non-admins get 403 (and the UI
+  # hides those controls). Everyone with app access can still view and do routine triage.
+  - name: WT_ADMINS
+    value: "${WT_ADMINS}"
   # Secret scope holding SMTP settings (email automations). Optional — unset = no email.
   - name: WT_SMTP_SCOPE
     value: "${SECRET_SCOPE}"
