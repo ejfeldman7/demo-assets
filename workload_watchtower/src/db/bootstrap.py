@@ -23,6 +23,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 from pathlib import Path
 
 from databricks.sdk import WorkspaceClient
@@ -87,6 +88,14 @@ def seed(w: WorkspaceClient, members: list[tuple[str, str, str]]) -> None:
         cur.execute("SELECT count(*) FROM rules")
         r = cur.fetchone()[0]
         log.info("seeded: %d members, %d rules", m, r)
+
+        # Default the per-user budget scan's workspace(s) so the feature works out of the box: use
+        # WORKSPACE_IDS from config.env if set, else this deploy workspace's id. Only seeded when
+        # unset, so an admin's later change in the Budget page isn't clobbered on a re-run.
+        ws = (os.environ.get("WORKSPACE_IDS", "") or "").strip() or str(w.get_workspace_id())
+        cur.execute("UPDATE budget_config SET workspace_ids = %s "
+                    "WHERE id = TRUE AND coalesce(workspace_ids, '') = ''", (ws,))
+        log.info("budget scan workspace(s): %s", ws)
 
 
 def main() -> None:
