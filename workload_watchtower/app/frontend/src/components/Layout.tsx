@@ -150,7 +150,7 @@ export function Layout({
         <header className="sticky top-0 z-30 flex h-16 items-center justify-between gap-4 border-b border-line bg-app/85 px-6 backdrop-blur">
           <div className="text-[15px] font-medium text-text-primary">{TITLES[view]}</div>
           <div className="flex items-center gap-3">
-            <RunPollControl />
+            {cfg.data?.is_admin && <RunPollControl />}
             <div className="mx-1 h-6 w-px bg-line" />
             <button
               onClick={onToggleTheme}

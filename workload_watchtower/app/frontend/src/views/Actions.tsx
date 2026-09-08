@@ -6,7 +6,7 @@ import { useToast } from "../components/Toast";
 import { Card, EmptyState, PageHeader, Spinner, Button, Chip, Input } from "../components/ui";
 import { fmtAge } from "../lib/format";
 
-function DistributionList() {
+function DistributionList({ isAdmin }: { isAdmin: boolean }) {
   const subs = useApi(() => api.subscribers());
   const toast = useToast();
   const [email, setEmail] = useState("");
@@ -48,20 +48,22 @@ function DistributionList() {
           alerts are emailed to everyone here · critical findings auto-send
         </span>
       </div>
-      <div className="mb-3 flex gap-2">
-        <Input
-          type="email"
-          placeholder="name@company.com"
-          value={email}
-          onChange={(e) => setEmail(e.target.value)}
-          onKeyDown={(e) => e.key === "Enter" && add()}
-          className="max-w-xs flex-1"
-          aria-label="Add email to distribution list"
-        />
-        <Button variant="primary" icon={Plus} loading={busy} onClick={add}>
-          Add
-        </Button>
-      </div>
+      {isAdmin && (
+        <div className="mb-3 flex gap-2">
+          <Input
+            type="email"
+            placeholder="name@company.com"
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && add()}
+            className="max-w-xs flex-1"
+            aria-label="Add email to distribution list"
+          />
+          <Button variant="primary" icon={Plus} loading={busy} onClick={add}>
+            Add
+          </Button>
+        </div>
+      )}
       <div className="flex flex-wrap gap-1.5">
         {list.length === 0 && (
           <span className="text-[12px] text-text-secondary">No recipients yet — add one to receive alerts.</span>
@@ -72,13 +74,15 @@ function DistributionList() {
             className="inline-flex items-center gap-1.5 rounded-full border border-line bg-app px-2.5 py-1 text-[12px] text-text-primary"
           >
             {s.email}
-            <button
-              onClick={() => remove(s.id, s.email)}
-              className="text-text-disabled transition-colors hover:text-danger"
-              aria-label={`Remove ${s.email}`}
-            >
-              <X size={13} />
-            </button>
+            {isAdmin && (
+              <button
+                onClick={() => remove(s.id, s.email)}
+                className="text-text-disabled transition-colors hover:text-danger"
+                aria-label={`Remove ${s.email}`}
+              >
+                <X size={13} />
+              </button>
+            )}
           </span>
         ))}
       </div>
@@ -160,7 +164,7 @@ export function Actions() {
         }
       />
 
-      <DistributionList />
+      <DistributionList isAdmin={!!cfg.data?.is_admin} />
 
       <Card padded={false}>
         {actions.error ? (

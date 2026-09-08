@@ -48,6 +48,15 @@ databricks current-user me "${P[@]}" >/dev/null 2>&1 || \
 ME="$(databricks current-user me "${P[@]}" -o json | jq -r '.userName')"
 ok "authenticated as $ME on $WORKSPACE_HOST"
 
+# WT_ADMINS gates destructive/config actions (kill, budget config, rules, subscribers, poll). If
+# it's empty or still the example placeholder, default it to the deployer so admin actions aren't
+# silently locked for everyone — and warn to set the real team list.
+if [ -z "${WT_ADMINS:-}" ] || [ "${WT_ADMINS:-}" = "you@company.com" ]; then
+  WT_ADMINS="$ME"
+  echo "  WARN: WT_ADMINS was empty/placeholder — defaulting admin access to '$ME'."
+  echo "        Set WT_ADMINS in $CONFIG (comma-separated emails) to grant your team admin rights."
+fi
+
 CATALOG="${UC_SCHEMA%%.*}"
 LAKEBASE_BRANCH_PATH="projects/${LAKEBASE_PROJECT}/branches/${LAKEBASE_BRANCH}"
 LAKEBASE_ENDPOINT="${LAKEBASE_BRANCH_PATH}/endpoints/${LAKEBASE_ENDPOINT_ID}"

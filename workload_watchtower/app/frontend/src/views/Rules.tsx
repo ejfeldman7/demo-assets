@@ -52,6 +52,8 @@ function matchSummary(r: Rule): string {
 
 export function Rules() {
   const rules = useApi(() => api.rules());
+  const cfg = useApi(() => api.config());
+  const isAdmin = !!cfg.data?.is_admin;
   const toast = useToast();
   const [editing, setEditing] = useState<number | null>(null);
   const [draft, setDraft] = useState<Partial<Rule>>({});
@@ -110,11 +112,11 @@ export function Rules() {
         title="Rules"
         subtitle="What the poller flags each cycle — duration/cost thresholds, query-text patterns, or LLM-classified intent. Matches create findings, cards, emails, and (for cancellable workloads) kills."
         actions={
-          <Button variant="primary" icon={Plus} onClick={() => setShowAdd((v) => !v)}>Add rule</Button>
+          isAdmin ? <Button variant="primary" icon={Plus} onClick={() => setShowAdd((v) => !v)}>Add rule</Button> : undefined
         }
       />
 
-      {showAdd && <AddRuleForm onClose={() => setShowAdd(false)} onCreated={() => { setShowAdd(false); rules.refresh(); }} />}
+      {isAdmin && showAdd && <AddRuleForm onClose={() => setShowAdd(false)} onCreated={() => { setShowAdd(false); rules.refresh(); }} />}
 
       <Card padded={false}>
         {rules.error ? (
@@ -192,8 +194,13 @@ export function Rules() {
                           </div>
                         )}
                       </td>
-                      <td className="py-2.5 pr-3"><Toggle checked={r.enabled} onChange={() => toggle(r)} label={`Toggle ${r.name}`} /></td>
+                      <td className="py-2.5 pr-3">
+                        {isAdmin
+                          ? <Toggle checked={r.enabled} onChange={() => toggle(r)} label={`Toggle ${r.name}`} />
+                          : <Chip color={r.enabled ? "#3DD68C" : undefined}>{r.enabled ? "on" : "off"}</Chip>}
+                      </td>
                       <td className="py-2.5 pr-4">
+                        {!isAdmin ? null : (
                         <div className="flex items-center justify-end gap-1">
                           {isEdit ? (
                             <>
@@ -207,6 +214,7 @@ export function Rules() {
                             </>
                           )}
                         </div>
+                        )}
                       </td>
                     </tr>
                   );

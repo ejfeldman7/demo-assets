@@ -5,6 +5,7 @@ routes.py — Watchtower REST API over Lakebase (triage state) + UC (trends) + J
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 
@@ -22,13 +23,16 @@ from .db import pool, rows_to_dicts, w
 # WT_ADMINS is a comma-separated allowlist (set from config.env at deploy). WT_DEV_MODE allows local
 # runs (no Apps proxy → no identity header) through; it does NOT open a deployed app, because the
 # proxy always injects X-Forwarded-Email in prod, so the allowlist still applies there.
+log = logging.getLogger("uvicorn.error")
 _ADMINS = {e.strip().lower() for e in os.environ.get("WT_ADMINS", "").split(",") if e.strip()}
 _DEV_MODE = os.environ.get("WT_DEV_MODE", "").strip().lower() in ("1", "true", "yes")
 
 
 def caller_email(request: Request) -> str | None:
-    return (request.headers.get("X-Forwarded-Email")
-            or request.headers.get("X-Forwarded-Preferred-Username"))
+    # Only trust X-Forwarded-Email (the Databricks Apps identity header). We deliberately do NOT
+    # fall back to X-Forwarded-Preferred-Username, which can be a non-email username that would
+    # never match the email allowlist and would silently lock out a legitimate admin.
+    return request.headers.get("X-Forwarded-Email")
 
 
 def is_admin(email: str | None) -> bool:
@@ -39,12 +43,13 @@ def is_admin(email: str | None) -> bool:
 
 def require_admin(request: Request) -> str:
     """FastAPI dependency: 403 unless the authenticated caller is an admin. Returns the caller email
-    (or 'dev-local') for audit."""
+    (or 'dev-local') and logs the action for attribution across every gated endpoint."""
     email = caller_email(request)
     if _DEV_MODE and email is None:
         return "dev-local"
     if not is_admin(email):
         raise HTTPException(403, "admin privilege required for this action")
+    log.info("authz: %s %s by %s", request.method, request.url.path, email)
     return email  # type: ignore[return-value]
 
 # Customer-available operator metrics we surface to the copilot (from Query History).
