@@ -258,7 +258,7 @@ class CardPatch(BaseModel):
 
 
 @router.patch("/cards/{card_id}")
-def update_card(card_id: int, patch: CardPatch):
+def update_card(card_id: int, patch: CardPatch, _admin: str = Depends(require_admin)):
     sets, params = [], []
     for field in ("status", "assignee_id", "priority", "notes"):
         val = getattr(patch, field)
@@ -356,7 +356,9 @@ def delete_rule(rule_id: int, _admin: str = Depends(require_admin)):
 # ── kill (cancel a running workload) ──────────────────────────────────────────
 # In-app SDK cancel (HTTPS, so it works from Apps compute, unlike SMTP). Covers queries
 # (statement_execution.cancel_execution — the Query-History query_id is the unified statement_id),
-# job runs, pipelines, and clusters. Confirm-gated + admin-only in the UI.
+# job runs, pipelines, and clusters. Confirm-gated + admin-only in the UI. Query kill is best-effort:
+# it works for SQL-editor / Statement-Execution-API queries but no-ops on some persistent-session
+# clients (Python SQL Connector, possibly JDBC/ODBC/BI) — see killer.py for the full note.
 def _kill(workload_type: str, external_id: str) -> tuple[bool, str]:
     try:
         if workload_type == "job_run":
@@ -364,8 +366,8 @@ def _kill(workload_type: str, external_id: str) -> tuple[bool, str]:
         if workload_type == "pipeline":
             w.pipelines.stop(pipeline_id=external_id); return True, f"stopped pipeline {external_id}"
         if workload_type in ("query", "pattern_match"):
-            # The Query-History query_id is the unified statement_id; an admin can cancel it.
-            # pattern_match external_id is "<query_id>:<rule_id>".
+            # The Query-History query_id is the unified statement_id; an admin can cancel it (works
+            # for SQL editor + API; best-effort for other clients). pattern_match ext id = "<qid>:<rule>".
             qid = external_id.split(":", 1)[0]
             w.statement_execution.cancel_execution(qid); return True, f"cancelled query {qid}"
         if workload_type == "cluster":
@@ -511,7 +513,7 @@ def list_actions(limit: int = 100):
 
 
 @router.post("/actions/{action_id}/send")
-def send_action(action_id: int):
+def send_action(action_id: int, _admin: str = Depends(require_admin)):
     """Queue a drafted/failed email to send from JOBS compute via the `watchtower-send` job.
 
     Databricks Apps compute can't open outbound SMTP (Apps permit only ports 80/443/53/22/123;

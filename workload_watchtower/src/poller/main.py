@@ -16,7 +16,6 @@ UC Delta writes go through the SQL warehouse so no Spark session is required.
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 import re
@@ -79,6 +78,7 @@ def _config_from_args() -> None:
     setdefault("WT_SMTP_SCOPE", args.get("secret-scope"))
     setdefault("WT_FAIL_ON_CRITICAL", args.get("fail-on-critical"))
     setdefault("WT_MODEL", args.get("wt-model"))   # serving endpoint for semantic-rule classification
+    setdefault("WT_APP_URL", args.get("wt-app-url"))   # app URL for the "View in Workload Watchtower" email link
     # UC snapshot/alert tables derive from a single <catalog>.<schema> for convenience.
     uc = args.get("uc-schema")
     if uc:
@@ -312,6 +312,148 @@ def _match_pattern_rules(w: WorkspaceClient, pattern_rules: list[dict], errors: 
     return out
 
 
+# ── human-legible alert email ────────────────────────────────────────────────
+# WT_APP_URL is deployment-specific (set via config.env → app.yaml / poller param); default empty so
+# the "View in Workload Watchtower" line only renders when a real URL is configured (no hardcoding).
+_APP_URL = os.environ.get("WT_APP_URL", "")
+_TYPE_LABEL = {"query": "SQL query", "pattern_match": "SQL query", "job_run": "Job run",
+               "pipeline": "Pipeline", "cluster": "Cluster", "serving": "Serving endpoint"}
+# Fallback short labels (used only if a violation enum has no richer phrase in _reason_phrase).
+_VIOLATION_LABEL = {
+    "LONG_RUNNING": "long-running",
+    "COST_BURST": "high estimated cost",
+    "STATEMENT_TIMEOUT_OVERRIDE": "session STATEMENT_TIMEOUT override",
+    "PATTERN_MATCH": "matched a query-text pattern rule",
+    "SEMANTIC_MATCH": "matched a semantic (LLM) rule",
+}
+_UUID_RE = re.compile(r"\A[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\Z", re.I)
+_owner_cache: dict[str, str] = {}
+
+
+def _display_owner(w: WorkspaceClient, raw: str | None) -> str:
+    """Resolve a workload owner into something a human reads, never a bare UUID. Interactive users
+    already arrive as an email/username; service-principal-submitted workloads arrive as the SP's
+    application id (a UUID) — resolve that to the SP's display name. Cached per process; a lookup
+    miss is logged (an unresolved id is a data gap worth surfacing, not silently passing through)
+    and falls back to a short, labelled form."""
+    if not raw:
+        return "(unknown)"
+    if "@" in raw or not _UUID_RE.match(raw):
+        return raw                                   # email / username / already a display name
+    if raw in _owner_cache:
+        return _owner_cache[raw]
+    disp = None
+    try:
+        matches = list(w.service_principals.list(filter=f'applicationId eq "{raw}"'))
+        if matches and matches[0].display_name:
+            disp = f"{matches[0].display_name} (service principal)"
+    except Exception as exc:
+        log.info("owner lookup failed for %s: %s", raw, exc)
+    if not disp:
+        log.warning("could not resolve owner id %s to a display name", raw)
+        disp = f"service principal {raw[:8]}…"
+    _owner_cache[raw] = disp
+    return disp
+
+
+def _fmt_dur(sec) -> str | None:
+    if not sec:
+        return None
+    sec = int(sec); h, m, s = sec // 3600, (sec % 3600) // 60, sec % 60
+    return (f"{h}h " if h else "") + (f"{m}m " if (m or h) else "") + f"{s}s"
+
+
+def _reason_phrase(v: str, f: dict) -> str:
+    """One human sentence for a violation enum — the single source of truth for reason copy, enriched
+    with the matched rule's own threshold where we have it, so a new violation type is a dict/branch
+    edit here rather than template surgery. Never returns a raw enum."""
+    metric, thr = f.get("rule_metric"), f.get("rule_threshold")
+    if v == "LONG_RUNNING":
+        dur = _fmt_dur(f.get("elapsed_sec"))
+        base = f"ran {dur}" if dur else "long-running"
+        if metric == "elapsed_sec" and thr:
+            # _fmt_dur rounds to whole seconds and returns None below 1s; keep a sub-second
+            # threshold legible rather than printing "None".
+            thr_disp = _fmt_dur(int(thr)) or f"{thr:g}s"
+            base += f", over the {thr_disp} threshold for this workload"
+        return base
+    if v == "COST_BURST":
+        c = f.get("est_cost_usd")
+        base = f"estimated ${c:.2f}" if c is not None else "high estimated cost"
+        if metric == "est_cost_usd" and thr:
+            base += f", over the ${float(thr):.2f} threshold"
+        return base
+    if v == "STATEMENT_TIMEOUT_OVERRIDE":
+        return "set a session STATEMENT_TIMEOUT that overrides the workspace/warehouse guardrail"
+    return _VIOLATION_LABEL.get(v, v.replace("_", " ").lower())
+
+
+def _alert_email(f: dict, kill_result: tuple | None = None) -> tuple[str, str]:
+    """Compose a human-legible (subject, body) from finding facts instead of dumping JSON. Leads with
+    a plain-English sentence (what was flagged + what action was taken) so the reader isn't left to
+    assemble it from labels, then an aligned label/value block. `f` keys: object, workload_type,
+    owner (already resolved via _display_owner), elapsed_sec, est_cost_usd, violations (pipe-joined),
+    rule_name, rule_metric, rule_threshold, started_at, statement_id (SQL only — the Query History
+    id the recipient can search by). `kill_result` = (ok, detail) when an auto-kill ran for this
+    finding."""
+    wl = _TYPE_LABEL.get(f.get("workload_type"), "workload")
+    obj = (f.get("object") or "(unknown)").strip()
+    owner = f.get("owner") or "(unknown)"
+    viols = [v for v in (f.get("violations") or "").split("|") if v]
+    reason = "; ".join(_reason_phrase(v, f) for v in viols) or "flagged by a rule"
+
+    # lead sentence: what happened + the action taken, in plain English
+    if kill_result is None:
+        verb = "flagged"
+        action_line = "No automated action was taken — review and triage in Workload Watchtower."
+    elif kill_result[0]:
+        verb = "flagged and automatically cancelled"
+        action_line = "Action taken: automatically cancelled by Workload Watchtower."
+    else:
+        verb = "flagged"
+        action_line = f"Action attempted: automatic cancel did not succeed ({kill_result[1]})."
+    who = f" from {owner}" if owner != "(unknown)" else ""
+    # lowercase the noun for mid-sentence use but keep acronyms (SQL) intact
+    wl_lead = " ".join(t if t.isupper() else t.lower() for t in wl.split())
+    lead = f"Workload Watchtower {verb} a {wl_lead}{who}."
+
+    # subject: action-aware, no query snippet (a truncated SQL tail read as noise)
+    subject = f"[Workload Watchtower] {wl} flagged"
+    if kill_result and kill_result[0]:
+        subject += " and cancelled"
+    label = "Query" if f.get("workload_type") in ("query", "pattern_match") else "Object"
+    L = [lead, ""]
+
+    def row(k: str, v: str) -> None:
+        L.append(f"  {k:<11} {v}")   # left-aligned label column so the block scans as a table
+
+    row("Workload", wl)
+    row(label, obj if len(obj) <= 200 else obj[:199] + "…")
+    # Statement ID is a UUID, but (unlike the owner id) it's actionable: the recipient can paste it
+    # into Query History to find this exact statement. Only SQL workloads carry one.
+    if f.get("statement_id"):
+        row("Statement", f"{f['statement_id']}  (search Query History by this ID)")
+    row("Owner", owner)
+    row("Reason", reason)
+    # Truthy check (not `is not None`): pattern/semantic findings hardcode est_cost_usd=0.0 (cost is
+    # never computed for them), so a "$0.00 estimate" line would be misleading — omit it there.
+    if f.get("est_cost_usd"):
+        row("Est. cost", f"${f['est_cost_usd']:.2f}  (live estimate, final cost may differ)")
+    sa = f.get("started_at")
+    if sa:
+        # UTC: the recipient's local tz isn't known server-side, so label the zone rather than guess.
+        row("Started", sa.strftime("%Y-%m-%d %H:%M UTC") if hasattr(sa, "strftime") else str(sa))
+    if f.get("rule_name"):
+        row("Rule", f'"{f["rule_name"]}"')
+    L += ["", f"  {action_line}"]
+    if "STATEMENT_TIMEOUT_OVERRIDE" in viols:
+        L.append(f"  Note: a session-level SET STATEMENT_TIMEOUT overrides the guardrail. See {_TIMEOUT_DOC}")
+    if _APP_URL:
+        L += ["", f"  View in Workload Watchtower: {_APP_URL}"]
+    L += ["", "— Workload Watchtower, automated"]
+    return subject, "\n".join(L)
+
+
 # ── one poll cycle ───────────────────────────────────────────────────────────
 def poll(w: WorkspaceClient) -> dict:
     t0 = time.time()
@@ -366,7 +508,7 @@ def poll(w: WorkspaceClient) -> dict:
     findings.extend(_match_pattern_rules(w, pattern_rules, errors))
 
     # 4/5. persist findings + cards + alerts + snapshots
-    new_ct = upd_ct = new_critical = 0
+    new_ct = upd_ct = new_critical = new_warning = 0
     snap_rows, alert_rows, pending_sends, pending_kills = [], [], [], []
     poll_ts = datetime.now(timezone.utc)
     rr = 0  # round-robin assignee index
@@ -401,6 +543,8 @@ def poll(w: WorkspaceClient) -> dict:
                 new_ct += 1
                 if m["rule"]["severity"] == "critical":
                     new_critical += 1
+                elif m["rule"]["severity"] == "warning":
+                    new_warning += 1
                 # auto-create triage card (round-robin assignee) if action includes 'card'
                 if "card" in m["actions"]:
                     assignee = roster[rr % len(roster)] if roster else None
@@ -425,14 +569,18 @@ def poll(w: WorkspaceClient) -> dict:
                         (fid, m["rule"]["id"], target, Json(payload)))
                     aid = cur.fetchone()[0]
                     if m["rule"]["severity"] == "critical" and smtp_cfg and recipients:
-                        subject = f"[Workload Watchtower] CRITICAL: {wl.get('object_name') or 'flagged workload'}"
-                        body = (f"Workload Watchtower auto-alert.\n\nOwner: {wl.get('owner')}\n"
-                                f"Details:\n{json.dumps(payload, indent=2, default=str)}\n")
-                        if "STATEMENT_TIMEOUT_OVERRIDE" in m["violation_reason"]:
-                            body += (f"\nA session-level STATEMENT_TIMEOUT override was detected — this "
-                                     f"bypasses the workspace/warehouse guardrail (session scope wins). "
-                                     f"Review: {_TIMEOUT_DOC}\n")
-                        pending_sends.append((aid, recipients, subject, body))
+                        # Collect the facts; the legible body is composed AFTER auto-kills run (5b)
+                        # so it can report whether the workload was cancelled. Keep the RAW owner —
+                        # _display_owner may make a SCIM call, resolved post-txn in the send phase.
+                        facts = {"object": wl.get("object_name"), "workload_type": wl["workload_type"],
+                                 "owner": wl.get("owner"), "elapsed_sec": wl.get("elapsed_sec"),
+                                 "est_cost_usd": wl["est_cost_usd"], "violations": m["violation_reason"],
+                                 "rule_name": m["rule"]["name"], "rule_metric": m["rule"]["metric"],
+                                 "rule_threshold": m["rule"]["threshold"], "started_at": wl.get("started_at"),
+                                 # SQL statement id (pattern_match external_id is "query_id:rule_id")
+                                 "statement_id": (wl["external_id"].split(":", 1)[0]
+                                                  if wl["workload_type"] in ("query", "pattern_match") else None)}
+                        pending_sends.append((aid, fid, recipients, facts))
                 # kill action: auto-cancel a NEW finding when a matched rule legitimately requests
                 # it (see _wants_auto_kill), for any killable workload type (queries included, via
                 # cancel_execution). Executed OUTSIDE the DB transaction, like the email sends.
@@ -462,25 +610,14 @@ def poll(w: WorkspaceClient) -> dict:
         errors.append(f"uc_delta: {exc}")
         log.warning("UC Delta write failed: %s", exc)
 
-    # 5b. auto-send critical emails OUTSIDE the DB transaction (blocking network I/O),
-    # then record results in one short connection.
-    if pending_sends:
-        results = []
-        for aid, recipients, subject, body in pending_sends:
-            ok, detail = mailer.send(smtp_cfg, recipients, subject, body)
-            results.append((aid, "sent" if ok else "failed", None if ok else detail))
-            if not ok:
-                errors.append(f"email {aid}: {detail}")
-        with lakebase.connect(w) as conn, conn.cursor() as cur:
-            for aid, res, err in results:
-                cur.execute("UPDATE action_log SET result = %s, error = %s, updated_at = now() WHERE id = %s",
-                            (res, err, aid))
-
-    # 5c. execute auto-kills OUTSIDE the DB transaction; log each attempt to action_log.
+    # 5b. execute auto-kills FIRST (outside the DB transaction) so the alert email can report the
+    # outcome; record each attempt in action_log and keep a per-finding result for the email.
+    kill_by_finding: dict[int, tuple[bool, str]] = {}
     if pending_kills:
         kres = []
         for fid, rid, wt, ext in pending_kills:
             ok, detail = killer.kill_workload(w, wt, ext)
+            kill_by_finding[fid] = (ok, detail)
             kres.append((fid, rid, ext, "killed" if ok else "failed", detail))
             if not ok:
                 errors.append(f"kill {wt}:{ext}: {detail}")
@@ -490,6 +627,22 @@ def poll(w: WorkspaceClient) -> dict:
                     "INSERT INTO action_log (finding_id, rule_id, action, target, payload, result, error) "
                     "VALUES (%s,%s,'kill',%s,%s,%s,%s)",
                     (fid, rid, ext, Json({"detail": detail}), res, None if res == "killed" else detail))
+
+    # 5c. auto-send critical emails (legible body, now including any auto-kill outcome). Owner is
+    # resolved here (post-txn): _display_owner may make a SCIM lookup, kept off the Lakebase conn.
+    if pending_sends:
+        results = []
+        for aid, fid, recipients, facts in pending_sends:
+            facts = {**facts, "owner": _display_owner(w, facts.get("owner"))}
+            subject, body = _alert_email(facts, kill_by_finding.get(fid))
+            ok, detail = mailer.send(smtp_cfg, recipients, subject, body)
+            results.append((aid, "sent" if ok else "failed", None if ok else detail))
+            if not ok:
+                errors.append(f"email {aid}: {detail}")
+        with lakebase.connect(w) as conn, conn.cursor() as cur:
+            for aid, res, err in results:
+                cur.execute("UPDATE action_log SET result = %s, error = %s, updated_at = now() WHERE id = %s",
+                            (res, err, aid))
 
     # 5d. per-user cost budget (Feature 3) — hourly-gated inside the poll; emails over-budget users.
     try:
@@ -507,10 +660,20 @@ def poll(w: WorkspaceClient) -> dict:
             "findings_new, findings_upd, errors) VALUES (now(),%s,%s,%s,%s,%s,%s)",
             (dur_ms, len(workloads), Json(seen_by_type), new_ct, upd_ct, "; ".join(errors) or None))
 
+    # Publish per-severity new-finding counts as job task values so the downstream `alert_gate`
+    # condition task can decide whether to run the SQL-Alert evaluation at all (skipping it on quiet
+    # polls saves serverless SQL cost). Best-effort: no-op locally or if the runtime lacks dbutils.
+    try:
+        from databricks.sdk.runtime import dbutils   # noqa: E402
+        dbutils.jobs.taskValues.set(key="new_critical", value=new_critical)
+        dbutils.jobs.taskValues.set(key="new_warning", value=new_warning)
+    except Exception as exc:
+        log.info("task values not set (local run or unsupported task context): %s", exc)
+
     summary = {"workloads_seen": len(workloads), "seen_by_type": seen_by_type,
                "findings": len(findings), "new": new_ct, "new_critical": new_critical,
-               "updated": upd_ct, "errors": errors, "duration_ms": dur_ms, "list_price": price,
-               "budget": budget_summary}
+               "new_warning": new_warning, "updated": upd_ct, "errors": errors,
+               "duration_ms": dur_ms, "list_price": price, "budget": budget_summary}
     log.info("poll complete: %s", summary)
     return summary
 
@@ -523,30 +686,28 @@ def send_action(w: WorkspaceClient, action_id: int) -> dict:
     'drafted')."""
     with lakebase.connect(w) as conn, conn.cursor() as cur:
         cur.execute(
-            "SELECT a.target, a.payload, f.object_name, f.owner, f.violation_reason "
+            "SELECT f.object_name, f.owner, f.violation_reason, f.workload_type, f.elapsed_sec, "
+            "f.est_cost_usd, f.started_at, f.external_id, r.name, r.metric, r.threshold "
             "FROM action_log a LEFT JOIN findings f ON a.finding_id = f.id "
-            "WHERE a.id = %s", (action_id,))
+            "LEFT JOIN rules r ON f.matched_rule = r.id WHERE a.id = %s", (action_id,))
         row = cur.fetchone()
     if row is None:
         log.warning("send_action: action %s not found", action_id)
         return {"ok": False, "detail": "action not found"}
-    _target, payload, obj, owner, violation = row
+    obj, owner, violation, wtype, elapsed, cost, started, external_id, rule_name, rmetric, rthr = row
     with lakebase.connect(w) as conn, conn.cursor() as cur:
         cur.execute("SELECT email FROM subscribers WHERE active ORDER BY email")
         recipients = [r[0] for r in cur.fetchall()]
     if not recipients and owner:
         recipients = [owner]
 
-    subject = f"[Workload Watchtower] Flagged workload: {obj or 'your workload'}"
-    body = (
-        f"Hi {owner or 'there'},\n\n"
-        f"Workload Watchtower flagged one of your Databricks workloads.\n\n"
-        f"Details:\n{json.dumps(payload, indent=2, default=str)}\n\n"
-    )
-    if violation and "STATEMENT_TIMEOUT_OVERRIDE" in violation:
-        body += (f"A session-level STATEMENT_TIMEOUT override was detected — this bypasses the "
-                 f"workspace/warehouse guardrail (session scope wins). Review:\n{_TIMEOUT_DOC}\n\n")
-    body += "— Workload Watchtower"
+    subject, body = _alert_email({
+        "object": obj, "workload_type": wtype, "owner": _display_owner(w, owner),
+        "elapsed_sec": elapsed, "est_cost_usd": cost, "violations": violation,
+        "rule_name": rule_name, "rule_metric": rmetric,
+        "rule_threshold": float(rthr) if rthr is not None else None, "started_at": started,
+        "statement_id": (external_id.split(":", 1)[0]
+                         if wtype in ("query", "pattern_match") and external_id else None)})
 
     cfg = mailer.load_config(w)
     if not cfg:

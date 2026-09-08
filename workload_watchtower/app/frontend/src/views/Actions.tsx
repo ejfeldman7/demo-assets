@@ -119,11 +119,14 @@ export function Actions() {
   useEffect(() => () => timers.current.forEach(clearTimeout), []);
 
   const list = actions.data ?? [];
+  const isAdmin = !!cfg.data?.is_admin;
 
   // A row is sendable when it's drafted/failed, or a 'sending' that's been stuck past the job's
   // worst-case runtime (job died before writing back) — reclaimable rather than stuck forever.
+  // Sending triggers outbound email on jobs compute, so it's admin-only (backend also 403s it).
   const STALE_SENDING_MS = 5 * 60 * 1000;
   const canSend = (a: ActionRow) =>
+    isAdmin &&
     a.action === "email" &&   // kill/other actions also land in this log; only email is (re)sendable
     (a.result === "drafted" ||
       a.result === "failed" ||

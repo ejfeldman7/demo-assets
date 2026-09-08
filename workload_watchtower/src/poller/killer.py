@@ -2,9 +2,14 @@
 killer.py — cancel a running workload via the SDK.
 
 Supported workload types:
-  • query / pattern_match — statement_execution.cancel_execution(query_id). The Query-History
-    query_id we collect IS the same unified statement_id, and an admin can cancel a running query
-    by that id regardless of how it was submitted (verified against a live cross-user query).
+  • query / pattern_match — statement_execution.cancel_execution(query_id). For queries submitted
+    via the SQL editor or the Statement Execution API, the Query-History query_id is the unified
+    statement_id and an admin cancels the running query by that id (verified live: SQL editor + API).
+    Best-effort, though: a few persistent-session clients (notably the Python SQL Connector, and
+    possibly some JDBC/ODBC/BI drivers) keep their statement in a session the Statement Execution
+    API can't reach — there cancel_execution returns OK but is a no-op, and the query stops only when
+    that client disconnects. So query kill works for the common channels but isn't guaranteed for
+    every client. (job/pipeline/cluster kills below use canonical control APIs and aren't affected.)
   • job_run  — jobs.cancel_run
   • pipeline — pipelines.stop
   • cluster  — clusters.delete (terminate)
@@ -30,6 +35,8 @@ def kill_workload(w: WorkspaceClient, workload_type: str, external_id: str) -> t
     try:
         if workload_type in ("query", "pattern_match"):
             # pattern_match external_id is "<query_id>:<rule_id>"; a plain query is just the id.
+            # Best-effort (see module docstring): cancel_execution can't reach some persistent-session
+            # clients and no-ops there without raising, so a returned "cancelled" is not a guarantee.
             qid = external_id.split(":", 1)[0]
             w.statement_execution.cancel_execution(qid)
             return True, f"cancelled query {qid}"

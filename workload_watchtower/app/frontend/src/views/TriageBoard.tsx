@@ -22,6 +22,7 @@ function TriageCard({
   card,
   members,
   dragging,
+  canEdit,
   onDragStart,
   onDragEnd,
   onPatch,
@@ -30,6 +31,7 @@ function TriageCard({
   card: CardT;
   members: Member[];
   dragging: boolean;
+  canEdit: boolean;
   onDragStart: () => void;
   onDragEnd: () => void;
   onPatch: (body: Partial<Pick<CardT, "status" | "assignee_id" | "priority" | "notes">>) => void;
@@ -38,7 +40,7 @@ function TriageCard({
   const Icon = workloadIcon(card.workload_type);
   return (
     <div
-      draggable
+      draggable={canEdit}
       onDragStart={onDragStart}
       onDragEnd={onDragEnd}
       className={`group rounded-xl border border-line bg-app p-3.5 shadow-card transition-all hover:border-brand/40 ${
@@ -112,6 +114,7 @@ function TriageCard({
         <Select
           value={card.assignee_id ?? ""}
           onChange={(e) => onPatch({ assignee_id: e.target.value ? Number(e.target.value) : null } as never)}
+          disabled={!canEdit}
           className="max-w-[130px] flex-1 py-1 text-[12px]"
           aria-label="Assignee"
         >
@@ -125,6 +128,7 @@ function TriageCard({
         <Select
           value={card.priority}
           onChange={(e) => onPatch({ priority: e.target.value as Priority })}
+          disabled={!canEdit}
           className="py-1 text-[12px]"
           aria-label="Priority"
           style={{ color: PRIORITY_COLOR[card.priority] }}
@@ -138,6 +142,7 @@ function TriageCard({
         <Select
           value={card.status}
           onChange={(e) => onPatch({ status: e.target.value as CardStatus })}
+          disabled={!canEdit}
           className="py-1 text-[12px]"
           aria-label="Status"
         >
@@ -163,6 +168,8 @@ function TriageCard({
 export function TriageBoard() {
   const cards = useApi(() => api.cards(), { intervalMs: 15000 });
   const members = useApi(() => api.members());
+  const cfg = useApi(() => api.config());
+  const isAdmin = !!cfg.data?.is_admin;
   const toast = useToast();
   const [dragId, setDragId] = useState<number | null>(null);
   const [overCol, setOverCol] = useState<CardStatus | null>(null);
@@ -191,7 +198,7 @@ export function TriageBoard() {
 
   const drop = (status: CardStatus) => {
     setOverCol(null);
-    if (dragId == null) return;
+    if (!isAdmin || dragId == null) return;
     const card = list.find((c) => c.id === dragId);
     setDragId(null);
     if (card && card.status !== status) patch(card.id, { status });
@@ -201,7 +208,9 @@ export function TriageBoard() {
     <div>
       <PageHeader
         title="Triage Board"
-        subtitle="Drag a card between columns to change status, or use the per-card controls."
+        subtitle={isAdmin
+          ? "Drag a card between columns to change status, or use the per-card controls."
+          : "Read-only — sign in as an admin to reassign, reprioritise, or move cards."}
         actions={
           <Button icon={RefreshCw} onClick={() => cards.refresh()}>
             Refresh
@@ -249,6 +258,7 @@ export function TriageBoard() {
                       card={c}
                       members={mem}
                       dragging={dragId === c.id}
+                      canEdit={isAdmin}
                       onDragStart={() => setDragId(c.id)}
                       onDragEnd={() => setDragId(null)}
                       onPatch={(body) => patch(c.id, body)}
