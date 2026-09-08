@@ -58,17 +58,62 @@ export interface Card {
   violation_reason: string | null;
 }
 
+export type RuleKind = "threshold" | "pattern" | "semantic";
+
 export interface Rule {
   id: number;
   name: string;
   workload_type: WorkloadType;
+  kind: RuleKind;
   metric: "elapsed_sec" | "est_cost_usd" | string;
   threshold: number;
+  pattern: string | null;
+  pattern_is_regex: boolean;
   severity: Severity;
   action: string;
+  auto_kill: boolean;
   enabled: boolean;
   created_at?: string;
   updated_at?: string;
+}
+
+export interface BudgetConfig {
+  user_budget_usd: number;
+  window_hours: number;
+  scan_every_min: number;
+  workspace_ids: string;
+  enabled: boolean;
+  notify_users: boolean;
+  last_scan_at: string | null;
+}
+
+export interface UserCost {
+  user_identity: string;
+  query_count: number;
+  total_execution_min: number;
+  pct_of_total_execution: number;
+  estimated_dbus: number;
+  estimated_list_cost_usd: number;
+  over_budget: boolean;
+}
+
+export interface BudgetStatus {
+  budget_usd: number;
+  window_hours: number;
+  workspace_ids: string;
+  users: UserCost[];
+}
+
+export interface BudgetAlert {
+  id: number;
+  user_identity: string;
+  est_cost_usd: number;
+  budget_usd: number;
+  window_hours: number;
+  recipients: string | null;
+  result: string;
+  error: string | null;
+  alerted_at: string | null;
 }
 
 export interface Member {
@@ -168,15 +213,28 @@ export const api = {
   createRule: (body: {
     name: string;
     workload_type: string;
+    kind: string;
     metric: string;
     threshold: number;
+    pattern: string | null;
+    pattern_is_regex: boolean;
     severity: string;
     action: string;
+    auto_kill: boolean;
     enabled: boolean;
   }) => req<{ id: number }>("/rules", { method: "POST", body: JSON.stringify(body) }),
-  patchRule: (id: number, body: Partial<Pick<Rule, "threshold" | "severity" | "action" | "enabled">>) =>
-    req<{ ok: boolean }>(`/rules/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
+  patchRule: (
+    id: number,
+    body: Partial<Pick<Rule, "threshold" | "severity" | "action" | "enabled" | "pattern" | "pattern_is_regex" | "auto_kill">>,
+  ) => req<{ ok: boolean }>(`/rules/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
   deleteRule: (id: number) => req<{ ok: boolean }>(`/rules/${id}`, { method: "DELETE" }),
+  killFinding: (id: number) =>
+    req<{ ok: boolean; detail: string }>(`/findings/${id}/kill`, { method: "POST" }),
+  budgetConfig: () => req<BudgetConfig>("/budget/config"),
+  patchBudgetConfig: (body: Partial<Omit<BudgetConfig, "last_scan_at">>) =>
+    req<{ ok: boolean }>("/budget/config", { method: "PATCH", body: JSON.stringify(body) }),
+  budgetStatus: () => req<BudgetStatus>("/budget/status"),
+  budgetAlerts: () => req<BudgetAlert[]>("/budget/alerts"),
   members: () => req<Member[]>("/members"),
   subscribers: () => req<Subscriber[]>("/subscribers"),
   addSubscriber: (email: string) =>

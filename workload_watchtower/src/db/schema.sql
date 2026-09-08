@@ -30,15 +30,25 @@ CREATE TABLE IF NOT EXISTS subscribers (
 CREATE TABLE IF NOT EXISTS rules (
     id             BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     name           TEXT        NOT NULL UNIQUE,
-    workload_type  TEXT        NOT NULL,   -- query | job_run | pipeline | cluster | serving
-    metric         TEXT        NOT NULL DEFAULT 'elapsed_sec',  -- elapsed_sec | est_cost_usd
-    threshold      DOUBLE PRECISION NOT NULL,
+    workload_type  TEXT        NOT NULL,   -- query | job_run | pipeline | cluster | serving | pattern_match
+    kind           TEXT        NOT NULL DEFAULT 'threshold',    -- threshold | pattern | semantic
+    metric         TEXT        NOT NULL DEFAULT 'elapsed_sec',  -- (threshold) elapsed_sec | est_cost_usd | session_override
+    threshold      DOUBLE PRECISION NOT NULL DEFAULT 0,         -- numeric bound (threshold kind); unused for pattern/semantic
+    pattern        TEXT,                                        -- (pattern/semantic) text pattern / NL intent
+    pattern_is_regex BOOLEAN   NOT NULL DEFAULT FALSE,          -- (pattern) treat `pattern` as regex vs substring
     severity       TEXT        NOT NULL DEFAULT 'warning',      -- info | warning | critical
-    action         TEXT        NOT NULL DEFAULT 'card',         -- none | card | email | card_email
+    action         TEXT        NOT NULL DEFAULT 'card',         -- '_'-joined subset of {card,email,kill} (or 'none')
+    auto_kill      BOOLEAN     NOT NULL DEFAULT FALSE,          -- auto-cancel on match; only honored on critical rules
     enabled        BOOLEAN     NOT NULL DEFAULT TRUE,
     created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at     TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+-- Migrations for pre-existing installs (CREATE TABLE IF NOT EXISTS above won't add columns).
+ALTER TABLE rules ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'threshold';
+ALTER TABLE rules ADD COLUMN IF NOT EXISTS pattern TEXT;
+ALTER TABLE rules ADD COLUMN IF NOT EXISTS pattern_is_regex BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE rules ADD COLUMN IF NOT EXISTS auto_kill BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE rules ALTER COLUMN threshold SET DEFAULT 0;
 
 -- One row per detected workload occurrence. The poller upserts on
 -- (workload_type, external_id): first_seen stays, last_seen/elapsed/est_cost refresh.
@@ -89,8 +99,8 @@ CREATE TABLE IF NOT EXISTS action_log (
     id           BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     finding_id   BIGINT      REFERENCES findings(id) ON DELETE SET NULL,
     rule_id      BIGINT      REFERENCES rules(id),
-    action       TEXT        NOT NULL,     -- email | card
-    target       TEXT,                     -- recipient email / member
+    action       TEXT        NOT NULL,     -- email | card | kill
+    target       TEXT,                     -- recipient email / member / cancelled workload ref
     payload      JSONB,
     result       TEXT        NOT NULL DEFAULT 'pending', -- pending | drafted | sending | sent | failed
     error        TEXT,
@@ -99,6 +109,41 @@ CREATE TABLE IF NOT EXISTS action_log (
 );
 -- Migration for pre-existing installs (CREATE TABLE IF NOT EXISTS above won't add columns).
 ALTER TABLE action_log ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT now();
+
+-- Per-user cost-budget config (singleton). The hourly budget scan (run inside the poll job)
+-- prorates settled SQL cost across users by query-history execution share and alerts users over
+-- `user_budget_usd`. `notify_users` FALSE = email admins only; TRUE = admins + the offending user.
+-- `workspace_ids` is a comma-separated list of numeric workspace ids to scan (admin-configured;
+-- no default). `last_scan_at` gates the hourly cadence within the ~5-min poll.
+CREATE TABLE IF NOT EXISTS budget_config (
+    id              BOOLEAN     PRIMARY KEY DEFAULT TRUE,   -- singleton guard (only the id=TRUE row)
+    user_budget_usd DOUBLE PRECISION NOT NULL DEFAULT 50,
+    window_hours    INTEGER     NOT NULL DEFAULT 24,
+    scan_every_min  INTEGER     NOT NULL DEFAULT 60,        -- min minutes between budget scans
+    workspace_ids   TEXT        NOT NULL DEFAULT '',        -- comma-separated numeric workspace ids to scan
+    enabled         BOOLEAN     NOT NULL DEFAULT TRUE,
+    notify_users    BOOLEAN     NOT NULL DEFAULT FALSE,     -- FALSE = admins only; TRUE = admins + users
+    last_scan_at    TIMESTAMPTZ,
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT budget_config_singleton CHECK (id)
+);
+INSERT INTO budget_config (id) VALUES (TRUE) ON CONFLICT (id) DO NOTHING;
+ALTER TABLE budget_config ADD COLUMN IF NOT EXISTS workspace_ids TEXT NOT NULL DEFAULT '';
+
+-- Audit trail of budget-breach emails. Doubles as the dedupe source: a user is only re-alerted
+-- if no `sent` row exists for them within the last `window_hours`.
+CREATE TABLE IF NOT EXISTS budget_alerts (
+    id            BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    user_identity TEXT        NOT NULL,       -- executed_by (email) of the over-budget user
+    est_cost_usd  DOUBLE PRECISION NOT NULL,
+    budget_usd    DOUBLE PRECISION NOT NULL,
+    window_hours  INTEGER     NOT NULL DEFAULT 24,
+    recipients    TEXT,                        -- who was actually emailed
+    result        TEXT        NOT NULL DEFAULT 'sent',   -- sent | failed | skipped
+    error         TEXT,
+    alerted_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS budget_alerts_user_idx ON budget_alerts (user_identity, alerted_at DESC);
 
 -- Audit of each poll cycle for observability of the poller itself.
 CREATE TABLE IF NOT EXISTS poll_runs (

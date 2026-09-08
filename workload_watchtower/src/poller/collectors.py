@@ -132,6 +132,32 @@ def collect_timeout_overrides(w: WorkspaceClient, window_minutes: int = 15) -> l
     return out
 
 
+def recent_queries(w: WorkspaceClient, window_minutes: int = 15, max_results: int = 1000) -> list[dict]:
+    """All queries (any status) in the recent window, with text — the candidate set for `pattern`
+    and `semantic` rules. Distinct from collect_queries (running/queued only) and from
+    collect_timeout_overrides (its own specialized SET-scan)."""
+    now_ms = int(_now().timestamp() * 1000)
+    flt = sql.QueryFilter(query_start_time_range=sql.TimeRange(
+        start_time_ms=now_ms - window_minutes * 60 * 1000, end_time_ms=now_ms))
+    out = []
+    resp = w.query_history.list(filter_by=flt, include_metrics=False, max_results=max_results)
+    for q in (resp.res or []):
+        text = (q.query_text or "").strip()
+        if not text:
+            continue
+        start = _from_ms(q.query_start_time_ms)
+        dur = (q.duration / 1000.0) if getattr(q, "duration", None) else _elapsed(start)
+        out.append({
+            "query_id": q.query_id,
+            "owner": q.user_name or q.executed_as_user_name,
+            "warehouse_id": q.warehouse_id,
+            "started_at": start,
+            "elapsed_sec": dur,
+            "query_text": text,
+        })
+    return out
+
+
 def collect_job_runs(w: WorkspaceClient) -> list[dict]:
     """Active (running) job runs."""
     out = []

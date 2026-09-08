@@ -8,6 +8,7 @@ import { TriageBoard } from "./views/TriageBoard";
 import { Findings } from "./views/Findings";
 import { Rules } from "./views/Rules";
 import { Actions } from "./views/Actions";
+import { Budget } from "./views/Budget";
 import { Monitoring } from "./views/Monitoring";
 import { Ask } from "./views/Ask";
 
@@ -17,6 +18,7 @@ const VIEWS: Record<ViewKey, () => JSX.Element> = {
   findings: Findings,
   rules: Rules,
   actions: Actions,
+  budget: Budget,
   monitoring: Monitoring,
   ask: Ask,
 };
