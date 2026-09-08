@@ -9,12 +9,43 @@ import os
 import re
 
 from databricks.sdk.service import sql
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from psycopg.types.json import Json
 from pydantic import BaseModel
 
 from . import llm, mailer, uc
 from .db import pool, rows_to_dicts, w
+
+# ── per-action authorization ──────────────────────────────────────────────────
+# Databricks Apps authenticate the end user and inject their identity as request headers, so we can
+# gate destructive/config endpoints on an admin allowlist rather than "anyone who can open the app".
+# WT_ADMINS is a comma-separated allowlist (set from config.env at deploy). WT_DEV_MODE allows local
+# runs (no Apps proxy → no identity header) through; it does NOT open a deployed app, because the
+# proxy always injects X-Forwarded-Email in prod, so the allowlist still applies there.
+_ADMINS = {e.strip().lower() for e in os.environ.get("WT_ADMINS", "").split(",") if e.strip()}
+_DEV_MODE = os.environ.get("WT_DEV_MODE", "").strip().lower() in ("1", "true", "yes")
+
+
+def caller_email(request: Request) -> str | None:
+    return (request.headers.get("X-Forwarded-Email")
+            or request.headers.get("X-Forwarded-Preferred-Username"))
+
+
+def is_admin(email: str | None) -> bool:
+    if _DEV_MODE and email is None:   # local dev, no Apps proxy identity
+        return True
+    return bool(email) and email.strip().lower() in _ADMINS
+
+
+def require_admin(request: Request) -> str:
+    """FastAPI dependency: 403 unless the authenticated caller is an admin. Returns the caller email
+    (or 'dev-local') for audit."""
+    email = caller_email(request)
+    if _DEV_MODE and email is None:
+        return "dev-local"
+    if not is_admin(email):
+        raise HTTPException(403, "admin privilege required for this action")
+    return email  # type: ignore[return-value]
 
 # Customer-available operator metrics we surface to the copilot (from Query History).
 _METRIC_KEYS = [
@@ -62,12 +93,14 @@ router = APIRouter()
 
 
 @router.get("/config")
-def config():
-    """Lightweight status for the UI (email wiring, monitoring dashboard URL, workspace label)."""
+def config(request: Request):
+    """Lightweight status for the UI (email wiring, monitoring dashboard URL, workspace label,
+    and whether the caller is an admin so the UI can hide destructive/config controls)."""
     return {"smtp_configured": mailer.smtp_configured(),
             "dashboard_url": os.environ.get("WT_DASHBOARD_URL"),
             "dashboard_embed_url": os.environ.get("WT_DASHBOARD_EMBED_URL"),
-            "workspace": os.environ.get("WT_WORKSPACE_LABEL")}
+            "workspace": os.environ.get("WT_WORKSPACE_LABEL"),
+            "is_admin": is_admin(caller_email(request))}
 
 
 # ── dashboard summary ────────────────────────────────────────────────────────
@@ -261,7 +294,7 @@ class Rule(BaseModel):
 
 
 @router.post("/rules")
-def create_rule(rule: Rule):
+def create_rule(rule: Rule, _admin: str = Depends(require_admin)):
     # Validate a user-supplied regex up front so a bad pattern is rejected at creation, not
     # silently swallowed at match time.
     if rule.kind == "pattern" and rule.pattern_is_regex and rule.pattern:
@@ -290,7 +323,7 @@ class RulePatch(BaseModel):
 
 
 @router.patch("/rules/{rule_id}")
-def update_rule(rule_id: int, patch: RulePatch):
+def update_rule(rule_id: int, patch: RulePatch, _admin: str = Depends(require_admin)):
     sets, params = [], []
     for field in ("threshold", "severity", "action", "enabled", "pattern", "pattern_is_regex", "auto_kill"):
         val = getattr(patch, field)
@@ -309,7 +342,7 @@ def update_rule(rule_id: int, patch: RulePatch):
 
 
 @router.delete("/rules/{rule_id}")
-def delete_rule(rule_id: int):
+def delete_rule(rule_id: int, _admin: str = Depends(require_admin)):
     with pool.connection() as conn, conn.cursor() as cur:
         cur.execute("DELETE FROM rules WHERE id = %s", (rule_id,))
     return {"ok": True}
@@ -332,7 +365,7 @@ def _kill(workload_type: str, external_id: str) -> tuple[bool, str]:
 
 
 @router.post("/findings/{finding_id}/kill")
-def kill_finding(finding_id: int):
+def kill_finding(finding_id: int, actor: str = Depends(require_admin)):
     with pool.connection() as conn, conn.cursor() as cur:
         cur.execute("SELECT workload_type, external_id, matched_rule FROM findings WHERE id = %s", (finding_id,))
         row = cur.fetchone()
@@ -344,7 +377,7 @@ def kill_finding(finding_id: int):
         cur.execute(
             "INSERT INTO action_log (finding_id, rule_id, action, target, payload, result, error) "
             "VALUES (%s,%s,'kill',%s,%s,%s,%s)",
-            (finding_id, rid, ext, Json({"detail": detail}), "killed" if ok else "failed",
+            (finding_id, rid, ext, Json({"detail": detail, "actor": actor}), "killed" if ok else "failed",
              None if ok else detail))
     if not ok:
         raise HTTPException(400 if "not supported" in detail else 502, detail)
@@ -377,7 +410,7 @@ def get_budget_config():
 
 
 @router.patch("/budget/config")
-def patch_budget_config(patch: BudgetConfig):
+def patch_budget_config(patch: BudgetConfig, _admin: str = Depends(require_admin)):
     sets, params = [], []
     for f in ("user_budget_usd", "window_hours", "scan_every_min", "workspace_ids", "enabled", "notify_users"):
         v = getattr(patch, f)
@@ -439,7 +472,7 @@ class Subscriber(BaseModel):
 
 
 @router.post("/subscribers")
-def add_subscriber(sub: Subscriber):
+def add_subscriber(sub: Subscriber, _admin: str = Depends(require_admin)):
     email = sub.email.strip()
     if "@" not in email:
         raise HTTPException(400, "invalid email")
@@ -451,7 +484,7 @@ def add_subscriber(sub: Subscriber):
 
 
 @router.delete("/subscribers/{sub_id}")
-def delete_subscriber(sub_id: int):
+def delete_subscriber(sub_id: int, _admin: str = Depends(require_admin)):
     with pool.connection() as conn, conn.cursor() as cur:
         cur.execute("DELETE FROM subscribers WHERE id = %s", (sub_id,))
     return {"ok": True}
@@ -539,7 +572,7 @@ def _run_job(name: str, job_parameters: dict | None = None) -> dict:
 
 
 @router.post("/ops/poll")
-def trigger_poll():
+def trigger_poll(_admin: str = Depends(require_admin)):
     """Run the poller job now. Requires the app's service principal to have run
     permission (CAN_MANAGE_RUN) on the poller job."""
     return _run_job(_POLLER_JOB_NAME)

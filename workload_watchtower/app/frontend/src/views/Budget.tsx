@@ -8,6 +8,8 @@ import { fmtCost, fmtAge } from "../lib/format";
 
 function ConfigPanel({ onSaved }: { onSaved: () => void }) {
   const cfg = useApi(() => api.budgetConfig());
+  const app = useApi(() => api.config());
+  const isAdmin = !!app.data?.is_admin;
   const toast = useToast();
   const [draft, setDraft] = useState<Partial<BudgetConfig>>({});
   const [saving, setSaving] = useState(false);
@@ -83,9 +85,11 @@ function ConfigPanel({ onSaved }: { onSaved: () => void }) {
         </div>
       </div>
       <div className="mt-4 flex items-center gap-3">
-        <Button variant="primary" icon={Save} loading={saving} onClick={save}>Save</Button>
+        <Button variant="primary" icon={Save} loading={saving} disabled={!isAdmin} onClick={save}>Save</Button>
         <span className="text-[11px] text-text-disabled">
-          Admins (subscribers) are always notified; the over-budget user is emailed only when the toggle is on.
+          {isAdmin
+            ? "Admins (subscribers) are always notified; the over-budget user is emailed only when the toggle is on."
+            : "Read-only — admin privilege is required to change the budget configuration."}
         </span>
       </div>
     </Card>

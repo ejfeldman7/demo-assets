@@ -225,8 +225,8 @@ fi
 # ── 11. Render app.yaml + build frontend ─────────────────────────────────────
 say "Render app/app.yaml + build frontend"
 export LAKEBASE_ENDPOINT LAKEBASE_HOST LAKEBASE_SCHEMA WAREHOUSE_ID UC_SCHEMA POLLER_JOB_NAME \
-       WORKSPACE_LABEL SECRET_SCOPE WT_MODEL DASHBOARD_URL DASHBOARD_EMBED_URL APP_SP
-: "${WORKSPACE_LABEL:=$APP_NAME}"; : "${WT_MODEL:=databricks-claude-sonnet-5}"
+       WORKSPACE_LABEL SECRET_SCOPE WT_MODEL WT_ADMINS DASHBOARD_URL DASHBOARD_EMBED_URL APP_SP
+: "${WORKSPACE_LABEL:=$APP_NAME}"; : "${WT_MODEL:=databricks-claude-sonnet-5}"; : "${WT_ADMINS:=}"
 envsubst < app/app.yaml.template > app/app.yaml
 ok "wrote app/app.yaml"
 ( cd app/frontend && npm install --no-audit --no-fund >/dev/null 2>&1 && npm run build >/dev/null )

@@ -202,6 +202,7 @@ export const api = {
       dashboard_url: string | null;
       dashboard_embed_url: string | null;
       workspace: string | null;
+      is_admin: boolean;
     }>("/config"),
   summary: () => req<Summary>("/summary"),
   findings: (status?: string, limit = 200) =>

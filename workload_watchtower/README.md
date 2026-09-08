@@ -198,6 +198,20 @@ To seed an assignable roster, point `SEED_MEMBERS_JSON` at a file like
 [`setup/it_members.example.json`](setup/it_members.example.json). Left empty, cards start
 unassigned and you assign them in the app.
 
+## Access control
+
+Two layers gate who can do what:
+
+1. **Who can open the app** — Databricks Apps access control. Grant **CAN_USE only to the team**
+   that should see the board, not all-users.
+2. **Who can perform destructive/config actions** — an admin allowlist. `WT_ADMINS` in
+   `config.env` is a comma-separated list of emails permitted to **cancel a workload, change the
+   budget config, edit rules/subscribers, and trigger a poll**. Everyone else with app access can
+   still view findings and do routine triage (send drafted emails, move cards). The app identifies
+   the caller from the Databricks Apps `X-Forwarded-Email` header and enforces this server-side
+   (non-admins get `403`); the UI also hides the gated controls. Kill actions record the acting
+   user in the audit log. (Local dev off-platform: `export WT_DEV_MODE=true` to bypass the check.)
+
 ## Operations
 
 - **Schedule** — the poller runs every 5 min (`poller_schedule` in `config.env`). The app's
