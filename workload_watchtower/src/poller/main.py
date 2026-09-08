@@ -434,8 +434,8 @@ def poll(w: WorkspaceClient) -> dict:
                                      f"Review: {_TIMEOUT_DOC}\n")
                         pending_sends.append((aid, recipients, subject, body))
                 # kill action: auto-cancel a NEW finding when a matched rule legitimately requests
-                # it (see _wants_auto_kill), limited to killable workload types (queries are a known
-                # gap). Executed OUTSIDE the DB transaction, like the email sends.
+                # it (see _wants_auto_kill), for any killable workload type (queries included, via
+                # cancel_execution). Executed OUTSIDE the DB transaction, like the email sends.
                 if m.get("auto_kill") and killer.can_kill(wl["workload_type"]):
                     pending_kills.append((fid, m["rule"]["id"], wl["workload_type"], wl["external_id"]))
                 alert_rows.append([poll_ts, wl["workload_type"], wl["external_id"], wl.get("owner"),

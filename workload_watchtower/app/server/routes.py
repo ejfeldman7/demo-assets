@@ -354,17 +354,23 @@ def delete_rule(rule_id: int, _admin: str = Depends(require_admin)):
 
 
 # ── kill (cancel a running workload) ──────────────────────────────────────────
-# In-app SDK cancel (HTTPS, so it works from Apps compute, unlike SMTP). job_run/pipeline/cluster
-# only; SQL queries are a known gap (no public cancel-by-history-id API). Confirm-gated in the UI.
+# In-app SDK cancel (HTTPS, so it works from Apps compute, unlike SMTP). Covers queries
+# (statement_execution.cancel_execution — the Query-History query_id is the unified statement_id),
+# job runs, pipelines, and clusters. Confirm-gated + admin-only in the UI.
 def _kill(workload_type: str, external_id: str) -> tuple[bool, str]:
     try:
         if workload_type == "job_run":
             w.jobs.cancel_run(run_id=int(external_id)); return True, f"cancelled job run {external_id}"
         if workload_type == "pipeline":
             w.pipelines.stop(pipeline_id=external_id); return True, f"stopped pipeline {external_id}"
+        if workload_type in ("query", "pattern_match"):
+            # The Query-History query_id is the unified statement_id; an admin can cancel it.
+            # pattern_match external_id is "<query_id>:<rule_id>".
+            qid = external_id.split(":", 1)[0]
+            w.statement_execution.cancel_execution(qid); return True, f"cancelled query {qid}"
         if workload_type == "cluster":
             w.clusters.delete(cluster_id=external_id); return True, f"terminated cluster {external_id}"
-        return False, "query cancellation not supported — no public API cancels a running query by its history id (TODO)"
+        return False, f"kill not supported for workload_type '{workload_type}'"
     except Exception as exc:
         return False, f"kill failed: {exc}"
 
