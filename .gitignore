@@ -222,3 +222,9 @@ __marimo__/
 # Python packaging) would otherwise also match its frontend build output.
 !uc_erd_explorer/frontend/dist/
 !uc_erd_explorer/frontend/dist/**
+
+# workload_watchtower builds its frontend from source at deploy (dist/ stays ignored), so its
+# app SOURCE lib/ (format helpers, imported across the views) must be tracked -- the generic
+# Python `lib/` rule above would otherwise drop it and break a clean-clone `npm run build`.
+!workload_watchtower/app/frontend/src/lib/
+!workload_watchtower/app/frontend/src/lib/**

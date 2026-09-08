@@ -167,6 +167,7 @@ databricks bundle deploy -t default "${P[@]}" \
   --var="lakebase_host=$LAKEBASE_HOST" \
   --var="lakebase_schema=$LAKEBASE_SCHEMA" \
   --var="secret_scope=$SECRET_SCOPE" \
+  --var="wt_model=$WT_MODEL" \
   ${poller_schedule:+--var="poller_schedule=$poller_schedule"}
 ok "poller job deployed"
 # let the app SP trigger the poller (the "Run poll" button)

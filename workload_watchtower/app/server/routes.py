@@ -6,9 +6,11 @@ from __future__ import annotations
 
 import json
 import os
+import re
 
 from databricks.sdk.service import sql
 from fastapi import APIRouter, HTTPException
+from psycopg.types.json import Json
 from pydantic import BaseModel
 
 from . import llm, mailer, uc
@@ -247,21 +249,33 @@ def list_rules():
 class Rule(BaseModel):
     name: str
     workload_type: str
+    kind: str = "threshold"          # threshold | pattern | semantic
     metric: str = "elapsed_sec"
-    threshold: float
+    threshold: float = 0             # unused for pattern/semantic
+    pattern: str | None = None       # (pattern) text/regex; (semantic) NL intent
+    pattern_is_regex: bool = False
     severity: str = "warning"
-    action: str = "card"
+    action: str = "card"             # '_'-joined subset of {card,email,kill}
+    auto_kill: bool = False          # honored only on critical rules (poller enforces)
     enabled: bool = True
 
 
 @router.post("/rules")
 def create_rule(rule: Rule):
+    # Validate a user-supplied regex up front so a bad pattern is rejected at creation, not
+    # silently swallowed at match time.
+    if rule.kind == "pattern" and rule.pattern_is_regex and rule.pattern:
+        try:
+            re.compile(rule.pattern)
+        except re.error as exc:
+            raise HTTPException(400, f"invalid regex pattern: {exc}")
     with pool.connection() as conn, conn.cursor() as cur:
         cur.execute(
-            "INSERT INTO rules (name, workload_type, metric, threshold, severity, action, enabled) "
-            "VALUES (%s,%s,%s,%s,%s,%s,%s) RETURNING id",
-            (rule.name, rule.workload_type, rule.metric, rule.threshold,
-             rule.severity, rule.action, rule.enabled))
+            "INSERT INTO rules (name, workload_type, kind, metric, threshold, pattern, "
+            "pattern_is_regex, severity, action, auto_kill, enabled) "
+            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id",
+            (rule.name, rule.workload_type, rule.kind, rule.metric, rule.threshold, rule.pattern,
+             rule.pattern_is_regex, rule.severity, rule.action, rule.auto_kill, rule.enabled))
         return {"id": cur.fetchone()[0]}
 
 
@@ -270,12 +284,15 @@ class RulePatch(BaseModel):
     severity: str | None = None
     action: str | None = None
     enabled: bool | None = None
+    pattern: str | None = None
+    pattern_is_regex: bool | None = None
+    auto_kill: bool | None = None
 
 
 @router.patch("/rules/{rule_id}")
 def update_rule(rule_id: int, patch: RulePatch):
     sets, params = [], []
-    for field in ("threshold", "severity", "action", "enabled"):
+    for field in ("threshold", "severity", "action", "enabled", "pattern", "pattern_is_regex", "auto_kill"):
         val = getattr(patch, field)
         if val is not None:
             sets.append(f"{field} = %s")
@@ -296,6 +313,109 @@ def delete_rule(rule_id: int):
     with pool.connection() as conn, conn.cursor() as cur:
         cur.execute("DELETE FROM rules WHERE id = %s", (rule_id,))
     return {"ok": True}
+
+
+# ── kill (cancel a running workload) ──────────────────────────────────────────
+# In-app SDK cancel (HTTPS, so it works from Apps compute, unlike SMTP). job_run/pipeline/cluster
+# only; SQL queries are a known gap (no public cancel-by-history-id API). Confirm-gated in the UI.
+def _kill(workload_type: str, external_id: str) -> tuple[bool, str]:
+    try:
+        if workload_type == "job_run":
+            w.jobs.cancel_run(run_id=int(external_id)); return True, f"cancelled job run {external_id}"
+        if workload_type == "pipeline":
+            w.pipelines.stop(pipeline_id=external_id); return True, f"stopped pipeline {external_id}"
+        if workload_type == "cluster":
+            w.clusters.delete(cluster_id=external_id); return True, f"terminated cluster {external_id}"
+        return False, "query cancellation not supported — no public API cancels a running query by its history id (TODO)"
+    except Exception as exc:
+        return False, f"kill failed: {exc}"
+
+
+@router.post("/findings/{finding_id}/kill")
+def kill_finding(finding_id: int):
+    with pool.connection() as conn, conn.cursor() as cur:
+        cur.execute("SELECT workload_type, external_id, matched_rule FROM findings WHERE id = %s", (finding_id,))
+        row = cur.fetchone()
+    if row is None:
+        raise HTTPException(404, "finding not found")
+    wt, ext, rid = row
+    ok, detail = _kill(wt, ext)
+    with pool.connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO action_log (finding_id, rule_id, action, target, payload, result, error) "
+            "VALUES (%s,%s,'kill',%s,%s,%s,%s)",
+            (finding_id, rid, ext, Json({"detail": detail}), "killed" if ok else "failed",
+             None if ok else detail))
+    if not ok:
+        raise HTTPException(400 if "not supported" in detail else 502, detail)
+    return {"ok": True, "detail": detail}
+
+
+# ── budget (per-user SQL cost) ────────────────────────────────────────────────
+class BudgetConfig(BaseModel):
+    user_budget_usd: float | None = None
+    window_hours: int | None = None
+    scan_every_min: int | None = None
+    workspace_ids: str | None = None     # comma-separated numeric workspace ids to scan
+    enabled: bool | None = None
+    notify_users: bool | None = None
+
+
+@router.get("/budget/config")
+def get_budget_config():
+    with pool.connection() as conn, conn.cursor() as cur:
+        cur.execute("SELECT user_budget_usd, window_hours, scan_every_min, workspace_ids, enabled, "
+                    "notify_users, last_scan_at FROM budget_config WHERE id = TRUE")
+        row = cur.fetchone()
+    if not row:
+        return {}
+    keys = ["user_budget_usd", "window_hours", "scan_every_min", "workspace_ids", "enabled",
+            "notify_users", "last_scan_at"]
+    d = dict(zip(keys, row))
+    d["last_scan_at"] = d["last_scan_at"].isoformat() if d["last_scan_at"] else None
+    return d
+
+
+@router.patch("/budget/config")
+def patch_budget_config(patch: BudgetConfig):
+    sets, params = [], []
+    for f in ("user_budget_usd", "window_hours", "scan_every_min", "workspace_ids", "enabled", "notify_users"):
+        v = getattr(patch, f)
+        if v is not None:
+            sets.append(f"{f} = %s")
+            params.append(v)
+    if not sets:
+        raise HTTPException(400, "no fields to update")
+    sets.append("updated_at = now()")
+    with pool.connection() as conn, conn.cursor() as cur:
+        cur.execute(f"UPDATE budget_config SET {', '.join(sets)} WHERE id = TRUE", params)
+    return {"ok": True}
+
+
+@router.get("/budget/status")
+def budget_status():
+    """Live per-user SQL cost over the configured window/workspace(s) (settled SQL cost prorated by
+    query-history execution share), each flagged against the budget. Read-only; cached in uc.py."""
+    with pool.connection() as conn, conn.cursor() as cur:
+        cur.execute("SELECT user_budget_usd, window_hours, workspace_ids FROM budget_config WHERE id = TRUE")
+        b = cur.fetchone()
+    budget = float(b[0]) if b else 0.0
+    hours = int(b[1]) if b else 24
+    workspace_ids = b[2] if b else ""
+    try:
+        rows = uc.user_costs(hours, workspace_ids)
+    except Exception as exc:
+        raise HTTPException(502, f"budget status unavailable: {exc}")
+    for r in rows:
+        r["over_budget"] = (r.get("estimated_list_cost_usd") or 0) >= budget
+    return {"budget_usd": budget, "window_hours": hours, "workspace_ids": workspace_ids, "users": rows}
+
+
+@router.get("/budget/alerts")
+def budget_alerts(limit: int = 50):
+    with pool.connection() as conn, conn.cursor() as cur:
+        cur.execute("SELECT * FROM budget_alerts ORDER BY alerted_at DESC LIMIT %s", (limit,))
+        return rows_to_dicts(cur)
 
 
 # ── members + actions ────────────────────────────────────────────────────────

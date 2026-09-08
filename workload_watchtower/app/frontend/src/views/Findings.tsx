@@ -1,10 +1,14 @@
 import { useMemo, useState } from "react";
-import { ListFilter, ChevronDown, ChevronRight, Search, Sparkles } from "lucide-react";
+import { ListFilter, ChevronDown, ChevronRight, Search, Sparkles, Ban } from "lucide-react";
 import { api, type Finding } from "../api";
 import { useApi } from "../hooks";
+import { useToast } from "../components/Toast";
 import { CopilotModal } from "../components/CopilotModal";
 import { Card, EmptyState, PageHeader, SeverityChip, Spinner, Select, Button, Chip } from "../components/ui";
 import { RefreshCw } from "lucide-react";
+
+// Kill (cancel) is only possible for live, cancellable workloads — queries can't be cancelled by API.
+const KILLABLE = ["job_run", "pipeline", "cluster"];
 import { SEVERITY_RANK, fmtCost, fmtElapsed, fmtAge, truncate, workloadIcon, workloadLabel } from "../lib/format";
 
 type SortKey = "severity" | "elapsed_sec" | "est_cost_usd";
@@ -16,7 +20,24 @@ export function Findings() {
   const [sort, setSort] = useState<SortKey>("severity");
   const [expanded, setExpanded] = useState<number | null>(null);
   const [explain, setExplain] = useState<{ findingId: number; context: string } | null>(null);
+  const [killing, setKilling] = useState<number | null>(null);
+  const toast = useToast();
   const findings = useApi(() => api.findings(status || undefined, 200), { intervalMs: 20000, deps: [status] });
+
+  const doKill = async (f: Finding) => {
+    if (!window.confirm(`Cancel this ${f.workload_type} (${f.object_name ?? f.external_id})? This stops the running workload.`))
+      return;
+    setKilling(f.id);
+    try {
+      const r = await api.killFinding(f.id);
+      toast({ kind: "success", title: "Workload cancelled", detail: r.detail });
+      findings.refresh();
+    } catch (e) {
+      toast({ kind: "error", title: "Kill failed", detail: e instanceof Error ? e.message : String(e) });
+    } finally {
+      setKilling(null);
+    }
+  };
 
   const rows = useMemo(() => {
     const list = [...(findings.data ?? [])];
@@ -80,7 +101,7 @@ export function Findings() {
                   <th className="py-2.5 pr-3 text-right font-medium">Cost</th>
                   <th className="py-2.5 pr-3 font-medium">Severity</th>
                   <th className="py-2.5 pr-3 font-medium">Seen</th>
-                  <th className="py-2.5 pr-4 text-right font-medium">Copilot</th>
+                  <th className="py-2.5 pr-4 text-right font-medium">Actions</th>
                 </tr>
               </thead>
               <tbody>
@@ -91,6 +112,8 @@ export function Findings() {
                     expanded={expanded === f.id}
                     onToggle={() => setExpanded(expanded === f.id ? null : f.id)}
                     onExplain={() => setExplain({ findingId: f.id, context: f.object_name ?? f.external_id })}
+                    onKill={() => doKill(f)}
+                    killing={killing === f.id}
                   />
                 ))}
               </tbody>
@@ -113,11 +136,15 @@ function FindingRow({
   expanded,
   onToggle,
   onExplain,
+  onKill,
+  killing,
 }: {
   f: Finding;
   expanded: boolean;
   onToggle: () => void;
   onExplain: () => void;
+  onKill: () => void;
+  killing: boolean;
 }) {
   const Icon = workloadIcon(f.workload_type);
   const hasQuery = !!f.query_text;
@@ -148,17 +175,27 @@ function FindingRow({
         </td>
         <td className="py-2.5 pr-3 text-text-secondary">{fmtAge(f.last_seen ?? f.first_seen)}</td>
         <td className="py-2.5 pr-4 text-right">
-          <button
-            onClick={(e) => {
-              e.stopPropagation();
-              onExplain();
-            }}
-            className="inline-flex items-center gap-1.5 rounded-full border border-line bg-surface px-2.5 py-1 text-[12px] font-medium text-text-secondary transition-colors hover:border-brand/40 hover:text-text-primary"
-            title="Explain with Triage Copilot"
-          >
-            <Sparkles size={13} className="text-lava-warm" />
-            Explain
-          </button>
+          <div className="inline-flex items-center justify-end gap-1.5">
+            {KILLABLE.includes(f.workload_type) && (
+              <button
+                onClick={(e) => { e.stopPropagation(); onKill(); }}
+                disabled={killing}
+                className="inline-flex items-center gap-1.5 rounded-full border border-line bg-surface px-2.5 py-1 text-[12px] font-medium text-text-secondary transition-colors hover:border-danger/40 hover:text-danger disabled:opacity-50"
+                title="Cancel this running workload"
+              >
+                <Ban size={13} className="text-danger" />
+                {killing ? "Killing…" : "Kill"}
+              </button>
+            )}
+            <button
+              onClick={(e) => { e.stopPropagation(); onExplain(); }}
+              className="inline-flex items-center gap-1.5 rounded-full border border-line bg-surface px-2.5 py-1 text-[12px] font-medium text-text-secondary transition-colors hover:border-brand/40 hover:text-text-primary"
+              title="Explain with Triage Copilot"
+            >
+              <Sparkles size={13} className="text-lava-warm" />
+              Explain
+            </button>
+          </div>
         </td>
       </tr>
       {expanded && hasQuery && (

@@ -19,9 +19,10 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from databricks.sdk import WorkspaceClient
 from psycopg.types.json import Json
@@ -77,6 +78,7 @@ def _config_from_args() -> None:
     setdefault("LAKEBASE_SCHEMA", args.get("lakebase-schema"))
     setdefault("WT_SMTP_SCOPE", args.get("secret-scope"))
     setdefault("WT_FAIL_ON_CRITICAL", args.get("fail-on-critical"))
+    setdefault("WT_MODEL", args.get("wt-model"))   # serving endpoint for semantic-rule classification
     # UC snapshot/alert tables derive from a single <catalog>.<schema> for convenience.
     uc = args.get("uc-schema")
     if uc:
@@ -90,6 +92,9 @@ from db import lakebase          # noqa: E402
 import cost                      # noqa: E402
 import collectors                # noqa: E402
 import mailer                    # noqa: E402
+import killer                    # noqa: E402
+import budget                    # noqa: E402
+import llm                       # noqa: E402
 
 _TIMEOUT_DOC = "https://docs.databricks.com/aws/en/sql/language-manual/parameters/statement_timeout"
 
@@ -102,6 +107,10 @@ UC_SNAPSHOTS = os.environ["WT_UC_SNAPSHOTS"]   # <catalog>.<schema>.workload_sna
 UC_ALERTS = os.environ["WT_UC_ALERTS"]         # <catalog>.<schema>.alert_events
 
 _SEV_RANK = {"info": 0, "warning": 1, "critical": 2}
+# Semantic rules classify only queries started within this window (≈ the poll interval) so the
+# 5-min poll doesn't re-send the same queries to the model across the overlapping 15-min scan.
+_SEMANTIC_WINDOW_MIN = int(os.environ.get("WT_SEMANTIC_WINDOW_MIN", "6"))
+_PATTERN_MAX_CHARS = int(os.environ.get("WT_PATTERN_MAX_CHARS", "20000"))
 
 
 # ── UC Delta writes via the SQL warehouse ────────────────────────────────────
@@ -212,7 +221,95 @@ def _evaluate(wl: dict, rules: list[dict]) -> dict | None:
         "rule": top, "actions": actions, "count": len(matched),
         "violation_reason": "|".join(sorted(violations)),
         "health_status": health, "alert_priority": priority,
+        "auto_kill": _wants_auto_kill(matched),
     }
+
+
+def _wants_auto_kill(rules: list[dict]) -> bool:
+    """Auto-kill fires only when a SINGLE matched rule legitimately requests it: it is critical,
+    its own action includes 'kill', and auto_kill is set. Guards against a 'kill' token from one
+    rule combining with a different rule's auto_kill flag (the union of actions is NOT sufficient)."""
+    return any(r.get("auto_kill") and r["severity"] == "critical"
+               and "kill" in (r["action"] or "").split("_") for r in rules)
+
+
+def _pattern_hit(rule: dict, text: str) -> bool:
+    """Whether a `pattern`-kind rule matches the query text (regex or case-insensitive substring).
+    Regex runs against a bounded prefix of the text — a cap on the input is a cheap guard against
+    catastrophic backtracking (ReDoS) from an admin-authored pattern stalling the whole poll."""
+    pat = rule.get("pattern") or ""
+    if not pat:
+        return False
+    text = text[:_PATTERN_MAX_CHARS]
+    if rule.get("pattern_is_regex"):
+        try:
+            return re.search(pat, text, re.IGNORECASE | re.DOTALL) is not None
+        except re.error:
+            return False
+    return pat.lower() in text.lower()
+
+
+def _pattern_finding(q: dict, rule: dict, violation: str) -> dict:
+    """Build a pattern_match workload (with _match attached) so it flows through the same
+    findings-persistence path as threshold matches. external_id is per (query, rule) so one query
+    can raise a distinct finding for each rule it trips, without colliding with `query` findings."""
+    sev = rule["severity"]
+    text = q["query_text"]
+    return {
+        "workload_type": "pattern_match",
+        "external_id": f"{q['query_id']}:{rule['id']}",
+        "owner": q.get("owner"),
+        "object_name": (text[:120] + "…") if len(text) > 120 else text,
+        "compute_ref": q.get("warehouse_id"),
+        "started_at": q.get("started_at"),
+        "elapsed_sec": q.get("elapsed_sec"),
+        "est_cost_usd": 0.0,
+        "_dbu_rate": 0.0,
+        "query_text": text,
+        "details": {"matched_rule": rule["name"], "kind": rule["kind"], "query_id": q["query_id"]},
+        "_match": {
+            "rule": rule, "actions": set((rule["action"] or "").split("_")), "count": 1,
+            "violation_reason": violation, "health_status": _health(sev),
+            "alert_priority": _priority(sev, q.get("elapsed_sec"), 0, {violation}),
+            "auto_kill": _wants_auto_kill([rule]),
+        },
+    }
+
+
+def _match_pattern_rules(w: WorkspaceClient, pattern_rules: list[dict], errors: list) -> list[dict]:
+    """Scan the recent query window once and raise findings for every `pattern`/`semantic` rule
+    that matches. Pattern matching is cheap (local regex) and scans the full window; semantic
+    matching costs a model call, so it is restricted to queries started within ~the poll interval
+    (else the 5-min poll re-classifies the overlapping 15-min window every cycle) and batched (one
+    call per semantic rule)."""
+    if not pattern_rules:
+        return []
+    try:
+        queries = collectors.recent_queries(w, window_minutes=15)
+    except Exception as exc:
+        errors.append(f"pattern_scan: {exc}")
+        log.warning("recent_queries failed: %s", exc)
+        return []
+    out = []
+    subs = [r for r in pattern_rules if r["kind"] == "pattern"]
+    sems = [r for r in pattern_rules if r["kind"] == "semantic"]
+    for q in queries:
+        for rule in subs:
+            if _pattern_hit(rule, q["query_text"]):
+                out.append(_pattern_finding(q, rule, "PATTERN_MATCH"))
+    if sems:
+        cutoff = datetime.now(timezone.utc) - timedelta(minutes=_SEMANTIC_WINDOW_MIN)
+        recent = [q for q in queries if q.get("started_at") and q["started_at"] >= cutoff]
+        by_id = {q["query_id"]: q for q in recent}
+        items = [(q["query_id"], q["query_text"]) for q in recent]
+        for rule in sems:
+            try:
+                for qid in llm.classify_matches(w, rule.get("pattern") or rule["name"], items):
+                    out.append(_pattern_finding(by_id[qid], rule, "SEMANTIC_MATCH"))
+            except Exception as exc:
+                errors.append(f"semantic rule {rule['id']}: {exc}")
+                log.warning("semantic classify failed for rule %s: %s", rule["id"], exc)
+    return out
 
 
 # ── one poll cycle ───────────────────────────────────────────────────────────
@@ -222,13 +319,18 @@ def poll(w: WorkspaceClient) -> dict:
 
     # 1. rules + roster (Lakebase)
     with lakebase.connect(w) as conn, conn.cursor() as cur:
-        cur.execute("SELECT id, name, workload_type, metric, threshold, severity, action "
-                    "FROM rules WHERE enabled = TRUE")
-        rules_by_type: dict[str, list[dict]] = {}
-        for rid, name, wt, metric, thr, sev, action in cur.fetchall():
-            rules_by_type.setdefault(wt, []).append(
-                {"id": rid, "name": name, "metric": metric, "threshold": float(thr),
-                 "severity": sev, "action": action})
+        cur.execute("SELECT id, name, workload_type, kind, metric, threshold, severity, action, "
+                    "pattern, pattern_is_regex, auto_kill FROM rules WHERE enabled = TRUE")
+        rules_by_type: dict[str, list[dict]] = {}   # threshold rules, keyed by workload_type
+        pattern_rules: list[dict] = []              # pattern + semantic rules (scan query text)
+        for rid, name, wt, kind, metric, thr, sev, action, pattern, is_rx, auto_kill in cur.fetchall():
+            r = {"id": rid, "name": name, "kind": kind, "metric": metric, "threshold": float(thr),
+                 "severity": sev, "action": action, "pattern": pattern,
+                 "pattern_is_regex": is_rx, "auto_kill": auto_kill}
+            if kind in ("pattern", "semantic"):
+                pattern_rules.append(r)
+            else:
+                rules_by_type.setdefault(wt, []).append(r)
         cur.execute("SELECT id FROM it_members WHERE active AND role <> 'admin' ORDER BY id")
         roster = [r[0] for r in cur.fetchall()]
         cur.execute("SELECT email FROM subscribers WHERE active ORDER BY email")
@@ -260,9 +362,12 @@ def poll(w: WorkspaceClient) -> dict:
             wl["_match"] = m
             findings.append(wl)
 
+    # 3b. pattern / semantic rules — scan the recent query window and raise pattern_match findings.
+    findings.extend(_match_pattern_rules(w, pattern_rules, errors))
+
     # 4/5. persist findings + cards + alerts + snapshots
     new_ct = upd_ct = new_critical = 0
-    snap_rows, alert_rows, pending_sends = [], [], []
+    snap_rows, alert_rows, pending_sends, pending_kills = [], [], [], []
     poll_ts = datetime.now(timezone.utc)
     rr = 0  # round-robin assignee index
     with lakebase.connect(w) as conn, conn.cursor() as cur:
@@ -328,6 +433,11 @@ def poll(w: WorkspaceClient) -> dict:
                                      f"bypasses the workspace/warehouse guardrail (session scope wins). "
                                      f"Review: {_TIMEOUT_DOC}\n")
                         pending_sends.append((aid, recipients, subject, body))
+                # kill action: auto-cancel a NEW finding when a matched rule legitimately requests
+                # it (see _wants_auto_kill), limited to killable workload types (queries are a known
+                # gap). Executed OUTSIDE the DB transaction, like the email sends.
+                if m.get("auto_kill") and killer.can_kill(wl["workload_type"]):
+                    pending_kills.append((fid, m["rule"]["id"], wl["workload_type"], wl["external_id"]))
                 alert_rows.append([poll_ts, wl["workload_type"], wl["external_id"], wl.get("owner"),
                                    m["rule"]["name"], m["rule"]["metric"], m["rule"]["threshold"],
                                    _metric_value(wl, m["rule"]["metric"]), m["rule"]["severity"],
@@ -366,6 +476,29 @@ def poll(w: WorkspaceClient) -> dict:
                 cur.execute("UPDATE action_log SET result = %s, error = %s, updated_at = now() WHERE id = %s",
                             (res, err, aid))
 
+    # 5c. execute auto-kills OUTSIDE the DB transaction; log each attempt to action_log.
+    if pending_kills:
+        kres = []
+        for fid, rid, wt, ext in pending_kills:
+            ok, detail = killer.kill_workload(w, wt, ext)
+            kres.append((fid, rid, ext, "killed" if ok else "failed", detail))
+            if not ok:
+                errors.append(f"kill {wt}:{ext}: {detail}")
+        with lakebase.connect(w) as conn, conn.cursor() as cur:
+            for fid, rid, ext, res, detail in kres:
+                cur.execute(
+                    "INSERT INTO action_log (finding_id, rule_id, action, target, payload, result, error) "
+                    "VALUES (%s,%s,'kill',%s,%s,%s,%s)",
+                    (fid, rid, ext, Json({"detail": detail}), res, None if res == "killed" else detail))
+
+    # 5d. per-user cost budget (Feature 3) — hourly-gated inside the poll; emails over-budget users.
+    try:
+        budget_summary = budget.run_budget_scan(w)
+    except Exception as exc:
+        budget_summary = {"error": str(exc)}
+    if budget_summary.get("error"):
+        errors.append(f"budget: {budget_summary['error']}")
+
     # 6. record poll run
     dur_ms = int((time.time() - t0) * 1000)
     with lakebase.connect(w) as conn, conn.cursor() as cur:
@@ -376,7 +509,8 @@ def poll(w: WorkspaceClient) -> dict:
 
     summary = {"workloads_seen": len(workloads), "seen_by_type": seen_by_type,
                "findings": len(findings), "new": new_ct, "new_critical": new_critical,
-               "updated": upd_ct, "errors": errors, "duration_ms": dur_ms, "list_price": price}
+               "updated": upd_ct, "errors": errors, "duration_ms": dur_ms, "list_price": price,
+               "budget": budget_summary}
     log.info("poll complete: %s", summary)
     return summary
 

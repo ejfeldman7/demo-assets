@@ -5,6 +5,7 @@ import {
   ListFilter,
   SlidersHorizontal,
   Mail,
+  DollarSign,
   Sparkles,
   BarChart3,
   Moon,
@@ -18,7 +19,7 @@ import { useApi } from "../hooks";
 import { useToast } from "./Toast";
 import { Pill } from "./ui";
 
-export type ViewKey = "dashboard" | "board" | "findings" | "rules" | "actions" | "monitoring" | "ask";
+export type ViewKey = "dashboard" | "board" | "findings" | "rules" | "actions" | "budget" | "monitoring" | "ask";
 
 const NAV: { key: ViewKey; label: string; icon: LucideIcon }[] = [
   { key: "dashboard", label: "Dashboard", icon: LayoutDashboard },
@@ -26,6 +27,7 @@ const NAV: { key: ViewKey; label: string; icon: LucideIcon }[] = [
   { key: "findings", label: "Findings", icon: ListFilter },
   { key: "rules", label: "Rules", icon: SlidersHorizontal },
   { key: "actions", label: "Actions", icon: Mail },
+  { key: "budget", label: "Budget", icon: DollarSign },
   { key: "monitoring", label: "Monitoring", icon: BarChart3 },
   { key: "ask", label: "Ask Watchtower", icon: Sparkles },
 ];
@@ -36,6 +38,7 @@ const TITLES: Record<ViewKey, string> = {
   findings: "Findings",
   rules: "Rules",
   actions: "Actions",
+  budget: "Budget",
   monitoring: "Monitoring",
   ask: "Ask Watchtower",
 };

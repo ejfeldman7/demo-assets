@@ -110,13 +110,19 @@ export function Input({ className = "", ...rest }: React.InputHTMLAttributes<HTM
 }
 
 // ── Toggle switch ──────────────────────────────────────────────────────────
-export function Toggle({ checked, onChange, label }: { checked: boolean; onChange: () => void; label?: string }) {
-  return (
-    <button
-      role="switch"
-      aria-checked={checked}
-      aria-label={label}
-      onClick={onChange}
+export function Toggle({
+  checked,
+  onChange,
+  label,
+  caption,
+}: {
+  checked: boolean;
+  onChange: () => void;
+  label?: string;      // aria-label (accessibility)
+  caption?: string;    // optional VISIBLE text rendered next to the switch
+}) {
+  const track = (
+    <span
       className="relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors"
       style={{ backgroundColor: checked ? "#2272EB" : "var(--border)" }}
     >
@@ -124,6 +130,19 @@ export function Toggle({ checked, onChange, label }: { checked: boolean; onChang
         className="inline-block h-3.5 w-3.5 transform rounded-full bg-white transition-transform"
         style={{ transform: checked ? "translateX(19px)" : "translateX(3px)" }}
       />
+    </span>
+  );
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={checked}
+      aria-label={label ?? caption}
+      onClick={onChange}
+      className={caption ? "inline-flex items-center gap-2 text-[12px] text-text-secondary" : "inline-flex"}
+    >
+      {track}
+      {caption && <span className={checked ? "text-text-primary" : ""}>{caption}</span>}
     </button>
   );
 }

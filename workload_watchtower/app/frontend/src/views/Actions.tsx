@@ -90,6 +90,7 @@ const RESULT_META: Record<string, { color: string; icon: typeof Send; label: str
   drafted: { color: "#FFAB00", icon: FileText, label: "Drafted" },
   sending: { color: "#8AB4F8", icon: Send, label: "Sending…" },
   sent: { color: "#3DD68C", icon: CheckCircle2, label: "Sent" },
+  killed: { color: "#3DD68C", icon: CheckCircle2, label: "Killed" },
   failed: { color: "#E5484D", icon: XCircle, label: "Failed" },
 };
 
@@ -119,9 +120,10 @@ export function Actions() {
   // worst-case runtime (job died before writing back) — reclaimable rather than stuck forever.
   const STALE_SENDING_MS = 5 * 60 * 1000;
   const canSend = (a: ActionRow) =>
-    a.result === "drafted" ||
-    a.result === "failed" ||
-    (a.result === "sending" && a.updated_at != null && Date.now() - Date.parse(a.updated_at) > STALE_SENDING_MS);
+    a.action === "email" &&   // kill/other actions also land in this log; only email is (re)sendable
+    (a.result === "drafted" ||
+      a.result === "failed" ||
+      (a.result === "sending" && a.updated_at != null && Date.now() - Date.parse(a.updated_at) > STALE_SENDING_MS));
 
   const send = async (a: ActionRow) => {
     setSending(a.id);
