@@ -7,8 +7,9 @@ import { CopilotModal } from "../components/CopilotModal";
 import { Card, EmptyState, PageHeader, SeverityChip, Spinner, Select, Button, Chip } from "../components/ui";
 import { RefreshCw } from "lucide-react";
 
-// Kill (cancel) is only possible for live, cancellable workloads — queries can't be cancelled by API.
-const KILLABLE = ["job_run", "pipeline", "cluster"];
+// Workload types the app can cancel (admin + confirm-gated). Queries/pattern-matches cancel via
+// statement_execution.cancel_execution on the Query-History id; jobs/pipelines/clusters via the SDK.
+const KILLABLE = ["query", "pattern_match", "job_run", "pipeline", "cluster"];
 import { SEVERITY_RANK, fmtCost, fmtElapsed, fmtAge, truncate, workloadIcon, workloadLabel } from "../lib/format";
 
 type SortKey = "severity" | "elapsed_sec" | "est_cost_usd";

@@ -21,6 +21,11 @@ variables:
   wt_model:
     description: Serving endpoint used to classify `semantic` pattern rules in the poller.
     default: databricks-claude-sonnet-5
+  wt_app_url:
+    description: >-
+      Deployed app URL, used only for the "View in Workload Watchtower" link in alert emails.
+      Optional — leave empty to omit the link.
+    default: ""
   poller_schedule:
     description: Quartz cron for the poll interval.
     default: "0 0/5 * * * ?"
@@ -69,6 +74,7 @@ resources:
               - "--lakebase-schema=${var.lakebase_schema}"
               - "--secret-scope=${var.secret_scope}"
               - "--wt-model=${var.wt_model}"
+              - "--wt-app-url=${var.wt_app_url}"
               # Opt-in: exit non-zero when a NEW critical finding is raised, so the job's
               # on_failure notifications (above) fire. Off unless set true. See "Alerting options".
               # - "--fail-on-critical=true"
@@ -77,16 +83,36 @@ resources:
         # Runs on the poller's schedule (no separate alert schedule); succeeds whether or not it
         # fires, so it never turns the job red. Notifies via the alert's own subscriptions.
         #
+        # GATED: the poll task publishes `new_critical` (and `new_warning`) as task values; the
+        # `alert_gate` condition task runs the SQL-Alert eval ONLY when new_critical > 0 — so a quiet
+        # poll skips the eval and saves a serverless SQL query (~288/day at the 5-min default would
+        # otherwise run every cycle).
+        #
+        # To ALSO alert on warnings (warning + critical), make TWO changes:
+        #   1) this gate — condition_task is a single comparison, so it can't express
+        #      "critical>0 OR warning>0". Have the poller publish a combined
+        #      `new_alertable = new_critical + new_warning` task value and point `left` at
+        #      `{{tasks.poll.values.new_alertable}}` (new_warning is already exposed to build it); and
+        #   2) the alert query — widen `severity = 'critical'` to `severity IN ('critical','warning')`
+        #      in resources.alerts.watchtower_critical, or the eval still counts only criticals.
+        #
         # This is native alerting OPTION 2 and is MUTUALLY EXCLUSIVE with option 3
         # (--fail-on-critical): that flag fails the poll task exactly when a new critical occurs,
-        # and this task's `depends_on: poll` (default ALL_SUCCESS) would then be SKIPPED on the very
+        # and alert_gate's `depends_on: poll` (default ALL_SUCCESS) would then be SKIPPED on the very
         # runs that matter. Use one or the other, not both.
-        # To NOT use option 2 (want only in-app email, or the option-3 fallback): delete this
-        # `alert_check` task AND the `alerts.watchtower_critical` resource below — otherwise every
-        # poll runs a serverless SQL evaluation (~288/day at the 5-min default).
-        - task_key: alert_check
+        # To NOT use option 2 (want only in-app email, or the option-3 fallback): delete the
+        # `alert_gate` + `alert_check` tasks AND the `alerts.watchtower_critical` resource below.
+        - task_key: alert_gate
           depends_on:
             - task_key: poll
+          condition_task:
+            left: "{{tasks.poll.values.new_critical}}"
+            op: "GREATER_THAN"
+            right: "0"
+        - task_key: alert_check
+          depends_on:
+            - task_key: alert_gate
+              outcome: "true"
           # alert_task = the AlertV2 task (sql_task.alert is the legacy path and can't see a v2
           # alert). Evaluates the alert and notifies its subscriptions; succeeds either way.
           alert_task:
@@ -129,6 +155,7 @@ resources:
               - "--lakebase-host=${var.lakebase_host}"
               - "--lakebase-schema=${var.lakebase_schema}"
               - "--secret-scope=${var.secret_scope}"
+              - "--wt-app-url=${var.wt_app_url}"
               - "--send-action={{job.parameters.action_id}}"
           environment_key: send_env
       environments:

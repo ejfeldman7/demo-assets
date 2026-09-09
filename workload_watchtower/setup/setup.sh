@@ -177,6 +177,7 @@ databricks bundle deploy -t default "${P[@]}" \
   --var="lakebase_schema=$LAKEBASE_SCHEMA" \
   --var="secret_scope=$SECRET_SCOPE" \
   --var="wt_model=$WT_MODEL" \
+  ${WT_APP_URL:+--var="wt_app_url=$WT_APP_URL"} \
   ${poller_schedule:+--var="poller_schedule=$poller_schedule"}
 ok "poller job deployed"
 # let the app SP trigger the poller (the "Run poll" button)
@@ -234,8 +235,8 @@ fi
 # ── 11. Render app.yaml + build frontend ─────────────────────────────────────
 say "Render app/app.yaml + build frontend"
 export LAKEBASE_ENDPOINT LAKEBASE_HOST LAKEBASE_SCHEMA WAREHOUSE_ID UC_SCHEMA POLLER_JOB_NAME \
-       WORKSPACE_LABEL SECRET_SCOPE WT_MODEL WT_ADMINS DASHBOARD_URL DASHBOARD_EMBED_URL APP_SP
-: "${WORKSPACE_LABEL:=$APP_NAME}"; : "${WT_MODEL:=databricks-claude-sonnet-5}"; : "${WT_ADMINS:=}"
+       WORKSPACE_LABEL SECRET_SCOPE WT_MODEL WT_ADMINS WT_APP_URL DASHBOARD_URL DASHBOARD_EMBED_URL APP_SP
+: "${WORKSPACE_LABEL:=$APP_NAME}"; : "${WT_MODEL:=databricks-claude-sonnet-5}"; : "${WT_ADMINS:=}"; : "${WT_APP_URL:=}"
 envsubst < app/app.yaml.template > app/app.yaml
 ok "wrote app/app.yaml"
 ( cd app/frontend && npm install --no-audit --no-fund >/dev/null 2>&1 && npm run build >/dev/null )
@@ -261,6 +262,22 @@ deploy_app() {
 if deploy_app; then
   APP_URL="$(databricks apps get "$APP_NAME" "${P[@]}" -o json | jq -r '.url // empty')"
   ok "app deployed${APP_URL:+: $APP_URL}"
+  # The app URL isn't known until the app exists (after the bundle deploy above), so if the operator
+  # didn't preset WT_APP_URL, re-deploy the poller bundle now with the discovered URL so alert emails
+  # carry a "View in Workload Watchtower" link. Optional + graceful — skip on any hiccup.
+  if [[ -z "${WT_APP_URL:-}" && -n "$APP_URL" ]]; then
+    say "Wire app URL into alert emails (poller re-deploy)"
+    if databricks bundle deploy -t default "${P[@]}" \
+      --var="warehouse_id=$WAREHOUSE_ID" --var="uc_schema=$UC_SCHEMA" \
+      --var="lakebase_endpoint=$LAKEBASE_ENDPOINT" --var="lakebase_host=$LAKEBASE_HOST" \
+      --var="lakebase_schema=$LAKEBASE_SCHEMA" --var="secret_scope=$SECRET_SCOPE" \
+      --var="wt_model=$WT_MODEL" --var="wt_app_url=$APP_URL" \
+      ${poller_schedule:+--var="poller_schedule=$poller_schedule"} >/dev/null; then
+      ok "alert emails will link to $APP_URL"
+    else
+      warn "could not re-deploy with WT_APP_URL; emails just omit the app link (set WT_APP_URL in config.env to fix)."
+    fi
+  fi
 else
   warn "app deploy needs attention — see docs/RUNBOOK.md → 'Deploy the app' for the manual steps."
 fi

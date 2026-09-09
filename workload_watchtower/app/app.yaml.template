@@ -49,6 +49,9 @@ env:
   # Agentic features (Triage Copilot + Ask Watchtower). Any chat serving endpoint works.
   - name: WT_MODEL
     value: "${WT_MODEL}"
+  # App URL for the "View in Workload Watchtower" link in alert emails. Optional.
+  - name: WT_APP_URL
+    value: "${WT_APP_URL}"
   # Published Lakeview "Cost & Usage Suite" dashboard for the Monitoring page (link + embed).
   # Filled in by setup after the dashboard is deployed; leave empty to hide the Monitoring page.
   - name: WT_DASHBOARD_URL

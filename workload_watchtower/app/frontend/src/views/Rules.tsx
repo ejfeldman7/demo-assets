@@ -16,7 +16,8 @@ const parseActions = (a: string): Set<string> => new Set((a || "").split("_").fi
 const joinActions = (s: Set<string>): string => ACTION_TOKENS.filter((t) => s.has(t)).join("_") || "none";
 // Kill is only meaningful for cancellable live workloads; queries (incl. all pattern/semantic
 // matches) can't be cancelled by API — the poller/app records those as unsupported.
-const killable = (workloadType: string) => ["job_run", "pipeline", "cluster"].includes(workloadType);
+const killable = (workloadType: string) =>
+  ["query", "pattern_match", "job_run", "pipeline", "cluster"].includes(workloadType);
 
 function ActionPicker({ value, onChange }: { value: Set<string>; onChange: (s: Set<string>) => void }) {
   return (
@@ -332,7 +333,7 @@ function AddRuleForm({ onClose, onCreated }: { onClose: () => void; onCreated: (
           <span className={lblText}>Actions</span>
           <ActionPicker value={actions} onChange={setActions} />
           {actions.has("kill") && !killable(effWorkloadType) && (
-            <span className="text-[11px] text-warning">Kill has no effect on queries (no API to cancel a running query) — kept for the audit trail.</span>
+            <span className="text-[11px] text-warning">Kill doesn't apply to this workload type — kept for the audit trail.</span>
           )}
           {showAutoKill && (
             <div className="mt-1"><Toggle checked={autoKill} onChange={() => setAutoKill((v) => !v)} caption="Auto-kill on match (critical only)" /></div>
