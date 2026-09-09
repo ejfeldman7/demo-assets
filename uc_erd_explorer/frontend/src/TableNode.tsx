@@ -1,4 +1,4 @@
-import { useContext, useEffect } from 'react'
+import { useContext, useEffect, type MouseEvent as ReactMouseEvent } from 'react'
 import { Handle, Position, useUpdateNodeInternals, type NodeProps } from 'reactflow'
 import type { ColorPair } from './catalogColors'
 import { ErdInteractionContext } from './erdContext'
@@ -104,6 +104,16 @@ export interface TableNodeProps extends NodeProps<TableNodeData> {
   }
 }
 
+// Reveal the full text as a native tooltip only when the element is actually clipped (its
+// text overflows its box, i.e. the ellipsis is showing). Computed lazily on hover -- no
+// per-row measurement on render, and the metrics are final by the time the pointer arrives.
+// `fallback` preserves a pre-existing tooltip (e.g. a column/table comment) when the text
+// itself fits, so a short name still shows its comment on hover rather than nothing.
+function revealIfClipped(e: ReactMouseEvent<HTMLElement>, text: string, fallback?: string | null) {
+  const el = e.currentTarget
+  el.title = el.scrollWidth > el.clientWidth ? text : (fallback ?? '')
+}
+
 export function TableNode({ id, data }: TableNodeProps) {
   const colors = data.color ?? { bar: '#475467', soft: '#f2f4f7' }
   const dimmed = data.dimmed
@@ -155,9 +165,16 @@ export function TableNode({ id, data }: TableNodeProps) {
           alignItems: 'center',
         }}
       >
-        <span title={data.comment ?? undefined} style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
-          {data.table}
-          {data.comment && <span style={{ opacity: 0.75, fontSize: 11 }}>ⓘ</span>}
+        <span style={{ display: 'flex', alignItems: 'center', gap: 5, minWidth: 0 }}>
+          <span
+            // Long table names hard-clip at the card edge otherwise; ellipsis + hover-reveal
+            // (only when actually clipped) shows the full name without a permanent tooltip.
+            onMouseEnter={(e) => revealIfClipped(e, data.table, data.comment)}
+            style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+          >
+            {data.table}
+          </span>
+          {data.comment && <span title={data.comment} style={{ opacity: 0.75, fontSize: 11, flexShrink: 0 }}>ⓘ</span>}
         </span>
         <span
           title={`${data.catalog}.${data.schema}`}
@@ -258,7 +275,14 @@ export function TableNode({ id, data }: TableNodeProps) {
                 minWidth: 0,
               }}
             >
-              <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>{col.name}</span>
+              <span
+                // Same reveal-on-clip as the table name: full column name on hover only when
+                // it's actually truncated; otherwise fall back to the column comment tooltip.
+                onMouseEnter={(e) => revealIfClipped(e, col.name, col.comment)}
+                style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+              >
+                {col.name}
+              </span>
               {col.comment && <span style={{ color: 'var(--text-subtle)', fontSize: 10, flexShrink: 0 }}>ⓘ</span>}
             </span>
             {col.tags.length > 0 && (
