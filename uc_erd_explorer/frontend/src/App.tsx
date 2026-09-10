@@ -143,6 +143,9 @@ function ErdCanvas() {
   // as their own hubs and shared dimensions sit between them (a fact constellation). Default
   // 'focus' keeps the original behavior until the user opts into the galaxy.
   const [starReach, setStarReach] = useState<'focus' | 'galaxy'>('focus')
+  // Column/grouping toggles star temporarily forces on entry, remembered so leaving star
+  // restores the exact view the user had rather than silently leaving them changed.
+  const [preStar, setPreStar] = useState<{ keysOnly: boolean; groupBy: GroupBy } | null>(null)
   // Tables whose full column list is expanded (past the COLUMN_CAP row cap). Per-table so
   // an analyst can pin a wide fact table open while everything else stays compact.
   const [expandedTables, setExpandedTables] = useState<Set<string>>(new Set())
@@ -490,9 +493,12 @@ function ErdCanvas() {
   }, [starMode, starAvailable, starCenterId, detailTables, scopedGraphEdges, classified])
   // Direct-neighbor count of the effective center -- 0 means "no FK relationships here", so
   // the sidebar can say so gently instead of rendering a lonely single card with no hint.
+  // Counts over baseEdges (the exact set the star layout uses -- declared + inferred + any
+  // predicted overlay), so the hint never says "no relationships" while the canvas shows a
+  // populated star built from predicted edges.
   const starNeighborCount = useMemo(
-    () => (effectiveStarCenter ? directNeighbors(effectiveStarCenter, scopedGraphEdges).size - 1 : 0),
-    [effectiveStarCenter, scopedGraphEdges],
+    () => (effectiveStarCenter ? directNeighbors(effectiveStarCenter, baseEdges).size - 1 : 0),
+    [effectiveStarCenter, baseEdges],
   )
 
   // rawNodes/baseEdges reflect the current column-expansion state, so they change on every
@@ -589,6 +595,12 @@ function ErdCanvas() {
     // Only a single-table toggle acts; bulk/none changes (e.g. a graph reload) fall through
     // to the fresh layout the structural effect produced.
     if (added.length + removed.length !== 1) return
+    if (starMode) {
+      // Radial star/galaxy has no vertical "lanes" to block-shift; a card height change just
+      // re-runs the (fast, deterministic) star layout so the ring stays intact.
+      runLayout(false)
+      return
+    }
     if (groupBy !== 'none') {
       runLayout(false) // re-cluster so the schema box grows/shrinks with the table
       return
@@ -623,7 +635,7 @@ function ErdCanvas() {
         return inLane(n) ? { ...n, position: { x: n.position.x, y: n.position.y + shift } } : n
       })
     })
-  }, [expandedTables, layoutDir, groupBy, runLayout])
+  }, [expandedTables, layoutDir, groupBy, runLayout, starMode])
 
   // Compute the currently-visible set based on selection + mode.
   // The shortest join path between the two chosen endpoints (tracing mode), or null.
@@ -781,13 +793,23 @@ function ErdCanvas() {
   const selectLayout = useCallback((d: LayoutDirection) => {
     setStarMode(false)
     setLayoutDir(d)
-  }, [])
+    // Restore the column/grouping toggles star forced, so leaving star returns the user to
+    // the view they had (rather than silently keeping keys-only / ungrouped).
+    if (preStar) {
+      setKeysOnly(preStar.keysOnly)
+      setGroupBy(preStar.groupBy)
+      setPreStar(null)
+    }
+  }, [preStar])
 
   // Enter star mode. Star and grouping are competing organizing principles, so grouping is
   // turned off; keys-only is turned on so dimensions compact to their keys (star reads as a
   // star, not a wall of columns). Selection/tracing are cleared so they don't fight the
   // click-to-recenter interaction.
   const selectStar = useCallback(() => {
+    // Remember the toggles we're about to force (only on ENTRY, so re-clicking Star doesn't
+    // overwrite the saved state with the forced values).
+    if (!starMode) setPreStar({ keysOnly, groupBy })
     setStarMode(true)
     // Seed the center from a table the user has focused (click-to-filter selection), so the
     // flow "click a table, then switch to Star" centers on THAT table -- the way to star a
@@ -800,7 +822,7 @@ function ErdCanvas() {
     setTracing(false)
     setTraceFrom(null)
     setTraceTo(null)
-  }, [selectedId])
+  }, [selectedId, starMode, keysOnly, groupBy])
 
   // Safety net: if the graph switches to the collapsed schema-summary view while star mode
   // is on (no column/key detail to classify), drop back to the ELK layout automatically.
@@ -1202,6 +1224,9 @@ function ErdCanvas() {
               label="Keys only (PK / FK)"
               checked={keysOnly}
               onChange={() => setKeysOnly((v) => !v)}
+              // Locked on in star view: the radial layout is sized for compact key-only cards,
+              // and full-height cards would collide on the ring. Restored when you leave star.
+              disabled={starMode}
             />
             <div style={styles.hint}>
               {keysOnly

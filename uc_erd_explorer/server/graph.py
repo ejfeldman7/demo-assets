@@ -216,12 +216,14 @@ def _internal_schema_exclusion_sql(catalog_col: str, schema_col: str, table_col:
         # -- only surfaces in unscoped mode, since a scoped ERD_CATALOGS would never
         # deliberately name one of these, but worth excluding unconditionally either way.
         f"AND substring({catalog_col}, 1, 2) != '__' "
-        # Legacy DLT/SDP materialization backing SCHEMA (case-insensitive, whole-name).
-        f"AND NOT (lower({schema_col}) RLIKE '^__dlt_materialization_schema_[a-z0-9_]+$')"
+        # Legacy DLT/SDP materialization backing SCHEMA. Prefix match (not a charset-bounded
+        # suffix) so a pipeline id with hyphens/UUIDs in the name is still caught; still a
+        # specific prefix, never a blanket "__" match.
+        f"AND NOT (lower({schema_col}) RLIKE '^__dlt_materialization_schema_')"
     )
     if table_col is not None:
         # Newer DLT/SDP hidden materialization backing TABLE (alongside the user-facing MV).
-        clause += f" AND NOT (lower({table_col}) RLIKE '^__materialization_mat_[a-z0-9_]+$')"
+        clause += f" AND NOT (lower({table_col}) RLIKE '^__materialization_mat_')"
     dbx = _dbxmetagen_meta.get()
     if dbx and _IDENTIFIER_RE.match(dbx[0]) and _IDENTIFIER_RE.match(dbx[1]):
         clause += f" AND NOT ({catalog_col} = '{dbx[0]}' AND {schema_col} = '{dbx[1]}')"

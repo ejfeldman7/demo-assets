@@ -128,7 +128,7 @@ class TestInternalSchemaExclusionSql:
         # Databricks-managed DLT/SDP backing SCHEMAs are excluded (whole-name, case-insensitive).
         monkeypatch.setattr(graph, "get_metadata_location", lambda: ("megacorp", "erd_meta"))
         sql = graph._internal_schema_exclusion_sql("cat", "sch")
-        assert "lower(sch) RLIKE '^__dlt_materialization_schema_[a-z0-9_]+$'" in sql
+        assert "lower(sch) RLIKE '^__dlt_materialization_schema_'" in sql
 
     def test_excludes_hidden_materialization_table_only_when_table_col_given(self, monkeypatch):
         # The hidden __materialization_mat_* backing TABLE pattern is added only at call sites
@@ -136,7 +136,7 @@ class TestInternalSchemaExclusionSql:
         monkeypatch.setattr(graph, "get_metadata_location", lambda: ("megacorp", "erd_meta"))
         with_table = graph._internal_schema_exclusion_sql("cat", "sch", "tbl")
         without_table = graph._internal_schema_exclusion_sql("cat", "sch")
-        assert "lower(tbl) RLIKE '^__materialization_mat_[a-z0-9_]+$'" in with_table
+        assert "lower(tbl) RLIKE '^__materialization_mat_'" in with_table
         assert "__materialization_mat_" not in without_table
 
     def test_does_not_blanket_exclude_dunder_tables(self, monkeypatch):

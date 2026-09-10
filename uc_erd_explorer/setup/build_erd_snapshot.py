@@ -81,10 +81,11 @@ def build_statements(catalogs: list, metadata_catalog: str, metadata_schema: str
             f"{schema_col} != 'information_schema' "
             f"AND NOT ({catalog_col} = '{metadata_catalog}' AND {schema_col} = '{metadata_schema}') "
             f"AND substring({catalog_col}, 1, 2) != '__' "
-            f"AND NOT (lower({schema_col}) RLIKE '^__dlt_materialization_schema_[a-z0-9_]+$')"
+            # Prefix match (not a charset-bounded suffix) so hyphen/UUID pipeline ids are caught.
+            f"AND NOT (lower({schema_col}) RLIKE '^__dlt_materialization_schema_')"
         )
         if table_col is not None:
-            clause += f" AND NOT (lower({table_col}) RLIKE '^__materialization_mat_[a-z0-9_]+$')"
+            clause += f" AND NOT (lower({table_col}) RLIKE '^__materialization_mat_')"
         return clause
 
     stmts = []
