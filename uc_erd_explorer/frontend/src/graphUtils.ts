@@ -146,7 +146,7 @@ export function shortestPath(
 }
 
 /** Full connected component (BFS transitive closure) containing the node. */
-export function connectedComponent(nodeId: string, edges: GraphEdge[]): Set<string> {
+export function connectedComponent(nodeId: string, edges: readonly EdgeLike[]): Set<string> {
   const adj = buildAdjacency(edges)
   const visited = new Set<string>([nodeId])
   const queue = [nodeId]

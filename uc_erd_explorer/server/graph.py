@@ -184,7 +184,7 @@ def _resolve_dbxmetagen_meta(catalogs: Optional[List[str]]) -> Optional[Tuple[st
     return None
 
 
-def _internal_schema_exclusion_sql(catalog_col: str, schema_col: str) -> str:
+def _internal_schema_exclusion_sql(catalog_col: str, schema_col: str, table_col: Optional[str] = None) -> str:
     """SQL condition excluding UC's own metadata schema plus THIS deployment's actual
     configured Genie metadata catalog+schema (via get_metadata_location(), which reads
     ERD_METADATA_LOCATION) -- never a hardcoded schema name. Scoped by catalog+schema
@@ -192,6 +192,17 @@ def _internal_schema_exclusion_sql(catalog_col: str, schema_col: str) -> str:
     schema literally named "erd_meta" isn't wrongly excluded. Also excludes dbxmetagen's own
     output schema when it's been detected (its KB / fk_predictions tables are tooling
     bookkeeping, not user data) -- see _dbxmetagen_meta / build_graph.
+
+    Also excludes Databricks-managed DLT/SDP materialized-view BACKING assets, which are
+    implementation details, never user-facing objects (the user-facing MV itself is NOT
+    matched and stays in the graph):
+      - schemas named `__dlt_materialization_schema_<pipeline_id>` (older pipelines, which
+        also live under the already-excluded `__databricks_internal` catalog), and
+      - tables named `__materialization_mat_<...>` (newer pipelines place these hidden
+        backing tables ALONGSIDE the user-facing MV in a normal catalog/schema).
+    Matched by the specific whole-name patterns above -- deliberately NOT every `__`-prefixed
+    name -- so unrelated system/user assets aren't hidden. `table_col` is only passed at call
+    sites that select a table name (the schema-level picker query has none).
     """
     meta_catalog, meta_schema = get_metadata_location()
     if not (_IDENTIFIER_RE.match(meta_catalog) and _IDENTIFIER_RE.match(meta_schema)):
@@ -204,8 +215,13 @@ def _internal_schema_exclusion_sql(catalog_col: str, schema_col: str) -> str:
         # Databricks-internal plumbing catalogs (e.g. __databricks_internal_catalog_...)
         # -- only surfaces in unscoped mode, since a scoped ERD_CATALOGS would never
         # deliberately name one of these, but worth excluding unconditionally either way.
-        f"AND substring({catalog_col}, 1, 2) != '__'"
+        f"AND substring({catalog_col}, 1, 2) != '__' "
+        # Legacy DLT/SDP materialization backing SCHEMA (case-insensitive, whole-name).
+        f"AND NOT (lower({schema_col}) RLIKE '^__dlt_materialization_schema_[a-z0-9_]+$')"
     )
+    if table_col is not None:
+        # Newer DLT/SDP hidden materialization backing TABLE (alongside the user-facing MV).
+        clause += f" AND NOT (lower({table_col}) RLIKE '^__materialization_mat_[a-z0-9_]+$')"
     dbx = _dbxmetagen_meta.get()
     if dbx and _IDENTIFIER_RE.match(dbx[0]) and _IDENTIFIER_RE.match(dbx[1]):
         clause += f" AND NOT ({catalog_col} = '{dbx[0]}' AND {schema_col} = '{dbx[1]}')"
@@ -328,7 +344,7 @@ def _query_columns(catalogs: Optional[List[str]], pairs: Optional[List[Tuple[str
         stmt = f"""
         SELECT {cols}
         FROM system.information_schema.columns
-        WHERE {_internal_schema_exclusion_sql("table_catalog", "table_schema")}
+        WHERE {_internal_schema_exclusion_sql("table_catalog", "table_schema", "table_name")}
           {catalog_filter} {pair_filter} {order}"""
     return _rows(_execute(stmt, "columns"))
 
@@ -348,7 +364,7 @@ def _query_tables(catalogs: Optional[List[str]], pairs: Optional[List[Tuple[str,
         stmt = f"""
         SELECT {cols}
         FROM system.information_schema.tables
-        WHERE {_internal_schema_exclusion_sql("table_catalog", "table_schema")}
+        WHERE {_internal_schema_exclusion_sql("table_catalog", "table_schema", "table_name")}
           {catalog_filter} {pair_filter} {order}"""
     return _rows(_execute(stmt, "tables"))
 
@@ -368,7 +384,7 @@ def _query_table_tags(catalogs: Optional[List[str]], pairs: Optional[List[Tuple[
         stmt = f"""
         SELECT {cols}
         FROM system.information_schema.table_tags
-        WHERE {_internal_schema_exclusion_sql("catalog_name", "schema_name")}
+        WHERE {_internal_schema_exclusion_sql("catalog_name", "schema_name", "table_name")}
           {catalog_filter} {pair_filter}"""
     try:
         return _rows(_execute(stmt, "table_tags"))
@@ -389,7 +405,7 @@ def _query_column_tags(catalogs: Optional[List[str]], pairs: Optional[List[Tuple
         stmt = f"""
         SELECT {cols}
         FROM system.information_schema.column_tags
-        WHERE {_internal_schema_exclusion_sql("catalog_name", "schema_name")}
+        WHERE {_internal_schema_exclusion_sql("catalog_name", "schema_name", "table_name")}
           {catalog_filter} {pair_filter}"""
     try:
         return _rows(_execute(stmt, "column_tags"))
@@ -420,7 +436,7 @@ def _query_primary_keys(catalogs: Optional[List[str]], pairs: Optional[List[Tupl
      AND tc.constraint_schema  = kcu.constraint_schema
      AND tc.constraint_name    = kcu.constraint_name
     WHERE tc.constraint_type = 'PRIMARY KEY'
-      AND {_internal_schema_exclusion_sql("kcu.table_catalog", "kcu.table_schema")}
+      AND {_internal_schema_exclusion_sql("kcu.table_catalog", "kcu.table_schema", "kcu.table_name")}
       {catalog_filter}
       {pair_filter}
     """

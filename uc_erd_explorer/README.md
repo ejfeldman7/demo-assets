@@ -38,13 +38,18 @@ automatically.
 - **Group and arrange**: cluster tables into labeled boxes by schema or by catalog
   (each box collapsible to a single node), and switch the auto-layout (ELK) between
   left-to-right and top-to-bottom to suit wide cards or tall stacks.
-- **Star layout**: a third layout mode that centers one table with its direct
-  foreign-key neighbors arranged radially around it — a fact-table-and-its-dimensions
-  view. It classifies tables as fact / dimension / junction (by `fact_`/`dim_`/`bridge_`
-  naming first, then by comments, then structurally from FK degree) and auto-suggests the
-  best fact as the center; click any table to re-center. Read-only and client-side (no
-  backend, no LLM). Works best on a dimensional (star) schema, but degrades gracefully on
-  any schema — it centers the most-connected table and never breaks the LR/TB layouts.
+- **Star layout**: a third layout mode that centers one table with its foreign-key
+  neighbors arranged radially — a fact-table-and-its-dimensions view. It classifies tables
+  as fact / dimension / junction (by `fact_`/`dim_`/`bridge_` naming first, then by
+  comments, then structurally from FK degree) and auto-suggests the best fact as the center;
+  click any table (or focus one before switching) to re-center. Two **reach** modes:
+  **Focus** (the center + its direct neighbors — a single clean star) and **Galaxy** (the
+  whole connected component laid out as a fact constellation — other facts become their own
+  hubs, conformed dimensions sit between them, snowflake sub-dims trail as outriggers).
+  Edges in these modes float to the card border facing each other (short diagonals, not
+  wrap-arounds). Read-only and client-side (no backend, no LLM). Works best on a dimensional
+  (star/galaxy) schema, but degrades gracefully on any schema and never touches the LR/TB
+  layouts.
 - **Light / dark / system theme**: a theme toggle in the top bar; defaults to following
   the operating system's preference.
 - **Catalog/schema tree picker**: an "All" toggle plus one row per catalog (tri-state
@@ -73,9 +78,18 @@ automatically.
   equivalent to a real constraint.
 - **Schema health audit**: an on-demand, deterministic pass over the current scope (no
   writes, no LLM) that flags tables with no primary key, orphan tables (no declared
-  relationships), undocumented tables, column-documentation coverage, and columns whose
-  names look like personal data but carry no tag — a structural, diagram-native read of
-  where a schema needs attention.
+  relationships), undocumented tables, column-documentation coverage, columns whose names
+  look like personal data but carry no tag, and **columns that share a name with another
+  table's key but have a different data type** — a relationship the type mismatch silently
+  blocks (Unity Catalog rejects a type-mismatched foreign key and the inferred-relationship
+  heuristic requires a matching type, so no edge is ever drawn). A structural, diagram-native
+  read of where a schema needs attention.
+- **Hides managed pipeline internals**: Databricks-managed materialized-view backing assets
+  are excluded from the graph and the audit — the `__databricks_internal` catalog, legacy
+  `__dlt_materialization_schema_*` schemas, and the hidden `__materialization_mat_*` backing
+  tables newer DLT/SDP pipelines place alongside a materialized view. The user-facing MV
+  stays; only its implementation-detail backing objects are filtered (by specific name
+  patterns, never a blanket `__` match).
 - **Keys-only column view**: a sidebar toggle that collapses every table to just its
   primary- and foreign-key columns, so wide tables (dozens of columns) stay readable. A
   table with no declared PK/FK renders as a header-only card — expected, and called out

@@ -23,7 +23,7 @@ import { AdminPanel } from './AdminPanel'
 import { ThemeToggle, useResolvedDark } from './ThemeToggle'
 import { CatalogSchemaPicker } from './CatalogSchemaPicker'
 import { COLUMN_CAP, ROW_HEIGHT, connectedComponent, directNeighbors, nodeSize, shortestPath, visibleColumns } from './graphUtils'
-import { layoutGraphElk, type GroupBy, type LayoutDirection } from './elkLayout'
+import { layoutGraphElk, layoutGalaxyElk, type GroupBy, type LayoutDirection } from './elkLayout'
 import { classifyTables, roleCounts, suggestStarCenter } from './classify'
 import { layoutStar } from './starLayout'
 import {
@@ -138,6 +138,11 @@ function ErdCanvas() {
   // user's pinned center (null = auto-suggest a fact/hub).
   const [starMode, setStarMode] = useState(false)
   const [starCenterId, setStarCenterId] = useState<string | null>(null)
+  // Star "reach": 'focus' = the single radial star (center + its 1-hop FK neighbors);
+  // 'galaxy' = a force/stress layout of the whole connected component, so other facts appear
+  // as their own hubs and shared dimensions sit between them (a fact constellation). Default
+  // 'focus' keeps the original behavior until the user opts into the galaxy.
+  const [starReach, setStarReach] = useState<'focus' | 'galaxy'>('focus')
   // Tables whose full column list is expanded (past the COLUMN_CAP row cap). Per-table so
   // an analyst can pin a wide fact table open while everything else stays compact.
   const [expandedTables, setExpandedTables] = useState<Set<string>>(new Set())
@@ -406,6 +411,8 @@ function ErdCanvas() {
         inferred: e.inferred,
         fkCols: e.fk_columns,
         pkCols: e.pk_columns,
+        // Star/Galaxy: float edges to the facing card border (no per-column-handle wrap-around).
+        floating: starMode,
       },
       // Custom type, not the built-in 'smoothstep' -- its label renders through
       // EdgeLabelRenderer (a layer above nodes) instead of inline SVG <text> (a layer
@@ -444,7 +451,7 @@ function ErdCanvas() {
             target: p.target,
             sourceHandle: graph.view === 'detail' ? p.fk_columns[0] : undefined,
             targetHandle: graph.view === 'detail' ? p.pk_columns[0] : undefined,
-            data: { predicted: true, confidence: p.confidence, fkCols: p.fk_columns, pkCols: p.pk_columns },
+            data: { predicted: true, confidence: p.confidence, fkCols: p.fk_columns, pkCols: p.pk_columns, floating: starMode },
             type: 'relationship',
             zIndex: 2,
             style: { stroke: 'var(--predicted)', strokeWidth: 2, strokeDasharray: '2 4' },
@@ -452,7 +459,7 @@ function ErdCanvas() {
       : []
 
     return { rawNodes, baseEdges: [...edges, ...predictedRf] }
-  }, [graph, scopedGraphEdges, keysOnly, expandedTables, anchorColsByNode, showPredictions, predictedEdges])
+  }, [graph, scopedGraphEdges, keysOnly, expandedTables, anchorColsByNode, showPredictions, predictedEdges, starMode])
 
   // --- Star layout derivation ---------------------------------------------------------
   // Client-side classification (fact/dimension/junction) drives the star view's center
@@ -464,6 +471,13 @@ function ErdCanvas() {
   )
   const classified = useMemo(() => classifyTables(detailTables, scopedGraphEdges), [detailTables, scopedGraphEdges])
   const starRoleCounts = useMemo(() => roleCounts(classified), [classified])
+  // Ids classified as facts -- passed to the Galaxy layout so it can place each fact as its
+  // own hub (facts spread, private dims fanning out, shared dims between). Empty -> the
+  // galaxy falls back to an organic stress layout.
+  const factIds = useMemo(
+    () => new Set([...classified].filter(([, c]) => c.role === 'fact').map(([id]) => id)),
+    [classified],
+  )
   // Star is only offered with tables to lay out in the detail view; otherwise the toggle is
   // greyed out (and if somehow on, runLayout falls through to ELK -- never breaks).
   const starAvailable = graph?.view === 'detail' && detailTables.length > 0
@@ -510,6 +524,23 @@ function ErdCanvas() {
       // bypassing ELK entirely. Requires a resolvable center in the detail view; otherwise
       // it falls through to the ELK path below, so an un-centerable state never gets stuck.
       if (starMode && effectiveStarCenter && graph?.view === 'detail') {
+        if (starReach === 'galaxy') {
+          // Galaxy is an async ELK (stress) layout of the connected component -- same
+          // generation-guard pattern as the main ELK path so a superseded run can't win.
+          layoutGalaxyElk(nodes, baseEdgesRef.current, effectiveStarCenter, factIds)
+            .then((r) => {
+              if (gen !== layoutGenRef.current) return
+              skipFitRef.current = !fit
+              laidOutRef.current = r.nodes
+              setBaseNodes(r.nodes)
+              setGroupBoxes([])
+            })
+            .catch((e) => {
+              if (gen === layoutGenRef.current) setError((e as Error).message)
+            })
+          return
+        }
+        // Focus: synchronous radial star (center + 1-hop neighbors).
         const r = layoutStar(effectiveStarCenter, nodes as Node<TableNodeData>[], baseEdgesRef.current)
         skipFitRef.current = !fit
         laidOutRef.current = r.nodes
@@ -535,7 +566,7 @@ function ErdCanvas() {
           if (gen === layoutGenRef.current) setError((e as Error).message)
         })
     },
-    [graph, layoutDir, groupBy, collapsedGroups, starMode, effectiveStarCenter],
+    [graph, layoutDir, groupBy, collapsedGroups, starMode, effectiveStarCenter, starReach, factIds],
   )
 
   // Structural re-layout: new graph, keys-only, inferred toggle, direction, grouping
@@ -1077,6 +1108,27 @@ function ErdCanvas() {
               <span style={{ flex: 1 }}>Star (fact-centered) ⭐</span>
               {starMode && <span style={styles.check}>✓</span>}
             </button>
+            {starMode && (
+              <>
+                <div style={{ display: 'flex', gap: 4, marginTop: 6 }}>
+                  {([['focus', 'Focus'], ['galaxy', 'Galaxy']] as ['focus' | 'galaxy', string][]).map(([r, label]) => (
+                    <button
+                      key={r}
+                      onClick={() => setStarReach(r)}
+                      aria-pressed={starReach === r}
+                      style={{ ...sidebarRow(starReach === r), flex: 1, justifyContent: 'center' }}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+                <div style={styles.hint}>
+                  {starReach === 'focus'
+                    ? 'Focus: the center table and its direct FK neighbors only.'
+                    : 'Galaxy: everything connected to the center — other facts become their own hubs and shared dimensions sit between them.'}
+                </div>
+              </>
+            )}
             {!starMode && (
               <div style={styles.hint}>
                 Auto-arranged with ELK. Left → right suits these wide cards; top → bottom stacks

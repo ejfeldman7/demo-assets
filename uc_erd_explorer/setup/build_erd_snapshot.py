@@ -72,12 +72,20 @@ def build_statements(catalogs: list, metadata_catalog: str, metadata_schema: str
     def cat_filter(col):
         return f"AND {col} IN {_in_clause(catalogs)}" if catalogs else ""
 
-    def internal_excl(catalog_col, schema_col):
-        return (
+    def internal_excl(catalog_col, schema_col, table_col=None):
+        # Mirrors server/graph.py _internal_schema_exclusion_sql: also drops Databricks-managed
+        # DLT/SDP materialized-view backing assets (legacy __dlt_materialization_schema_* schemas
+        # and newer __materialization_mat_* backing tables) -- implementation details, not the
+        # user-facing MV. Specific whole-name patterns, never a blanket "__" match.
+        clause = (
             f"{schema_col} != 'information_schema' "
             f"AND NOT ({catalog_col} = '{metadata_catalog}' AND {schema_col} = '{metadata_schema}') "
-            f"AND substring({catalog_col}, 1, 2) != '__'"
+            f"AND substring({catalog_col}, 1, 2) != '__' "
+            f"AND NOT (lower({schema_col}) RLIKE '^__dlt_materialization_schema_[a-z0-9_]+$')"
         )
+        if table_col is not None:
+            clause += f" AND NOT (lower({table_col}) RLIKE '^__materialization_mat_[a-z0-9_]+$')"
+        return clause
 
     stmts = []
 
@@ -96,7 +104,7 @@ CREATE OR REPLACE TABLE {loc}.erd_snapshot_tables
 COMMENT 'ERD snapshot: tables in the approved catalogs ({catalog_list_str}). Refreshed by the refresh_erd_snapshot job.' AS
 SELECT table_catalog, table_schema, table_name, comment
 FROM system.information_schema.tables
-WHERE {internal_excl("table_catalog", "table_schema")}
+WHERE {internal_excl("table_catalog", "table_schema", "table_name")}
   {cat_filter("table_catalog")}
 """.strip(),
         False,
@@ -109,7 +117,7 @@ CREATE OR REPLACE TABLE {loc}.erd_snapshot_columns
 COMMENT 'ERD snapshot: columns in the approved catalogs ({catalog_list_str}).' AS
 SELECT table_catalog, table_schema, table_name, column_name, full_data_type, ordinal_position, comment
 FROM system.information_schema.columns
-WHERE {internal_excl("table_catalog", "table_schema")}
+WHERE {internal_excl("table_catalog", "table_schema", "table_name")}
   {cat_filter("table_catalog")}
 """.strip(),
         False,
@@ -127,7 +135,7 @@ JOIN system.information_schema.key_column_usage kcu
  AND tc.constraint_schema  = kcu.constraint_schema
  AND tc.constraint_name    = kcu.constraint_name
 WHERE tc.constraint_type = 'PRIMARY KEY'
-  AND {internal_excl("kcu.table_catalog", "kcu.table_schema")}
+  AND {internal_excl("kcu.table_catalog", "kcu.table_schema", "kcu.table_name")}
   {cat_filter("tc.constraint_catalog")}
 """.strip(),
         False,
@@ -171,7 +179,7 @@ CREATE OR REPLACE TABLE {loc}.erd_snapshot_table_tags
 COMMENT 'ERD snapshot: table-level UC tags ({catalog_list_str}).' AS
 SELECT catalog_name, schema_name, table_name, tag_name, tag_value
 FROM system.information_schema.table_tags
-WHERE {internal_excl("catalog_name", "schema_name")}
+WHERE {internal_excl("catalog_name", "schema_name", "table_name")}
   {cat_filter("catalog_name")}
 """.strip(),
         True,
@@ -184,7 +192,7 @@ CREATE OR REPLACE TABLE {loc}.erd_snapshot_column_tags
 COMMENT 'ERD snapshot: column-level UC tags ({catalog_list_str}).' AS
 SELECT catalog_name, schema_name, table_name, column_name, tag_name, tag_value
 FROM system.information_schema.column_tags
-WHERE {internal_excl("catalog_name", "schema_name")}
+WHERE {internal_excl("catalog_name", "schema_name", "table_name")}
   {cat_filter("catalog_name")}
 """.strip(),
         True,

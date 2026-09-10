@@ -1,32 +1,59 @@
--- Synthetic DIMENSIONAL (star-schema) demo catalog for the Interactive ERD Viewer.
--- Structure only (no rows). A small retail-sales star with conformed dimensions, two facts
--- that share them (a fact constellation), and one many-to-many bridge -- named with the
--- fact_/dim_/bridge_ conventions so the Star layout's classifier resolves every table on
--- NAMING (its high-confidence path), and centers fact_sales automatically.
+-- Synthetic DIMENSIONAL (star / galaxy schema) demo catalog for the Interactive ERD Viewer.
+-- Structure only (no rows). A retail-sales constellation with THREE facts sharing conformed
+-- dimensions, two SNOWFLAKED sub-dimensions (outriggers), and a many-to-many bridge -- named
+-- with the fact_/dim_/bridge_ conventions so the Star layout's classifier resolves every
+-- table on NAMING (its high-confidence path) and centers fact_sales automatically.
+--
+-- Shape (why it's a good test bed for the Star/Galaxy layout):
+--   facts:   fact_sales, fact_inventory_snapshot, fact_returns   (three hubs)
+--   dims:    dim_date, dim_customer, dim_product, dim_store, dim_promotion, dim_channel
+--   sub-dims (snowflake outriggers): dim_category  (<- dim_product),
+--                                    dim_region    (<- dim_store)
+--   bridge:  bridge_promotion_product
+-- The three facts share dim_date/dim_product/dim_store (a fact constellation), and the two
+-- outriggers sit one hop beyond their parent dimension -- so Galaxy mode shows multiple hubs,
+-- conformed dims between them, and sub-dims trailing outward.
 --
 -- This complements the normalized megacorp/logistics demo (OLTP, no dim_/fact_ names, which
 -- exercises the classifier's STRUCTURAL fallback). Together they cover both worlds.
 --
--- Keys are declared as UC informational PRIMARY/FOREIGN KEY constraints (not enforced --
--- the Databricks default), which is exactly what the ERD reads from information_schema, so
--- the star renders from real declared relationships. No governance TAGS are set here on
--- purpose -- SET TAGS can be rejected by a workspace's governed tag policies, and the star
--- demo should deploy cleanly anywhere, so comments carry the documentation here.
+-- Keys are declared as UC informational PRIMARY/FOREIGN KEY constraints (not enforced -- the
+-- Databricks default), which is what the ERD reads from information_schema, so the star
+-- renders from real declared relationships. No governance TAGS are set here on purpose --
+-- SET TAGS can be rejected by a workspace's governed tag policies, and the demo should deploy
+-- cleanly anywhere, so comments carry the documentation here.
 -- "retail_star" is a single literal placeholder the loader substitutes at run time.
 
-CREATE CATALOG IF NOT EXISTS retail_star COMMENT 'Retail Star — synthetic dimensional (star-schema) demo catalog for the ERD viewer. Structure only, no data.';
+CREATE CATALOG IF NOT EXISTS retail_star COMMENT 'Retail Star — synthetic dimensional (star/galaxy schema) demo catalog for the ERD viewer. Structure only, no data.';
 
-CREATE SCHEMA IF NOT EXISTS retail_star.sales COMMENT 'Retail sales star: conformed dimensions, a sales fact and an inventory-snapshot fact that share them, and a promotion/product bridge.';
+CREATE SCHEMA IF NOT EXISTS retail_star.sales COMMENT 'Retail sales galaxy: three facts sharing conformed dimensions, two snowflaked sub-dimensions, and a promotion/product bridge.';
 
 -- ============================================================
--- Dimensions (conformed -- shared across both facts)
+-- Snowflake sub-dimensions (outriggers) -- created first, since dimensions reference them.
+-- ============================================================
+
+CREATE TABLE IF NOT EXISTS retail_star.sales.dim_category (
+  category_key BIGINT NOT NULL,
+  category_name STRING,
+  department STRING,
+  CONSTRAINT dim_category_pk PRIMARY KEY (category_key)
+) USING delta COMMENT 'Product category outrigger (snowflake off dim_product).';
+
+CREATE TABLE IF NOT EXISTS retail_star.sales.dim_region (
+  region_key BIGINT NOT NULL,
+  region_name STRING,
+  country STRING,
+  CONSTRAINT dim_region_pk PRIMARY KEY (region_key)
+) USING delta COMMENT 'Sales region outrigger (snowflake off dim_store).';
+
+-- ============================================================
+-- Conformed dimensions (shared across the facts)
 -- ============================================================
 
 CREATE TABLE IF NOT EXISTS retail_star.sales.dim_date (
   date_key BIGINT NOT NULL,
   full_date DATE,
   day_of_week STRING,
-  day_of_month INT,
   month_number INT,
   month_name STRING,
   quarter INT,
@@ -50,23 +77,24 @@ CREATE TABLE IF NOT EXISTS retail_star.sales.dim_product (
   product_key BIGINT NOT NULL,
   sku STRING,
   product_name STRING,
-  category STRING,
+  category_key BIGINT,
   subcategory STRING,
   brand STRING,
   unit_cost DECIMAL(12,2),
-  CONSTRAINT dim_product_pk PRIMARY KEY (product_key)
-) USING delta COMMENT 'Product dimension (the merchandise hierarchy: brand > category > subcategory).';
+  CONSTRAINT dim_product_pk PRIMARY KEY (product_key),
+  CONSTRAINT dim_product_category_fk FOREIGN KEY (category_key) REFERENCES retail_star.sales.dim_category (category_key)
+) USING delta COMMENT 'Product dimension. Snowflaked: references dim_category.';
 
 CREATE TABLE IF NOT EXISTS retail_star.sales.dim_store (
   store_key BIGINT NOT NULL,
   store_code STRING,
   store_name STRING,
+  region_key BIGINT,
   city STRING,
-  region STRING,
-  country STRING,
   store_format STRING,
-  CONSTRAINT dim_store_pk PRIMARY KEY (store_key)
-) USING delta COMMENT 'Store/location dimension.';
+  CONSTRAINT dim_store_pk PRIMARY KEY (store_key),
+  CONSTRAINT dim_store_region_fk FOREIGN KEY (region_key) REFERENCES retail_star.sales.dim_region (region_key)
+) USING delta COMMENT 'Store/location dimension. Snowflaked: references dim_region.';
 
 CREATE TABLE IF NOT EXISTS retail_star.sales.dim_promotion (
   promotion_key BIGINT NOT NULL,
@@ -76,6 +104,13 @@ CREATE TABLE IF NOT EXISTS retail_star.sales.dim_promotion (
   discount_pct DECIMAL(5,2),
   CONSTRAINT dim_promotion_pk PRIMARY KEY (promotion_key)
 ) USING delta COMMENT 'Promotion dimension (the campaign a sale was attributed to).';
+
+CREATE TABLE IF NOT EXISTS retail_star.sales.dim_channel (
+  channel_key BIGINT NOT NULL,
+  channel_name STRING,
+  channel_type STRING,
+  CONSTRAINT dim_channel_pk PRIMARY KEY (channel_key)
+) USING delta COMMENT 'Sales channel dimension (store / web / marketplace).';
 
 -- ============================================================
 -- Facts (reference the conformed dimensions above)
@@ -88,6 +123,7 @@ CREATE TABLE IF NOT EXISTS retail_star.sales.fact_sales (
   product_key BIGINT,
   store_key BIGINT,
   promotion_key BIGINT,
+  channel_key BIGINT,
   quantity INT,
   unit_price DECIMAL(12,2),
   gross_amount DECIMAL(14,2),
@@ -98,8 +134,9 @@ CREATE TABLE IF NOT EXISTS retail_star.sales.fact_sales (
   CONSTRAINT fact_sales_customer_fk FOREIGN KEY (customer_key) REFERENCES retail_star.sales.dim_customer (customer_key),
   CONSTRAINT fact_sales_product_fk FOREIGN KEY (product_key) REFERENCES retail_star.sales.dim_product (product_key),
   CONSTRAINT fact_sales_store_fk FOREIGN KEY (store_key) REFERENCES retail_star.sales.dim_store (store_key),
-  CONSTRAINT fact_sales_promotion_fk FOREIGN KEY (promotion_key) REFERENCES retail_star.sales.dim_promotion (promotion_key)
-) USING delta COMMENT 'Sales fact table (grain: one row per order line). The center of the star -- five conformed dimensions.';
+  CONSTRAINT fact_sales_promotion_fk FOREIGN KEY (promotion_key) REFERENCES retail_star.sales.dim_promotion (promotion_key),
+  CONSTRAINT fact_sales_channel_fk FOREIGN KEY (channel_key) REFERENCES retail_star.sales.dim_channel (channel_key)
+) USING delta COMMENT 'Sales fact table (grain: one row per order line). The primary hub -- six conformed dimensions.';
 
 CREATE TABLE IF NOT EXISTS retail_star.sales.fact_inventory_snapshot (
   snapshot_key BIGINT NOT NULL,
@@ -114,7 +151,23 @@ CREATE TABLE IF NOT EXISTS retail_star.sales.fact_inventory_snapshot (
   CONSTRAINT fact_inventory_date_fk FOREIGN KEY (date_key) REFERENCES retail_star.sales.dim_date (date_key),
   CONSTRAINT fact_inventory_product_fk FOREIGN KEY (product_key) REFERENCES retail_star.sales.dim_product (product_key),
   CONSTRAINT fact_inventory_store_fk FOREIGN KEY (store_key) REFERENCES retail_star.sales.dim_store (store_key)
-) USING delta COMMENT 'Inventory snapshot fact table (grain: product x store x day). Shares conformed dimensions with fact_sales (a fact constellation).';
+) USING delta COMMENT 'Inventory snapshot fact (grain: product x store x day). Shares conformed dimensions with the other facts.';
+
+CREATE TABLE IF NOT EXISTS retail_star.sales.fact_returns (
+  return_key BIGINT NOT NULL,
+  date_key BIGINT,
+  customer_key BIGINT,
+  product_key BIGINT,
+  store_key BIGINT,
+  return_qty INT,
+  refund_amount DECIMAL(14,2),
+  reason_code STRING,
+  CONSTRAINT fact_returns_pk PRIMARY KEY (return_key),
+  CONSTRAINT fact_returns_date_fk FOREIGN KEY (date_key) REFERENCES retail_star.sales.dim_date (date_key),
+  CONSTRAINT fact_returns_customer_fk FOREIGN KEY (customer_key) REFERENCES retail_star.sales.dim_customer (customer_key),
+  CONSTRAINT fact_returns_product_fk FOREIGN KEY (product_key) REFERENCES retail_star.sales.dim_product (product_key),
+  CONSTRAINT fact_returns_store_fk FOREIGN KEY (store_key) REFERENCES retail_star.sales.dim_store (store_key)
+) USING delta COMMENT 'Returns fact table (grain: one row per returned line). Shares conformed dimensions with fact_sales.';
 
 -- ============================================================
 -- Bridge (many-to-many)
