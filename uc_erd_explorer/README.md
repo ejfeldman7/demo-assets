@@ -38,6 +38,18 @@ automatically.
 - **Group and arrange**: cluster tables into labeled boxes by schema or by catalog
   (each box collapsible to a single node), and switch the auto-layout (ELK) between
   left-to-right and top-to-bottom to suit wide cards or tall stacks.
+- **Star layout**: a third layout mode that centers one table with its foreign-key
+  neighbors arranged radially — a fact-table-and-its-dimensions view. It classifies tables
+  as fact / dimension / junction (by `fact_`/`dim_`/`bridge_` naming first, then by
+  comments, then structurally from FK degree) and auto-suggests the best fact as the center;
+  click any table (or focus one before switching) to re-center. Two **reach** modes:
+  **Focus** (the center + its direct neighbors — a single clean star) and **Galaxy** (the
+  whole connected component laid out as a fact constellation — other facts become their own
+  hubs, conformed dimensions sit between them, snowflake sub-dims trail as outriggers).
+  Edges in these modes float to the card border facing each other (short diagonals, not
+  wrap-arounds). Read-only and client-side (no backend, no LLM). Works best on a dimensional
+  (star/galaxy) schema, but degrades gracefully on any schema and never touches the LR/TB
+  layouts.
 - **Light / dark / system theme**: a theme toggle in the top bar; defaults to following
   the operating system's preference.
 - **Catalog/schema tree picker**: an "All" toggle plus one row per catalog (tri-state
@@ -66,9 +78,18 @@ automatically.
   equivalent to a real constraint.
 - **Schema health audit**: an on-demand, deterministic pass over the current scope (no
   writes, no LLM) that flags tables with no primary key, orphan tables (no declared
-  relationships), undocumented tables, column-documentation coverage, and columns whose
-  names look like personal data but carry no tag — a structural, diagram-native read of
-  where a schema needs attention.
+  relationships), undocumented tables, column-documentation coverage, columns whose names
+  look like personal data but carry no tag, and **columns that share a name with another
+  table's key but have a different data type** — a relationship the type mismatch silently
+  blocks (Unity Catalog rejects a type-mismatched foreign key and the inferred-relationship
+  heuristic requires a matching type, so no edge is ever drawn). A structural, diagram-native
+  read of where a schema needs attention.
+- **Hides managed pipeline internals**: Databricks-managed materialized-view backing assets
+  are excluded from the graph and the audit — the `__databricks_internal` catalog, legacy
+  `__dlt_materialization_schema_*` schemas, and the hidden `__materialization_mat_*` backing
+  tables newer DLT/SDP pipelines place alongside a materialized view. The user-facing MV
+  stays; only its implementation-detail backing objects are filtered (by specific name
+  patterns, never a blanket `__` match).
 - **Keys-only column view**: a sidebar toggle that collapses every table to just its
   primary- and foreign-key columns, so wide tables (dozens of columns) stay readable. A
   table with no declared PK/FK renders as a header-only card — expected, and called out
@@ -282,9 +303,17 @@ uv run --with databricks-sdk python setup/create_megacorp_demo.py --warehouse-id
 #     show. --megacorp-catalog must match the catalog name used in step 1.
 uv run --with databricks-sdk python setup/create_logistics_demo.py --warehouse-id <your-warehouse-id> --profile <your-profile> [--catalog <name>] [--megacorp-catalog <name>]
 
+# 1d. (optional) A dimensional (star-schema) demo catalog "retail_star" -- conformed
+#     dimensions, two facts sharing them, and a bridge, named with fact_/dim_/bridge_
+#     conventions. This is the catalog to show off the Star layout mode (the megacorp/
+#     logistics demo is normalized, so its Star view relies on structural inference). To
+#     include it, add "retail_star" to erd_catalogs when you deploy (see below) and to the
+#     grant step's --catalogs list.
+uv run --with databricks-sdk python setup/create_star_demo.py --warehouse-id <your-warehouse-id> --profile <your-profile> [--catalog <name>]
+
 # 2. Grant the app's service principal access to it (see "Permissions" below for details --
 #    this looks up the service principal for you, no copy/paste needed). List every
-#    catalog from steps 1/1c.
+#    catalog from steps 1/1c/1d.
 uv run --with databricks-sdk python setup/grant_catalog_access.py \
     --warehouse-id <your-warehouse-id> --profile <your-profile> \
     --app-name erd-explorer-dev --catalogs megacorp,logistics --metadata-location megacorp.erd_meta
@@ -675,6 +704,11 @@ things correctly against a live workspace) stays a manual step, same as it's alw
 for this project — a live-credentials integration suite isn't wired into CI on purpose,
 to avoid needing a Databricks service-principal secret in this repo.
 
+The frontend has its own pure unit tests (`cd frontend && npm test`, via `node --test`)
+covering the client-side logic — edge display, search ranking, the ELK/graph helpers, and
+the Star layout's table classification (`classify.ts`) and radial placement
+(`starLayout.ts`). No browser or backend needed.
+
 ## Troubleshooting
 
 - **App shows `"Frontend not built"`** — the React SPA (`frontend/dist/`) wasn't
@@ -775,6 +809,8 @@ erd-explorer/
 │   ├── logistics_schema.sql, create_logistics_demo.py  # optional: a second demo catalog
 │   │                                                      cross-linked to megacorp by a
 │   │                                                      real FK, for multi-catalog demos
+│   ├── star_demo_schema.sql, create_star_demo.py  # optional: a dimensional (star-schema)
+│   │                                                 demo catalog for the Star layout mode
 │   ├── run_ddl.py                            # generic one-off .sql file executor
 │   ├── create_scoped_views.py                # Genie's hard-scoped data source
 │   └── create_genie_space.py                 # Genie Space create/update + ACL grant

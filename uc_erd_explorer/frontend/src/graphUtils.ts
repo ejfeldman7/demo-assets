@@ -66,8 +66,12 @@ export function nodeSize(
   }
 }
 
+// Minimal shape the adjacency/neighbor helpers need -- satisfied by both our GraphEdge and
+// React Flow's Edge, so directNeighbors can be reused by the star layout without a remap.
+type EdgeLike = { source: string; target: string }
+
 /** Build an undirected adjacency map from the edge list. */
-function buildAdjacency(edges: GraphEdge[]): Map<string, Set<string>> {
+function buildAdjacency(edges: readonly EdgeLike[]): Map<string, Set<string>> {
   const adj = new Map<string, Set<string>>()
   const add = (a: string, b: string) => {
     if (!adj.has(a)) adj.set(a, new Set())
@@ -81,7 +85,7 @@ function buildAdjacency(edges: GraphEdge[]): Map<string, Set<string>> {
 }
 
 /** Direct neighbors (1-hop, either FK or PK direction) plus the node itself. */
-export function directNeighbors(nodeId: string, edges: GraphEdge[]): Set<string> {
+export function directNeighbors(nodeId: string, edges: readonly EdgeLike[]): Set<string> {
   const adj = buildAdjacency(edges)
   const result = new Set<string>([nodeId])
   ;(adj.get(nodeId) ?? new Set()).forEach((n) => result.add(n))
@@ -142,7 +146,7 @@ export function shortestPath(
 }
 
 /** Full connected component (BFS transitive closure) containing the node. */
-export function connectedComponent(nodeId: string, edges: GraphEdge[]): Set<string> {
+export function connectedComponent(nodeId: string, edges: readonly EdgeLike[]): Set<string> {
   const adj = buildAdjacency(edges)
   const visited = new Set<string>([nodeId])
   const queue = [nodeId]

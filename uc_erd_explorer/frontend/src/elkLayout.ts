@@ -1,5 +1,5 @@
 import { Position, type Edge, type Node } from 'reactflow'
-import { nodeSize } from './graphUtils'
+import { connectedComponent, nodeSize } from './graphUtils'
 import type { SchemaNodeData, TableNodeData } from './types'
 
 // Minimal shape of what we use from elkjs, so this module stays typed without a static
@@ -202,4 +202,225 @@ export async function layoutGraphElk(
   // Only visible tables (collapsed groups' tables are hidden) become React Flow nodes.
   const visibleTables = nodes.filter((n) => !isCollapsed(groupIdOf.get(n.id) ?? ''))
   return { nodes: applyPositions(posById, visibleTables), groups }
+}
+
+// Galaxy (fact-constellation) layout of the ENTIRE connected component containing `centerId`.
+// Placement is FACT-AWARE and deterministic (not a generic force/stress blob), so it reads
+// at a glance as "several related stars" rather than an arbitrary graph:
+//   - facts are spread around a ring (kept spatially distinct and separated),
+//   - each fact's PRIVATE dims (touching only that fact) fan out on the arc facing AWAY from
+//     the galaxy center, so each fact reads as its own star,
+//   - SHARED dims (touching 2+ facts) sit at the centroid of the facts they connect, i.e.
+//     between them (conformed dims stay central to their facts),
+//   - snowflake sub-dims / dim-only bridges (touching NO fact) are outriggers just beyond
+//     their placed neighbor, pushed further out.
+// Shared dims appear ONCE. Optimizes for communicating the model, not a mathematically
+// optimal graph. Falls back to an organic stress layout when no facts are detected (a
+// non-star component), so it never forces a fake structure or breaks.
+export async function layoutGalaxyElk(
+  nodes: Node<TableNodeData | SchemaNodeData>[],
+  edges: Edge[],
+  centerId: string,
+  factIds: Set<string>,
+): Promise<LayoutResult> {
+  if (nodes.length === 0) return { nodes: [], groups: [] }
+  const component = connectedComponent(centerId, edges)
+  const members = nodes.filter((n) => component.has(n.id))
+  if (members.length === 0) return { nodes: [], groups: [] }
+  const memberIds = new Set(members.map((n) => n.id))
+  const memberEdges = edges.filter((e) => memberIds.has(e.source) && memberIds.has(e.target))
+
+  const facts = members.filter((n) => factIds.has(n.id))
+  if (facts.length === 0) return stressGalaxy(members, memberEdges) // non-star -> organic fallback
+
+  // Undirected adjacency among members.
+  const adj = new Map<string, Set<string>>()
+  for (const n of members) adj.set(n.id, new Set())
+  for (const e of memberEdges) {
+    adj.get(e.source)!.add(e.target)
+    adj.get(e.target)!.add(e.source)
+  }
+  const factIdSet = new Set(facts.map((f) => f.id))
+  const adjacentFacts = (id: string) => [...(adj.get(id) ?? [])].filter((n) => factIdSet.has(n))
+
+  const pos = new Map<string, { x: number; y: number }>()
+  const F = facts.length
+
+  // Phase 1: facts on a TIGHT inner ring (galaxy center = origin). Keeping facts inner lets
+  // the dimensions spread to a roomy outer ring, so relationships radiate outward into
+  // distinct lanes instead of all converging through the center.
+  const Rf = F <= 1 ? 0 : Math.max(340, F * 120)
+  const factAngle = new Map<string, number>()
+  facts.forEach((f, i) => {
+    const a = -Math.PI / 2 + (i * 2 * Math.PI) / F
+    factAngle.set(f.id, a)
+    pos.set(f.id, F === 1 ? { x: 0, y: 0 } : { x: Rf * Math.cos(a), y: Rf * Math.sin(a) })
+  })
+
+  // Phase 2: bucket non-fact members. private = touches one fact; shared = 2+ facts;
+  // orphan = touches no fact directly (snowflake sub-dim / dim-only bridge).
+  const privateOf = new Map<string, string[]>()
+  for (const f of facts) privateOf.set(f.id, [])
+  const shared: string[] = []
+  const orphans: string[] = []
+  for (const n of members) {
+    if (factIdSet.has(n.id)) continue
+    const fa = adjacentFacts(n.id)
+    if (fa.length === 0) orphans.push(n.id)
+    else if (fa.length === 1) privateOf.get(fa[0])!.push(n.id)
+    else shared.push(n.id)
+  }
+
+  // Gap-center angles between adjacent facts -- a dim shared by ALL facts (no single natural
+  // direction) drops into its own gap so it still gets a distinct lane rather than the center.
+  const sortedAngles = [...factAngle.values()].sort((a, b) => a - b)
+  const gapCenters: number[] = []
+  for (let i = 0; i < F && F >= 2; i++) {
+    const a1 = sortedAngles[i]
+    const a2 = i === F - 1 ? sortedAngles[0] + 2 * Math.PI : sortedAngles[i + 1]
+    gapCenters.push((a1 + a2) / 2)
+  }
+  let gapTurn = 0
+
+  // Phase 3: preferred outward angle for each fact-connected dim -- toward the fact it serves
+  // (private), the circular mean of its facts (shared by some), or a gap lane (shared by all).
+  const outer = [...shared, ...facts.flatMap((f) => privateOf.get(f.id)!)]
+  const preferred = new Map<string, number>()
+  outer.forEach((id, idx) => {
+    if (F < 2) {
+      preferred.set(id, -Math.PI / 2 + (idx / Math.max(outer.length, 1)) * 2 * Math.PI)
+      return
+    }
+    const fa = adjacentFacts(id)
+    if (fa.length >= F) {
+      preferred.set(id, gapCenters[gapTurn++ % gapCenters.length])
+      return
+    }
+    let sx = 0
+    let sy = 0
+    for (const f of fa) {
+      sx += Math.cos(factAngle.get(f)!)
+      sy += Math.sin(factAngle.get(f)!)
+    }
+    preferred.set(id, Math.hypot(sx, sy) < 1e-6 ? gapCenters[gapTurn++ % gapCenters.length] : Math.atan2(sy, sx))
+  })
+
+  // Outer ring radius: deliberately roomy (optimize for lane separation, not shortest edges).
+  const Rd = Rf + Math.max(520, outer.length * 48)
+  // Distribute the outer nodes EVENLY around the full circle, preserving their preferred-angle
+  // ORDER. Even spacing gives every dim an equal lane and uses the whole perimeter (so the
+  // dims don't bunch into one arc), while order preservation keeps dims that serve the same
+  // facts adjacent -- separability and topology readability over shortest-edge.
+  const sortedOuter = [...outer].sort((a, b) => preferred.get(a)! - preferred.get(b)!)
+  const start = sortedOuter.length ? preferred.get(sortedOuter[0])! : 0
+  sortedOuter.forEach((id, k) => {
+    const a = start + (k * 2 * Math.PI) / Math.max(sortedOuter.length, 1)
+    pos.set(id, { x: Rd * Math.cos(a), y: Rd * Math.sin(a) })
+  })
+
+  // Phase 4: orphans (snowflake sub-dims / dim-only bridges) as outriggers just beyond a
+  // placed neighbor, pushed further out from the galaxy center. A few passes handle chains.
+  for (let pass = 0; pass < 4; pass++) {
+    for (const id of orphans) {
+      if (pos.has(id)) continue
+      const placed = [...(adj.get(id) ?? [])].find((n) => pos.has(n))
+      if (!placed) continue
+      const np = pos.get(placed)!
+      const a = Math.atan2(np.y, np.x) // outward from the galaxy center (~origin)
+      pos.set(id, { x: np.x + 360 * Math.cos(a), y: np.y + 360 * Math.sin(a) })
+    }
+  }
+  for (const n of members) if (!pos.has(n.id)) pos.set(n.id, { x: 0, y: 0 })
+
+  // Final pass: separate any overlapping cards (e.g. an outrigger landing on its parent, or
+  // two central shared dims colliding). Nudges centers apart along the axis of least overlap
+  // so the intentional structure is preserved -- just de-collided.
+  const sizes = new Map(members.map((n) => [n.id, nodeSize(n.data)]))
+  resolveOverlaps(members.map((n) => n.id), pos, sizes, 44)
+
+  // Position is React Flow's top-left; center each card on its computed point.
+  const positioned = members.map((n) => {
+    const { width, height } = nodeSize(n.data)
+    const p = pos.get(n.id)!
+    return { ...n, width, height, position: { x: p.x - width / 2, y: p.y - height / 2 } }
+  })
+  return { nodes: positioned, groups: [] }
+}
+
+// Iterative axis-aligned overlap removal on a map of node CENTERS. For each overlapping pair
+// (bounding boxes closer than half their combined size + margin), push both apart along the
+// axis where they overlap least (the smaller nudge, least disruptive to the layout). A few
+// dozen passes converge for the small node counts a star/galaxy shows; stops early once a
+// pass moves nothing. Deterministic (fixed pair order).
+function resolveOverlaps(
+  ids: string[],
+  pos: Map<string, { x: number; y: number }>,
+  sizes: Map<string, { width: number; height: number }>,
+  margin: number,
+  iterations = 60,
+): void {
+  for (let it = 0; it < iterations; it++) {
+    let moved = false
+    for (let i = 0; i < ids.length; i++) {
+      for (let j = i + 1; j < ids.length; j++) {
+        const a = pos.get(ids[i])!
+        const b = pos.get(ids[j])!
+        const sa = sizes.get(ids[i])!
+        const sb = sizes.get(ids[j])!
+        const minDX = (sa.width + sb.width) / 2 + margin
+        const minDY = (sa.height + sb.height) / 2 + margin
+        const dx = b.x - a.x
+        const dy = b.y - a.y
+        const ox = minDX - Math.abs(dx)
+        const oy = minDY - Math.abs(dy)
+        if (ox > 0 && oy > 0) {
+          if (ox <= oy) {
+            const push = (ox / 2 + 1) * (dx >= 0 ? 1 : -1)
+            a.x -= push
+            b.x += push
+          } else {
+            const push = (oy / 2 + 1) * (dy >= 0 ? 1 : -1)
+            a.y -= push
+            b.y += push
+          }
+          moved = true
+        }
+      }
+    }
+    if (!moved) break
+  }
+}
+
+// Organic ELK stress/force fallback for a non-star component (no facts to anchor a
+// constellation). Deterministic; force is the fallback if a build lacks stress.
+async function stressGalaxy(
+  members: Node<TableNodeData | SchemaNodeData>[],
+  memberEdges: Edge[],
+): Promise<LayoutResult> {
+  const elk = await getElk()
+  const graph = {
+    id: 'root',
+    layoutOptions: {
+      'elk.algorithm': 'org.eclipse.elk.stress',
+      'elk.stress.desiredEdgeLength': '300',
+      'elk.spacing.nodeNode': '70',
+    },
+    children: members.map((n) => {
+      const { width, height } = nodeSize(n.data)
+      return { id: n.id, width, height }
+    }),
+    edges: memberEdges.map((e) => ({ id: e.id, sources: [e.source], targets: [e.target] })),
+  }
+  let laid: { children?: ElkLaidOutNode[] }
+  try {
+    laid = await elk.layout(graph)
+  } catch {
+    laid = await elk.layout({ ...graph, layoutOptions: { 'elk.algorithm': 'org.eclipse.elk.force', 'elk.spacing.nodeNode': '80' } })
+  }
+  const posById = new Map((laid.children ?? []).map((c) => [c.id, { x: c.x ?? 0, y: c.y ?? 0 }]))
+  const positioned = members.map((n) => {
+    const { width, height } = nodeSize(n.data)
+    return { ...n, width, height, position: posById.get(n.id) ?? { x: 0, y: 0 } }
+  })
+  return { nodes: positioned, groups: [] }
 }

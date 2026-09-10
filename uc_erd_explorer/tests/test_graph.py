@@ -124,6 +124,30 @@ class TestInternalSchemaExclusionSql:
         finally:
             graph._dbxmetagen_meta.reset(token)
 
+    def test_excludes_legacy_dlt_materialization_schema(self, monkeypatch):
+        # Databricks-managed DLT/SDP backing SCHEMAs are excluded (whole-name, case-insensitive).
+        monkeypatch.setattr(graph, "get_metadata_location", lambda: ("megacorp", "erd_meta"))
+        sql = graph._internal_schema_exclusion_sql("cat", "sch")
+        assert "lower(sch) RLIKE '^__dlt_materialization_schema_'" in sql
+
+    def test_excludes_hidden_materialization_table_only_when_table_col_given(self, monkeypatch):
+        # The hidden __materialization_mat_* backing TABLE pattern is added only at call sites
+        # that select a table name (the schema-level picker query passes no table_col).
+        monkeypatch.setattr(graph, "get_metadata_location", lambda: ("megacorp", "erd_meta"))
+        with_table = graph._internal_schema_exclusion_sql("cat", "sch", "tbl")
+        without_table = graph._internal_schema_exclusion_sql("cat", "sch")
+        assert "lower(tbl) RLIKE '^__materialization_mat_'" in with_table
+        assert "__materialization_mat_" not in without_table
+
+    def test_does_not_blanket_exclude_dunder_tables(self, monkeypatch):
+        # Only the SPECIFIC materialization patterns are matched -- not every "__"-prefixed
+        # table name (which would hide unrelated system/user assets). The table pattern is
+        # anchored and specific, so a table column is never compared against a bare "__%".
+        monkeypatch.setattr(graph, "get_metadata_location", lambda: ("megacorp", "erd_meta"))
+        sql = graph._internal_schema_exclusion_sql("cat", "sch", "tbl")
+        assert "substring(tbl, 1, 2)" not in sql  # no blanket dunder filter on table names
+        assert "lower(tbl) RLIKE '^__materialization_mat_" in sql  # only the specific pattern
+
 
 def _col(catalog, schema, table, column, full_type, ordinal=1, comment=None):
     return [catalog, schema, table, column, full_type, ordinal, comment]

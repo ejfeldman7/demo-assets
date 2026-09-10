@@ -1,5 +1,48 @@
-import { BaseEdge, EdgeLabelRenderer, Position, getSmoothStepPath, type EdgeProps } from 'reactflow'
+import { useCallback } from 'react'
+import {
+  BaseEdge,
+  EdgeLabelRenderer,
+  Position,
+  getSmoothStepPath,
+  getStraightPath,
+  useStore,
+  type EdgeProps,
+  type ReactFlowState,
+} from 'reactflow'
 import { formatJoinLabel } from './edgeDisplay'
+
+// Minimal shape of a React Flow internal node we read for floating-edge geometry.
+interface FloatingNode {
+  width?: number | null
+  height?: number | null
+  positionAbsolute?: { x: number; y: number }
+  position?: { x: number; y: number }
+}
+
+// Where the straight line from `node`'s center to `other`'s center crosses `node`'s border.
+// Standard React Flow floating-edge intersection math -- lets an edge attach to the side of
+// a card that FACES the other card (used in Star/Galaxy, where cards sit in all directions),
+// instead of the fixed Left/Right per-column handles that force long wrap-around routes.
+function nodeIntersection(node: FloatingNode, other: FloatingNode): { x: number; y: number } {
+  const w = node.width ?? 240
+  const h = node.height ?? 100
+  const p = node.positionAbsolute ?? node.position ?? { x: 0, y: 0 }
+  const ow = other.width ?? 240
+  const oh = other.height ?? 100
+  const op = other.positionAbsolute ?? other.position ?? { x: 0, y: 0 }
+  const w2 = w / 2
+  const h2 = h / 2
+  const cx = p.x + w2
+  const cy = p.y + h2
+  const ox = op.x + ow / 2
+  const oy = op.y + oh / 2
+  const xx1 = (ox - cx) / (2 * w2) - (oy - cy) / (2 * h2)
+  const yy1 = (ox - cx) / (2 * w2) + (oy - cy) / (2 * h2)
+  const a = 1 / (Math.abs(xx1) + Math.abs(yy1) || 1)
+  const xx3 = a * xx1
+  const yy3 = a * yy1
+  return { x: w2 * (xx3 + yy3) + cx, y: h2 * (-xx3 + yy3) + cy }
+}
 
 // A custom edge, not React Flow's built-in 'smoothstep' type, for one specific reason:
 // the built-in edge's `label` prop renders as an SVG <text> inside the edges layer,
@@ -25,10 +68,16 @@ export interface RelationshipEdgeData {
   // shown only when the "dbxmetagen FK predictions" layer is toggled on.
   predicted?: boolean
   confidence?: number | null
+  // Star/Galaxy only: attach the line to the card border facing the other card (a straight
+  // "floating" edge) instead of the fixed Left/Right per-column handles -- avoids the long
+  // right-angle wrap-arounds a radial layout produces. LR/TB leave this unset.
+  floating?: boolean
 }
 
 export function RelationshipEdge({
   id,
+  source,
+  target,
   sourceX,
   sourceY,
   sourcePosition,
@@ -38,14 +87,37 @@ export function RelationshipEdge({
   style,
   data,
 }: EdgeProps<RelationshipEdgeData>) {
-  const [path, labelX, labelY] = getSmoothStepPath({
-    sourceX,
-    sourceY,
-    sourcePosition,
-    targetX,
-    targetY,
-    targetPosition,
-  })
+  const floating = Boolean(data?.floating)
+  // Node internals are read unconditionally (hooks can't be conditional) but only used in
+  // floating mode. Cheap selectors keyed on the node ids.
+  const sourceNode = useStore(useCallback((s: ReactFlowState) => s.nodeInternals.get(source) as FloatingNode | undefined, [source]))
+  const targetNode = useStore(useCallback((s: ReactFlowState) => s.nodeInternals.get(target) as FloatingNode | undefined, [target]))
+
+  let sx = sourceX
+  let sy = sourceY
+  let tx = targetX
+  let ty = targetY
+  let path: string
+  let labelX: number
+  let labelY: number
+  if (floating && sourceNode && targetNode) {
+    const s = nodeIntersection(sourceNode, targetNode)
+    const t = nodeIntersection(targetNode, sourceNode)
+    sx = s.x
+    sy = s.y
+    tx = t.x
+    ty = t.y
+    ;[path, labelX, labelY] = getStraightPath({ sourceX: sx, sourceY: sy, targetX: tx, targetY: ty })
+  } else {
+    ;[path, labelX, labelY] = getSmoothStepPath({
+      sourceX,
+      sourceY,
+      sourcePosition,
+      targetX,
+      targetY,
+      targetPosition,
+    })
+  }
   const inferred = Boolean(data?.inferred)
   const predicted = Boolean(data?.predicted)
   const showLabel = Boolean(data?.showLabel)
@@ -73,22 +145,30 @@ export function RelationshipEdge({
   const horizontalEnds =
     (sourcePosition === Position.Left || sourcePosition === Position.Right) &&
     (targetPosition === Position.Left || targetPosition === Position.Right)
+  // Draw the cardinality glyphs for horizontal (LR) per-column edges AND for floating
+  // (Star/Galaxy) edges; skip only the vertical schema-summary (TB) edges, where the fixed
+  // glyph shapes would point sideways.
+  const showMarkers = floating || horizontalEnds
+  // The glyphs are authored for a rightward line (source at left, target at right). In
+  // floating mode the line runs at any angle, so rotate each glyph group about its own
+  // endpoint to align with the line; angle is 0 (identity) for the horizontal LR case.
+  const angleDeg = floating ? (Math.atan2(ty - sy, tx - sx) * 180) / Math.PI : 0
   // "many" foot: toes splay by the source node, converging outward toward the line.
   const manyPath =
-    `M${sourceX + 15},${sourceY} L${sourceX + 1},${sourceY - 6}` +
-    ` M${sourceX + 15},${sourceY} L${sourceX + 1},${sourceY}` +
-    ` M${sourceX + 15},${sourceY} L${sourceX + 1},${sourceY + 6}`
+    `M${sx + 15},${sy} L${sx + 1},${sy - 6}` +
+    ` M${sx + 15},${sy} L${sx + 1},${sy}` +
+    ` M${sx + 15},${sy} L${sx + 1},${sy + 6}`
   // "one" bar: a single tick perpendicular to the line, just before the target node.
-  const onePath = `M${targetX - 11},${targetY - 6} L${targetX - 11},${targetY + 6}`
+  const onePath = `M${tx - 11},${ty - 6} L${tx - 11},${ty + 6}`
   const markerStyle = { opacity: markerOpacity, pointerEvents: 'none' as const }
 
   return (
     <>
       <BaseEdge id={id} path={path} style={style} />
-      {horizontalEnds && (
+      {showMarkers && (
         <>
-          <path d={manyPath} stroke={cardStroke} strokeWidth={1.6} fill="none" strokeLinecap="round" strokeLinejoin="round" style={markerStyle} />
-          <path d={onePath} stroke={cardStroke} strokeWidth={1.6} fill="none" strokeLinecap="round" style={markerStyle} />
+          <path d={manyPath} transform={`rotate(${angleDeg} ${sx} ${sy})`} stroke={cardStroke} strokeWidth={1.6} fill="none" strokeLinecap="round" strokeLinejoin="round" style={markerStyle} />
+          <path d={onePath} transform={`rotate(${angleDeg} ${tx} ${ty})`} stroke={cardStroke} strokeWidth={1.6} fill="none" strokeLinecap="round" style={markerStyle} />
         </>
       )}
       {label && (
