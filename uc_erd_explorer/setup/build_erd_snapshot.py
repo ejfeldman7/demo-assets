@@ -51,16 +51,24 @@ def _in_clause(values):
 
 
 def _validate_exclude_patterns(patterns: list) -> list:
-    """Mirror server/config.get_table_exclude_patterns validation: drop non-strings, empties,
-    over-long entries, and anything with a quote/semicolon (which would break the RLIKE literal);
-    cap the count. Snapshot mode must exclude the same tables the live path does."""
+    """Mirror server/config.get_table_exclude_patterns validation so snapshot == live: drop
+    non-strings, empties, over-long entries, anything with a quote/semicolon (would break the
+    RLIKE literal), and anything that isn't a valid regex (would make Spark raise at query
+    time). This is a standalone job script that can't import the server package, so the caps
+    are duplicated here -- KEEP 50/200 IN SYNC with _MAX_EXCLUDE_PATTERNS /
+    _MAX_EXCLUDE_PATTERN_LEN in server/config.py."""
     out = []
-    for p in (patterns or [])[:50]:
+    for p in (patterns or [])[:50]:  # == server/config._MAX_EXCLUDE_PATTERNS
         if not isinstance(p, str):
             continue
         p = p.strip()
-        if p and len(p) <= 200 and "'" not in p and ";" not in p:
-            out.append(p)
+        if not p or len(p) > 200 or "'" in p or ";" in p:  # 200 == _MAX_EXCLUDE_PATTERN_LEN
+            continue
+        try:
+            re.compile(p)
+        except re.error:
+            continue
+        out.append(p)
     return out
 
 

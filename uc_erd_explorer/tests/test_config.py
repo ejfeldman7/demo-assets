@@ -147,6 +147,11 @@ class TestGetTableExcludePatterns:
         monkeypatch.setenv("ERD_EXCLUDE_TABLE_PATTERNS", '["ok$", "bad\'quote", "bad;semi", "_temp$"]')
         assert config.get_table_exclude_patterns() == ["ok$", "_temp$"]
 
+    def test_invalid_regex_entries_dropped(self, monkeypatch):
+        # Valid JSON but a broken regex -> dropped (else Spark raises at query time), rest kept.
+        monkeypatch.setenv("ERD_EXCLUDE_TABLE_PATTERNS", '["_bkp[0-9", "_temp$"]')
+        assert config.get_table_exclude_patterns() == ["_temp$"]
+
     def test_non_strings_and_blanks_skipped(self, monkeypatch):
         monkeypatch.setenv("ERD_EXCLUDE_TABLE_PATTERNS", '["_temp$", 5, "", "   ", null]')
         assert config.get_table_exclude_patterns() == ["_temp$"]

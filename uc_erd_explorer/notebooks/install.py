@@ -44,6 +44,7 @@ dbutils.widgets.text("demo_catalog", "", "Catalog to create the demo data in (on
 dbutils.widgets.dropdown("add_demo_metadata", "no", ["yes", "no"], "Also add illustrative COMMENTs/tags to the demo data? (separate opt-in -- most real deployments won't want fabricated metadata layered onto their own catalogs, and even demo users may want the bare structure only)")
 dbutils.widgets.dropdown("auth_mode", "service_principal", ["service_principal", "on_behalf_of_user"], "Which identity the ERD queries run as. service_principal (default) = the app queries as its own SP, bounded by erd_catalogs. on_behalf_of_user = queries as the LOGGED-IN USER (filtered by their own UC privileges); grants the app the 'sql' user scope and grants the SP only the Genie metadata location (no data-catalog grants). In OBO each end user needs their own catalog privileges + CAN_USE on the warehouse.")
 dbutils.widgets.dropdown("erd_metadata_source", "information_schema", ["information_schema", "snapshot"], "Where the graph reads metadata. information_schema (default) = query system tables live. snapshot = build+read the materialized erd_snapshot_* Delta tables (faster, esp. the FK join). This notebook builds the snapshot inline (step 4b); REFRESH it by re-running this notebook. The scheduled weekly refresh + in-app 'Refresh now' button are DAB-route-only.")
+dbutils.widgets.text("erd_exclude_table_patterns", "[]", "JSON array of RLIKE regexes for TABLE NAMES to hide from the graph and audit -- your org's archive/backup/temp/dated conventions, e.g. [\"_bkp[0-9a-z]*$\",\"_temp$\"]. Default [] = nothing extra hidden. Prefer [0-9] over \\d (no escaping). Applied to BOTH the live graph and the snapshot build below, so they match. See README 'Excluding non-model tables'.")
 
 # COMMAND ----------
 
@@ -67,6 +68,7 @@ add_demo_metadata = dbutils.widgets.get("add_demo_metadata") == "yes"
 auth_mode = dbutils.widgets.get("auth_mode").strip() or "service_principal"
 obo = auth_mode == "on_behalf_of_user"
 metadata_source = dbutils.widgets.get("erd_metadata_source").strip() or "information_schema"
+erd_exclude_patterns_raw = dbutils.widgets.get("erd_exclude_table_patterns").strip() or "[]"
 
 assert repo_root_widget, "repo_root widget is required -- the Workspace path to the uc_erd_explorer folder (one level in from the demo-assets git checkout)"
 assert app_name, "app_name widget is required"
@@ -215,7 +217,15 @@ print(f"\nScoped views ready in {metadata_location}.")
 # COMMAND ----------
 
 if metadata_source == "snapshot":
-    build_erd_snapshot.materialize(w, warehouse_id, catalogs, metadata_catalog, metadata_schema)
+    # Parse the same exclusion patterns the app uses, so the snapshot hides the same tables as
+    # the live path (build_erd_snapshot re-validates them). A bad value degrades to none here.
+    import json as _json
+    try:
+        _excl = _json.loads(erd_exclude_patterns_raw)
+        _excl = _excl if isinstance(_excl, list) else []
+    except (ValueError, TypeError):
+        _excl = []
+    build_erd_snapshot.materialize(w, warehouse_id, catalogs, metadata_catalog, metadata_schema, exclude_patterns=_excl)
 else:
     print("Skipped (erd_metadata_source=information_schema; app reads live).")
 
@@ -366,6 +376,7 @@ deploy_app(
         # metadata schema lives so its internal-schema exclusion and snapshot reads match.
         "ERD_METADATA_SOURCE": metadata_source,
         "ERD_METADATA_LOCATION": metadata_location,
+        "ERD_EXCLUDE_TABLE_PATTERNS": erd_exclude_patterns_raw,
     },
 )
 print("Initial deployment complete.")
@@ -438,6 +449,7 @@ deploy_app(
         "ERD_AUTH_MODE": auth_mode,
         "ERD_METADATA_SOURCE": metadata_source,
         "ERD_METADATA_LOCATION": metadata_location,
+        "ERD_EXCLUDE_TABLE_PATTERNS": erd_exclude_patterns_raw,
     },
 )
 start_app(app_name)

@@ -8,6 +8,7 @@ import contextvars
 import json
 import logging
 import os
+import re
 import threading
 import time
 from functools import lru_cache
@@ -258,10 +259,12 @@ def get_table_exclude_patterns() -> List[str]:
     try:
         parsed = json.loads(raw)
     except (ValueError, TypeError):
-        logger.warning("ERD_EXCLUDE_TABLE_PATTERNS is not valid JSON; ignoring it")
+        # Whole value unparseable (e.g. a bare "\d" -- invalid JSON escape). Degrade to no
+        # exclusions rather than crash; log loudly since it silently disables ALL patterns.
+        logger.warning("ERD_EXCLUDE_TABLE_PATTERNS is not valid JSON; ignoring ALL exclusion patterns")
         return []
     if not isinstance(parsed, list):
-        logger.warning("ERD_EXCLUDE_TABLE_PATTERNS is not a JSON array; ignoring it")
+        logger.warning("ERD_EXCLUDE_TABLE_PATTERNS is not a JSON array; ignoring ALL exclusion patterns")
         return []
     out: List[str] = []
     for entry in parsed[:_MAX_EXCLUDE_PATTERNS]:
@@ -272,6 +275,14 @@ def get_table_exclude_patterns() -> List[str]:
             continue
         if "'" in pat or ";" in pat:
             logger.warning("Skipping ERD_EXCLUDE_TABLE_PATTERNS entry with a quote/semicolon: %r", pat)
+            continue
+        try:
+            re.compile(pat)
+        except re.error:
+            # An invalid regex would make Spark raise at query time and 500 every graph/audit
+            # request -- drop the bad pattern instead (Python's regex validation catches the
+            # common typos: unbalanced brackets, dangling escapes).
+            logger.warning("Skipping ERD_EXCLUDE_TABLE_PATTERNS entry that isn't a valid regex: %r", pat)
             continue
         out.append(pat)
     return out
