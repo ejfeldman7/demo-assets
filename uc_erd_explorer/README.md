@@ -445,12 +445,42 @@ the notebook re-run) to catch up.
 | `erd_cache_ttl_seconds` | `ERD_CACHE_TTL_SECONDS` | `3600` | How long `/api/graph` results are cached in-memory before re-querying the metadata source |
 | `erd_schema_collapse_threshold` | `ERD_SCHEMA_COLLAPSE_THRESHOLD` | `80` | Table count above which the ERD defaults to one node per schema (click to expand); `0` always renders full detail |
 | `erd_test_catalog_suffix` | `ERD_TEST_CATALOG_SUFFIX` | `_ts` | Suffix appended to each `erd_catalogs` entry when the frontend's Prod/Test toggle is set to Test (e.g. `edp_customer` → `edp_customer_ts`) |
+| `erd_exclude_table_patterns` | `ERD_EXCLUDE_TABLE_PATTERNS` (JSON array string) | `[]` | Extra table-name `RLIKE` patterns to hide from the graph and audit — a deployment's own conventions for objects that aren't part of the model (archive/backup/temp/dated tables). Matched case-insensitively; author lowercase. Empty by default (nothing extra hidden). See "Excluding non-model tables" below |
 | `erd_rate_limit_per_min` | `ERD_RATE_LIMIT_PER_MIN` | `120` | Max `/api/graph` + `/api/schema-tree` requests per minute **per identity** (user email in OBO, else client IP) before `429`; `0` disables. In-process (per container). See "Abuse protection" below |
 | `erd_genie_rate_limit_per_min` | `ERD_GENIE_RATE_LIMIT_PER_MIN` | `20` | Max `/api/genie/ask` requests per minute per identity before `429` — tighter, since each ask spends a Genie call; `0` disables |
 | *(env only, optional)* | `ERD_DBXMETAGEN_LOCATION` (`"catalog.schema"`) | unset (auto-scan) | Where dbxmetagen writes its output tables. Unset = the app auto-scans the in-scope catalogs for dbxmetagen's signature tables. Set it to point straight at a known output schema. See "Related: … dbxmetagen" |
 | *(env only, optional)* | `ERD_DBXMETAGEN_MIN_CONFIDENCE` | `0.5` | Minimum `final_confidence` for a dbxmetagen FK prediction to appear in the overlay |
 | `auth_mode` | `ERD_AUTH_MODE` | `service_principal` | Which identity the ERD queries run as. `service_principal` (default) queries as the app's own SP, bounded by `erd_catalogs`. `on_behalf_of_user` queries as the **logged-in user**, filtered by their own UC privileges — see "On-behalf-of-user authorization" below |
 | `user_api_scopes` | *(app config, not an env var)* | `[]` | User authorization scopes the app requests for OBO; set to `["sql"]` for `on_behalf_of_user`. A **complex** (list) value the CLI can't set via `--var`, so it's declared at the bundle **target** level — see below |
+
+### Excluding non-model tables
+
+Two layers keep the diagram to the actual data model:
+
+- **Built-in (always on, not configurable).** `information_schema`, the app's own metadata
+  location, `__`-prefixed internal catalogs, and Databricks-managed DLT/SDP materialized-view
+  backing objects (`__databricks_internal`, `__dlt_materialization_schema_*` schemas,
+  `__materialization_mat_*` tables) are always hidden. These are universal Databricks
+  internals, so they're not left to configuration. The user-facing materialized view stays.
+- **Configurable (per deployment).** Most orgs also have their own conventions for objects
+  that aren't part of the model — archive/backup/temp/dated tables. Set
+  `erd_exclude_table_patterns` / `ERD_EXCLUDE_TABLE_PATTERNS` to a **JSON array of `RLIKE`
+  regexes** and each is applied as `AND NOT (lower(table_name) RLIKE '<pattern>')` on both the
+  live and snapshot paths. Empty (`[]`) by default, so nothing extra is hidden until you opt
+  in. Author patterns lowercase (matched case-insensitively); entries with a quote or
+  semicolon are dropped, and the list is capped.
+
+  Example covering audit/backup/temp/dated-suffix/leading-underscore conventions. Prefer
+  `[0-9]` over `\d` in patterns — `\d` works too, but a backslash has to be escaped through
+  both JSON and the SQL string literal (write it as `\\d` in the JSON), whereas `[0-9]` needs
+  no escaping. The value contains commas, and `bundle deploy --var` treats commas as
+  separators, so pass it via the `BUNDLE_VAR_` environment variable (or set it in a target
+  block in `databricks.yml`):
+
+  ```bash
+  BUNDLE_VAR_erd_exclude_table_patterns='["_audit[0-9a-z]*$","_bkp[0-9a-z]*$","_backup[0-9a-z]*$","_temp$","_tmp$","_([0-9]{4,8}|[0-9]{4}[_-][0-9]{2}[_-][0-9]{2})$","^_"]' \
+    databricks bundle deploy -t dev -p <profile> --var="warehouse_id=..."
+  ```
 
 ### Metadata snapshot (faster metadata reads)
 

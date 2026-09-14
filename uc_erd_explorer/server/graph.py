@@ -53,6 +53,7 @@ from .config import (
     get_metadata_source,
     get_query_client,
     get_schema_collapse_threshold,
+    get_table_exclude_patterns,
     get_test_catalog_suffix,
     get_user_cache_key,
     get_warehouse_id,
@@ -224,6 +225,15 @@ def _internal_schema_exclusion_sql(catalog_col: str, schema_col: str, table_col:
     if table_col is not None:
         # Newer DLT/SDP hidden materialization backing TABLE (alongside the user-facing MV).
         clause += f" AND NOT (lower({table_col}) RLIKE '^__materialization_mat_')"
+        # Deployment-configured, org-specific table-name conventions (archive/backup/temp/
+        # dated tables, etc.) -- empty by default, so nothing changes unless a deployment sets
+        # ERD_EXCLUDE_TABLE_PATTERNS. Patterns are quote/semicolon-validated in config.py.
+        for pattern in get_table_exclude_patterns():
+            # Double the backslashes for the Spark SQL string literal: its parser consumes one
+            # backslash, so a regex like \d must reach RLIKE as \\d in the literal to match a
+            # digit (not a literal 'd'). ([0-9] etc. are unaffected.)
+            escaped = pattern.replace("\\", "\\\\")
+            clause += f" AND NOT (lower({table_col}) RLIKE '{escaped}')"
     dbx = _dbxmetagen_meta.get()
     if dbx and _IDENTIFIER_RE.match(dbx[0]) and _IDENTIFIER_RE.match(dbx[1]):
         clause += f" AND NOT ({catalog_col} = '{dbx[0]}' AND {schema_col} = '{dbx[1]}')"
