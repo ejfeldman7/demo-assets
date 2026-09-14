@@ -96,6 +96,23 @@ variables:
       set to Test (e.g. edp_customer -> edp_customer_ts) -- two distinct real Unity
       Catalog catalogs, not an alias. Only meaningful when erd_catalogs is set.
     default: "_ts"
+  erd_exclude_table_patterns:
+    description: >-
+      A JSON ARRAY (as a string) of RLIKE regexes for TABLE NAMES to hide from the graph and
+      audit -- a deployment's own conventions for objects that aren't part of the data model
+      (archive/backup/temp/dated tables, etc.). Matched case-insensitively against the
+      lowercased table name; author patterns lowercase. This is IN ADDITION to the built-in
+      universal excludes (information_schema, the metadata location, "__" catalogs, and
+      Databricks-managed DLT/SDP materialization backing objects), which always apply. DEFAULT
+      "[]" -- nothing extra is excluded until a deployment opts in, so behavior is unchanged
+      out of the box. Prefer [0-9] over \d in patterns (no escaping needed). Example, set via
+      the BUNDLE_VAR_ env var since --var splits on the commas (archive/backup/temp/dated/
+      leading-underscore): BUNDLE_VAR_erd_exclude_table_patterns='["_audit[0-9a-z]*$",
+      "_bkp[0-9a-z]*$","_temp$","_([0-9]{4,8}|[0-9]{4}[_-][0-9]{2}[_-][0-9]{2})$","^_"]'
+      NOTE: must stay NON-EMPTY ("[]" when unused) -- an empty string renders as a null env
+      value the Apps API rejects. Entries containing a single quote or semicolon are dropped
+      (they would break the generated SQL); the list is capped defensively.
+    default: "[]"
   auth_mode:
     description: >-
       Which identity the ERD metadata queries run as. "service_principal" (default) queries
@@ -190,6 +207,8 @@ resources:
             value: ${var.erd_schema_collapse_threshold}
           - name: "ERD_TEST_CATALOG_SUFFIX"
             value: ${var.erd_test_catalog_suffix}
+          - name: "ERD_EXCLUDE_TABLE_PATTERNS"
+            value: ${var.erd_exclude_table_patterns}
           - name: "ERD_AUTH_MODE"
             value: ${var.auth_mode}
           - name: "ERD_ADMIN_EMAILS"
@@ -293,6 +312,10 @@ resources:
               - ${var.erd_catalogs}
               - "--metadata-location"
               - ${var.erd_metadata_location}
+              # Same exclusion patterns the app uses, so a snapshot hides the same tables as
+              # the live path (empty "[]" by default -- no extra exclusions).
+              - "--exclude-table-patterns"
+              - ${var.erd_exclude_table_patterns}
       environments:
         - environment_key: default
           spec:

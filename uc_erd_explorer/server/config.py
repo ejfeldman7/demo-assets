@@ -5,8 +5,10 @@ Local dev:  WorkspaceClient(profile=DATABRICKS_PROFILE or your CLI's DEFAULT pro
 Deployed:   WorkspaceClient()  — auto-injected service-principal credentials
 """
 import contextvars
+import json
 import logging
 import os
+import re
 import threading
 import time
 from functools import lru_cache
@@ -229,6 +231,61 @@ def get_warehouse_id() -> Optional[str]:
     fallback on purpose -- a warehouse id from a different workspace would silently be
     wrong rather than failing clearly. Set DATABRICKS_WAREHOUSE_ID (see README.md)."""
     return os.environ.get("DATABRICKS_WAREHOUSE_ID")
+
+
+# Cap the number/length of configured exclusion patterns -- these come from trusted deploy
+# config, but bounding them keeps a runaway value from bloating every query's WHERE clause.
+_MAX_EXCLUDE_PATTERNS = 50
+_MAX_EXCLUDE_PATTERN_LEN = 200
+
+
+def get_table_exclude_patterns() -> List[str]:
+    """Deployment-configured RLIKE regex patterns for TABLE NAMES to hide from the graph and
+    audit -- an org's own conventions for objects that aren't part of the data model (archive
+    /backup/temp/dated tables, etc.). Read from ERD_EXCLUDE_TABLE_PATTERNS, a JSON array of
+    strings, e.g. ["_bkp[0-9a-z]*$", "_temp$", "_(\\\\d{4,8})$"]. DEFAULT IS EMPTY -- nothing is
+    excluded beyond the built-in universal/Databricks-managed set (see graph.py
+    _internal_schema_exclusion_sql) unless a deployment opts in, so behavior is unchanged out
+    of the box. This is deliberately generic: each deployment brings its own naming
+    conventions rather than the app hardcoding one customer's.
+
+    Patterns are matched case-insensitively against lower(table_name), so author them
+    lowercase. A pattern containing a single quote or semicolon is dropped (it would break the
+    RLIKE string literal), the list is capped, and any parse error degrades to [] rather than
+    breaking the graph -- an exclusion misconfig should never take the app down."""
+    raw = (os.environ.get("ERD_EXCLUDE_TABLE_PATTERNS") or "").strip()
+    if not raw or raw == "[]":
+        return []
+    try:
+        parsed = json.loads(raw)
+    except (ValueError, TypeError):
+        # Whole value unparseable (e.g. a bare "\d" -- invalid JSON escape). Degrade to no
+        # exclusions rather than crash; log loudly since it silently disables ALL patterns.
+        logger.warning("ERD_EXCLUDE_TABLE_PATTERNS is not valid JSON; ignoring ALL exclusion patterns")
+        return []
+    if not isinstance(parsed, list):
+        logger.warning("ERD_EXCLUDE_TABLE_PATTERNS is not a JSON array; ignoring ALL exclusion patterns")
+        return []
+    out: List[str] = []
+    for entry in parsed[:_MAX_EXCLUDE_PATTERNS]:
+        if not isinstance(entry, str):
+            continue
+        pat = entry.strip()
+        if not pat or len(pat) > _MAX_EXCLUDE_PATTERN_LEN:
+            continue
+        if "'" in pat or ";" in pat:
+            logger.warning("Skipping ERD_EXCLUDE_TABLE_PATTERNS entry with a quote/semicolon: %r", pat)
+            continue
+        try:
+            re.compile(pat)
+        except re.error:
+            # An invalid regex would make Spark raise at query time and 500 every graph/audit
+            # request -- drop the bad pattern instead (Python's regex validation catches the
+            # common typos: unbalanced brackets, dangling escapes).
+            logger.warning("Skipping ERD_EXCLUDE_TABLE_PATTERNS entry that isn't a valid regex: %r", pat)
+            continue
+        out.append(pat)
+    return out
 
 
 def get_genie_space_id() -> Optional[str]:

@@ -29,6 +29,7 @@ manually:
       --catalogs megacorp,logistics --metadata-location megacorp.erd_meta
 """
 import argparse
+import json
 import os
 import re
 import time
@@ -49,7 +50,29 @@ def _in_clause(values):
     return "(" + ", ".join(f"'{v}'" for v in values) + ")"
 
 
-def build_statements(catalogs: list, metadata_catalog: str, metadata_schema: str) -> list:
+def _validate_exclude_patterns(patterns: list) -> list:
+    """Mirror server/config.get_table_exclude_patterns validation so snapshot == live: drop
+    non-strings, empties, over-long entries, anything with a quote/semicolon (would break the
+    RLIKE literal), and anything that isn't a valid regex (would make Spark raise at query
+    time). This is a standalone job script that can't import the server package, so the caps
+    are duplicated here -- KEEP 50/200 IN SYNC with _MAX_EXCLUDE_PATTERNS /
+    _MAX_EXCLUDE_PATTERN_LEN in server/config.py."""
+    out = []
+    for p in (patterns or [])[:50]:  # == server/config._MAX_EXCLUDE_PATTERNS
+        if not isinstance(p, str):
+            continue
+        p = p.strip()
+        if not p or len(p) > 200 or "'" in p or ";" in p:  # 200 == _MAX_EXCLUDE_PATTERN_LEN
+            continue
+        try:
+            re.compile(p)
+        except re.error:
+            continue
+        out.append(p)
+    return out
+
+
+def build_statements(catalogs: list, metadata_catalog: str, metadata_schema: str, exclude_patterns: list = None) -> list:
     """Return a list of (label, sql, optional) statements. `optional=True` marks the tag
     snapshots, whose source system tables (table_tags/column_tags) don't exist on older
     metastores -- main() catches those failures and creates an empty table with the right
@@ -60,6 +83,7 @@ def build_statements(catalogs: list, metadata_catalog: str, metadata_schema: str
     credentials (UC privilege filtering still applies), mirroring the app's unscoped mode."""
     catalogs = _validate_identifiers(catalogs, "catalog")
     _validate_identifiers([metadata_catalog, metadata_schema], "metadata catalog/schema")
+    exclude_patterns = _validate_exclude_patterns(exclude_patterns)
 
     loc = f"{metadata_catalog}.{metadata_schema}"
     catalog_list_str = ", ".join(catalogs) if catalogs else "ALL catalogs visible to this deployment"
@@ -86,6 +110,12 @@ def build_statements(catalogs: list, metadata_catalog: str, metadata_schema: str
         )
         if table_col is not None:
             clause += f" AND NOT (lower({table_col}) RLIKE '^__materialization_mat_')"
+            # Deployment-configured org conventions (archive/backup/temp/dated tables). Empty
+            # by default; mirrors the app's ERD_EXCLUDE_TABLE_PATTERNS so snapshot == live.
+            # Double backslashes for the Spark SQL string literal (so \d reaches RLIKE as \d).
+            for pattern in exclude_patterns:
+                escaped = pattern.replace("\\", "\\\\")
+                clause += f" AND NOT (lower({table_col}) RLIKE '{escaped}')"
         return clause
 
     stmts = []
@@ -244,7 +274,21 @@ def main():
     parser.add_argument("--warehouse-id", required=True)
     parser.add_argument("--catalogs", default="")
     parser.add_argument("--metadata-location", default="", help='"catalog.schema", e.g. megacorp.erd_meta')
+    parser.add_argument("--exclude-table-patterns", default="",
+                        help='JSON array of RLIKE regexes for table names to exclude (org '
+                             'archive/backup/temp conventions). Mirrors the app\'s '
+                             'ERD_EXCLUDE_TABLE_PATTERNS; empty = none.')
     args = parser.parse_args()
+
+    exclude_raw = (args.exclude_table_patterns or os.environ.get("ERD_EXCLUDE_TABLE_PATTERNS", "")).strip()
+    exclude_patterns = []
+    if exclude_raw and exclude_raw != "[]":
+        try:
+            loaded = json.loads(exclude_raw)
+            if isinstance(loaded, list):
+                exclude_patterns = loaded
+        except (ValueError, TypeError):
+            print("Warning: --exclude-table-patterns is not valid JSON; ignoring it")
 
     catalogs = [c.strip() for c in (args.catalogs or os.environ.get("ERD_CATALOGS", "")).split(",") if c.strip()]
     loc_raw = args.metadata_location or os.environ.get("ERD_METADATA_LOCATION", "")
@@ -262,10 +306,10 @@ def main():
     print(f"Writing snapshot tables to: {metadata_catalog}.{metadata_schema}")
 
     w = WorkspaceClient(profile=args.profile) if args.profile else WorkspaceClient()
-    materialize(w, args.warehouse_id, catalogs, metadata_catalog, metadata_schema)
+    materialize(w, args.warehouse_id, catalogs, metadata_catalog, metadata_schema, exclude_patterns=exclude_patterns)
 
 
-def materialize(w, warehouse_id, catalogs, metadata_catalog, metadata_schema, *, log=print):
+def materialize(w, warehouse_id, catalogs, metadata_catalog, metadata_schema, *, exclude_patterns=None, log=print):
     """Build/refresh the erd_snapshot_* tables in {metadata_catalog}.{metadata_schema}.
 
     Shared by main() (the CLI / refresh_erd_snapshot job) AND notebooks/install.py's
@@ -275,7 +319,7 @@ def materialize(w, warehouse_id, catalogs, metadata_catalog, metadata_schema, *,
     on older metastores degrades to an empty table with the right schema so the app's
     snapshot read still works."""
     loc = f"{metadata_catalog}.{metadata_schema}"
-    statements = build_statements(catalogs, metadata_catalog, metadata_schema)
+    statements = build_statements(catalogs, metadata_catalog, metadata_schema, exclude_patterns)
     for i, (label, stmt, optional) in enumerate(statements, 1):
         resp = _run(w, warehouse_id, stmt)
         if resp.status.state.value == "SUCCEEDED":

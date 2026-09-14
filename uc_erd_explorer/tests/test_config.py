@@ -21,6 +21,7 @@ def _clean_env(monkeypatch):
         "ERD_CACHE_TTL_SECONDS",
         "ERD_SCHEMA_COLLAPSE_THRESHOLD",
         "ERD_TEST_CATALOG_SUFFIX",
+        "ERD_EXCLUDE_TABLE_PATTERNS",
     ):
         monkeypatch.delenv(var, raising=False)
     config.get_workspace_name.cache_clear()
@@ -119,6 +120,46 @@ class TestGetTestCatalogSuffix:
     def test_blank_falls_back_to_default(self, monkeypatch):
         monkeypatch.setenv("ERD_TEST_CATALOG_SUFFIX", "")
         assert config.get_test_catalog_suffix() == "_ts"
+
+
+class TestGetTableExcludePatterns:
+    def test_default_is_empty(self):
+        assert config.get_table_exclude_patterns() == []
+
+    def test_empty_array_string_is_empty(self, monkeypatch):
+        monkeypatch.setenv("ERD_EXCLUDE_TABLE_PATTERNS", "[]")
+        assert config.get_table_exclude_patterns() == []
+
+    def test_valid_json_array_parsed(self, monkeypatch):
+        monkeypatch.setenv("ERD_EXCLUDE_TABLE_PATTERNS", '["_bkp[0-9a-z]*$", "_temp$"]')
+        assert config.get_table_exclude_patterns() == ["_bkp[0-9a-z]*$", "_temp$"]
+
+    def test_invalid_json_degrades_to_empty(self, monkeypatch):
+        monkeypatch.setenv("ERD_EXCLUDE_TABLE_PATTERNS", "not json [")
+        assert config.get_table_exclude_patterns() == []
+
+    def test_non_array_json_degrades_to_empty(self, monkeypatch):
+        monkeypatch.setenv("ERD_EXCLUDE_TABLE_PATTERNS", '{"a": 1}')
+        assert config.get_table_exclude_patterns() == []
+
+    def test_quote_or_semicolon_entries_dropped(self, monkeypatch):
+        # Would break the RLIKE string literal / allow injection -- dropped, others kept.
+        monkeypatch.setenv("ERD_EXCLUDE_TABLE_PATTERNS", '["ok$", "bad\'quote", "bad;semi", "_temp$"]')
+        assert config.get_table_exclude_patterns() == ["ok$", "_temp$"]
+
+    def test_invalid_regex_entries_dropped(self, monkeypatch):
+        # Valid JSON but a broken regex -> dropped (else Spark raises at query time), rest kept.
+        monkeypatch.setenv("ERD_EXCLUDE_TABLE_PATTERNS", '["_bkp[0-9", "_temp$"]')
+        assert config.get_table_exclude_patterns() == ["_temp$"]
+
+    def test_non_strings_and_blanks_skipped(self, monkeypatch):
+        monkeypatch.setenv("ERD_EXCLUDE_TABLE_PATTERNS", '["_temp$", 5, "", "   ", null]')
+        assert config.get_table_exclude_patterns() == ["_temp$"]
+
+    def test_count_capped(self, monkeypatch):
+        import json as _json
+        monkeypatch.setenv("ERD_EXCLUDE_TABLE_PATTERNS", _json.dumps([f"_p{i}$" for i in range(80)]))
+        assert len(config.get_table_exclude_patterns()) == 50
 
 
 class TestGetWarehouseId:

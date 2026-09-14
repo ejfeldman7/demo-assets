@@ -148,6 +148,28 @@ class TestInternalSchemaExclusionSql:
         assert "substring(tbl, 1, 2)" not in sql  # no blanket dunder filter on table names
         assert "lower(tbl) RLIKE '^__materialization_mat_" in sql  # only the specific pattern
 
+    def test_configured_exclude_patterns_applied_with_table_col(self, monkeypatch):
+        # Deployment-configured ERD_EXCLUDE_TABLE_PATTERNS are appended as NOT RLIKE clauses.
+        monkeypatch.setattr(graph, "get_metadata_location", lambda: ("megacorp", "erd_meta"))
+        monkeypatch.setattr(graph, "get_table_exclude_patterns", lambda: ["_bkp[0-9a-z]*$", "_temp$"])
+        sql = graph._internal_schema_exclusion_sql("cat", "sch", "tbl")
+        assert "NOT (lower(tbl) RLIKE '_bkp[0-9a-z]*$')" in sql
+        assert "NOT (lower(tbl) RLIKE '_temp$')" in sql
+
+    def test_configured_exclude_patterns_ignored_without_table_col(self, monkeypatch):
+        # The schema-level picker query has no table column, so table-name patterns don't apply.
+        monkeypatch.setattr(graph, "get_metadata_location", lambda: ("megacorp", "erd_meta"))
+        monkeypatch.setattr(graph, "get_table_exclude_patterns", lambda: ["_bkp$"])
+        assert "_bkp$" not in graph._internal_schema_exclusion_sql("cat", "sch")
+
+    def test_backslash_regex_doubled_for_spark_literal(self, monkeypatch):
+        # \d must be doubled to \\d in the SQL literal, else Spark's string-literal parser eats
+        # the backslash and RLIKE matches a literal 'd' instead of a digit (verified live).
+        monkeypatch.setattr(graph, "get_metadata_location", lambda: ("megacorp", "erd_meta"))
+        monkeypatch.setattr(graph, "get_table_exclude_patterns", lambda: [r"_\d{4}$"])
+        sql = graph._internal_schema_exclusion_sql("cat", "sch", "tbl")
+        assert r"RLIKE '_\\d{4}$'" in sql
+
 
 def _col(catalog, schema, table, column, full_type, ordinal=1, comment=None):
     return [catalog, schema, table, column, full_type, ordinal, comment]
