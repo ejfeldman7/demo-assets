@@ -1,0 +1,28 @@
+command:
+  - python
+  - server/app.py
+env:
+  # Lakebase endpoint used to mint the 1-hour OAuth DB credential via the SDK.
+  - name: LAKEBASE_ENDPOINT
+    value: "projects/<your-lakebase-project>/branches/app/endpoints/primary"
+  - name: PGHOST
+    value: "<your-lakebase-endpoint-host>.database.<region>.cloud.databricks.com"
+  - name: PGDATABASE
+    value: "databricks_postgres"
+  - name: NARRATIVE_ENDPOINT
+    value: "databricks-claude-opus-4-8"
+  - name: WHATIF_ENDPOINT
+    value: "trace-margin-whatif"
+  # Curated Genie space over trace_to_contain.lakehouse for population/portfolio Q&A.
+  # Create it with src/ops/02_create_genie_space.py, then paste the returned space id here.
+  - name: GENIE_SPACE_ID
+    value: ""
+  # PGUSER (service-principal client id) is injected by the attached postgres resource.
+#
+# The Genie endpoint queries on-behalf-of the signed-in user when a user token is forwarded,
+# and falls back to the app service principal. To run Genie *as the user* (per-user UC/RLS),
+# grant the space to users and add the user-authorization scope for this app:
+#   user_api_scopes:
+#     - dashboards.genie
+# (verify the exact key for your Apps runtime before enabling). Otherwise the app SP answers,
+# and needs CAN RUN on the Genie space + SELECT on the underlying lakehouse tables.
