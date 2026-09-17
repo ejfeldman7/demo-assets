@@ -865,6 +865,15 @@ def build_schema_summary(catalogs: Optional[List[str]], tables: List[List[Any]],
         for (source, target), count in sorted(schema_edge_counts.items())
     ]
 
+    # A lightweight (names-only) index of every table in scope, so the frontend's search /
+    # quick-find still works in the collapsed view -- the nodes here are schemas, not tables,
+    # so without this a table search would have nothing to match. Selecting a hit expands its
+    # schema (a pairs request) to load full detail. Names only, so it stays small.
+    table_index = [
+        {"catalog": catalog, "schema": schema, "table": table}
+        for (catalog, schema, table, _comment) in tables
+    ]
+
     return {
         "catalogs": sorted({n["catalog"] for n in nodes}),
         "unscoped": catalogs is None,
@@ -872,4 +881,5 @@ def build_schema_summary(catalogs: Optional[List[str]], tables: List[List[Any]],
         "view": "schema_summary",
         "nodes": nodes,
         "edges": edges,
+        "table_index": table_index,
     }
