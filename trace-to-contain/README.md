@@ -34,7 +34,6 @@ what conditioning it reveals.
 
 - Runs as a Databricks App on any Unity Catalog workspace. See Setup below to deploy your own.
 - PRD (full requirements, four-persona review): [`docs/prd.md`](./docs/prd.md)
-- Talk track: [`talk-track.md`](./talk-track.md)
 
 ## Features
 
@@ -166,11 +165,6 @@ project instead, keeping the whole demo on a single Lakebase project.
 - The recommendation engine is deterministic (tiered rules over the prediction, population, and
   lineage). The foundation model writes the explanation, not the decision.
 - No DAB yet; deployment is CLI-driven. A bundle would make it one-command redeployable.
-
-## Talk Track
-
-See [`talk-track.md`](./talk-track.md) for the five-minute walkthrough, also rendered in-app on the
-Demo Walkthrough tab. Start from a reset state.
 
 ## Changelog
 

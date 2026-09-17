@@ -2,7 +2,6 @@ import React, { useEffect, useState } from "react";
 import { api } from "./api.js";
 import CaseDetail from "./CaseDetail.jsx";
 import Docs from "./Docs.jsx";
-import Walkthrough from "./Walkthrough.jsx";
 import AskGenie from "./AskGenie.jsx";
 
 const STATES = ["All", "New", "Under FA Review", "Recommendation Pending", "MES Hold Applied", "MRB Disposition", "Closed"];
@@ -81,9 +80,6 @@ export default function App() {
         <div className={"navitem " + (view === "docs" ? "on" : "")} onClick={() => setView("docs")}>
           <span className="dot" style={{ background: "var(--sky)" }}></span> Solution Reference
         </div>
-        <div className={"navitem " + (view === "walkthrough" ? "on" : "")} onClick={() => setView("walkthrough")}>
-          <span className="dot" style={{ background: "var(--ok)" }}></span> Demo Walkthrough
-        </div>
         <div className="navitem" onClick={doReset} style={{ opacity: resetting ? 0.5 : 1 }}>
           <span className="dot" style={{ background: "var(--warn)" }}></span> {resetting ? "Resetting…" : "Reset Demo"}
         </div>
@@ -105,7 +101,7 @@ export default function App() {
       </nav>
 
       <main className="main">
-        {view === "docs" ? <Docs /> : view === "walkthrough" ? <Walkthrough /> : (
+        {view === "docs" ? <Docs /> : (
         <div className="wrap">
           <h1>Engineering Case Queue</h1>
           <p className="sub">RMA-triggered cases traced to their wafer population, scored, and routed for a governed containment decision.</p>
