@@ -119,6 +119,10 @@ function ErdCanvas() {
   const [traceFrom, setTraceFrom] = useState<string | null>(null)
   const [traceTo, setTraceTo] = useState<string | null>(null)
   const [search, setSearch] = useState('')
+  // Transient note under the search box -- in the collapsed schema-summary view, search can't
+  // jump to a table node (there isn't one), so it points to the containing schema and says
+  // which one, without changing the user's catalog/schema selection.
+  const [searchNote, setSearchNote] = useState<string | null>(null)
   // Heuristic undeclared-relationship edges are always fetched but hidden by default,
   // so first load renders identically to before this feature existed.
   const [showInferred, setShowInferred] = useState(false)
@@ -213,6 +217,7 @@ function ErdCanvas() {
     // The pinned star center names a table in the OLD scope -- drop it so star mode
     // re-suggests a center from the new data (star mode itself is left as the user set it).
     setStarCenterId(null)
+    setSearchNote(null) // any "table is in <schema>" hint names the old scope
     // Fresh data scope -> fresh view: clear any schema collapses (they name schemas in the
     // OLD scope, and a schema the user just picked shouldn't load collapsed/empty).
     setCollapsedGroups(new Set())
@@ -887,42 +892,12 @@ function ErdCanvas() {
     setTimeout(() => fitView({ padding: 0.15, duration: 400 }), 50)
   }, [baseNodes, fitView])
 
-  const runSearch = useCallback(() => {
-    const q = search.trim().toLowerCase()
-    if (!q) return
-    // Search the currently-VISIBLE table nodes (baseNodes) -- always up to date, and it
-    // excludes tables inside a collapsed group, which have no node to pan to anyway.
-    const nodes = baseNodes.filter(
-      (n): n is Node<TableNodeData> => !isSchemaNodeData(n.data),
-    )
-    // Prefer an exact table-name match (so "materials" hits factory.materials,
-    // not bill_of_materials), then fall back to a substring match.
-    const match =
-      nodes.find((n) => n.data.table.toLowerCase() === q) ??
-      nodes.find((n) => n.data.table.toLowerCase().includes(q))
-    if (match) {
-      const node = getNode(match.id)
-      if (node) {
-        setCenter(node.position.x + 120, node.position.y + 80, {
-          zoom: 1.1,
-          duration: 500,
-        })
-        if (!tracing) setSelectedId(match.id)
-      }
-    }
-  }, [search, getNode, setCenter, tracing, baseNodes])
-
-  // Table list for the Cmd+K quick-find palette -- the currently-VISIBLE table nodes, so a
-  // pick always has a node to pan to (tables in a collapsed group are excluded, matching
-  // what's on the canvas; schema-summary nodes have no columns and are skipped).
-  const tableEntries = useMemo<TableEntry[]>(() => {
-    return baseNodes
-      .filter((n): n is Node<TableNodeData> => !isSchemaNodeData(n.data))
-      .map((n) => ({ id: n.id, catalog: n.data.catalog, schema: n.data.schema, table: n.data.table }))
-  }, [baseNodes])
-
-  // Pan/zoom to a table and focus it -- shared by the palette and the sidebar search.
-  const jumpToNode = useCallback(
+  // Pan/zoom to a table and focus it -- shared by the palette and the sidebar search. If the
+  // table has a node on the canvas (detail view), jump to it. If it doesn't (it's inside a
+  // schema collapsed in the schema-summary view), DON'T rescope -- instead point to the
+  // containing schema node and note which schema it's in, so the user's catalog/schema
+  // selection is preserved and they expand that schema themselves (a click) when they want to.
+  const focusTable = useCallback(
     (id: string) => {
       const node = getNode(id)
       if (node) {
@@ -930,10 +905,60 @@ function ErdCanvas() {
         // In trace mode we only pan to the table (so the user can click it as an endpoint);
         // applying click-to-focus here would fight the trace dimming.
         if (!tracing) setSelectedId(id)
+        setSearchNote(null)
+        return
+      }
+      const parts = id.split('.')
+      const schemaId = parts.length >= 3 ? `${parts[0]}.${parts[1]}` : null
+      const schemaNode = schemaId ? getNode(schemaId) : null
+      if (schemaNode && schemaId) {
+        setCenter(schemaNode.position.x + 110, schemaNode.position.y + 44, { zoom: 0.9, duration: 500 })
+        if (!tracing) setSelectedId(schemaId) // highlight the schema (and its related schemas)
+        setSearchNote(`"${parts.slice(2).join('.')}" is in ${schemaId} — click that schema to expand it.`)
+      } else {
+        setSearchNote('No match in the current view. Widen the scope or expand a schema.')
       }
     },
     [getNode, setCenter, tracing],
   )
+
+  const runSearch = useCallback(() => {
+    const q = search.trim().toLowerCase()
+    if (!q) return
+    // Collapsed schema-summary view: there are no table nodes on the canvas, so match the
+    // payload's table_index and let focusTable point to the containing schema (no rescope).
+    if (graph?.view === 'schema_summary' && graph.table_index) {
+      const idx = graph.table_index
+      const hit =
+        idx.find((t) => t.table.toLowerCase() === q) ??
+        idx.find((t) => t.table.toLowerCase().includes(q))
+      if (hit) focusTable(`${hit.catalog}.${hit.schema}.${hit.table}`)
+      else setSearchNote(`No table matching "${search.trim()}" in the current scope.`)
+      return
+    }
+    // Detail view: match the visible table nodes. Prefer an exact table-name match (so
+    // "materials" hits factory.materials, not bill_of_materials), then a substring match.
+    const nodes = baseNodes.filter((n): n is Node<TableNodeData> => !isSchemaNodeData(n.data))
+    const match =
+      nodes.find((n) => n.data.table.toLowerCase() === q) ??
+      nodes.find((n) => n.data.table.toLowerCase().includes(q))
+    if (match) focusTable(match.id)
+  }, [search, baseNodes, graph, focusTable])
+
+  // Table list for the Cmd+K quick-find palette. In the collapsed schema-summary view the
+  // canvas nodes are schemas, so we use the payload's table_index (every table in scope) --
+  // picking one expands its schema (focusTable). In the detail view we use the visible table
+  // nodes, so a pick always has a node to pan to.
+  const tableEntries = useMemo<TableEntry[]>(() => {
+    if (graph?.view === 'schema_summary' && graph.table_index) {
+      return graph.table_index.map((t) => ({
+        id: `${t.catalog}.${t.schema}.${t.table}`, catalog: t.catalog, schema: t.schema, table: t.table,
+      }))
+    }
+    return baseNodes
+      .filter((n): n is Node<TableNodeData> => !isSchemaNodeData(n.data))
+      .map((n) => ({ id: n.id, catalog: n.data.catalog, schema: n.data.schema, table: n.data.table }))
+  }, [graph, baseNodes])
 
   // Cmd/Ctrl+K opens the quick-find palette (Lineage-Explorer-style navigation for large
   // graphs). Registered globally so it works regardless of focus.
@@ -1036,7 +1061,10 @@ function ErdCanvas() {
             <div style={{ display: 'flex', gap: 6 }}>
               <input
                 value={search}
-                onChange={(e) => setSearch(e.target.value)}
+                onChange={(e) => {
+                  setSearch(e.target.value)
+                  if (searchNote) setSearchNote(null)
+                }}
                 onKeyDown={(e) => e.key === 'Enter' && runSearch()}
                 placeholder="Find a table…"
                 aria-label="Find a table by name"
@@ -1046,6 +1074,7 @@ function ErdCanvas() {
                 Go
               </button>
             </div>
+            {searchNote && <div style={styles.searchNote}>{searchNote}</div>}
             <div style={styles.hint}>
               Press <kbd style={styles.kbdHint}>⌘K</kbd> / <kbd style={styles.kbdHint}>Ctrl K</kbd> for quick find.
             </div>
@@ -1401,7 +1430,7 @@ function ErdCanvas() {
       <CommandPalette
         open={paletteOpen}
         tables={tableEntries}
-        onSelect={jumpToNode}
+        onSelect={focusTable}
         onClose={() => setPaletteOpen(false)}
       />
     </div>
@@ -1700,6 +1729,16 @@ const styles: Record<string, CSSProperties> = {
     fontSize: 11.5,
     color: 'var(--text-muted)',
     padding: '6px 10px 2px',
+    lineHeight: 1.4,
+  },
+  searchNote: {
+    fontSize: 11.5,
+    color: 'var(--text)',
+    background: 'var(--surface)',
+    border: '1px solid var(--border-strong)',
+    borderRadius: 6,
+    padding: '6px 8px',
+    margin: '8px 0 0',
     lineHeight: 1.4,
   },
   kbdHint: {

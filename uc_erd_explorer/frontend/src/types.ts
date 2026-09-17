@@ -63,6 +63,16 @@ export interface GraphResponse {
   view: 'detail' | 'schema_summary'
   nodes: TableNodeData[] | SchemaNodeData[]
   edges: GraphEdge[]
+  // Present only in the schema_summary (collapsed) view: a names-only index of every table in
+  // scope, so search / quick-find still work when the nodes are schemas rather than tables.
+  // Selecting a hit expands that table's schema to load full detail. Absent in the detail view.
+  table_index?: TableIndexEntry[]
+}
+
+export interface TableIndexEntry {
+  catalog: string
+  schema: string
+  table: string
 }
 
 export interface CatalogSchemas {

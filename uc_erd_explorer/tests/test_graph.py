@@ -379,3 +379,21 @@ class TestSnapshotVsLiveQuerySql:
         cap = self._capture(monkeypatch)
         graph._query_columns(["megacorp"], [("megacorp", "erp")], source="snapshot")
         assert "('megacorp', 'erp')" in cap["stmt"]
+
+
+class TestBuildSchemaSummary:
+    def test_nodes_are_schemas_and_table_index_lists_every_table(self, monkeypatch):
+        # The collapsed view: nodes are one-per-schema, but table_index carries every table
+        # (names only) so search / quick-find still work when no table node is rendered.
+        monkeypatch.setattr(graph, "_query_foreign_keys", lambda *a, **k: [])
+        tables = [
+            ["c", "s1", "orders", None],
+            ["c", "s1", "customers", "cust"],
+            ["c", "s2", "shipments", None],
+        ]
+        payload = graph.build_schema_summary(["c"], tables)
+        assert payload["view"] == "schema_summary"
+        assert {n["id"] for n in payload["nodes"]} == {"c.s1", "c.s2"}  # per-schema, not per-table
+        assert {(t["catalog"], t["schema"], t["table"]) for t in payload["table_index"]} == {
+            ("c", "s1", "orders"), ("c", "s1", "customers"), ("c", "s2", "shipments"),
+        }
