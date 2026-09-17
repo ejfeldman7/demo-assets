@@ -2,6 +2,8 @@
 
 FAB-to-field engineering intelligence for RF semiconductor manufacturing, on synthetic data.
 
+![Trace to Contain — 22-second launch video](media/brag.gif)
+
 ## Overview
 
 When a filter module fails at a customer and comes back as an RMA, the money question is not what
