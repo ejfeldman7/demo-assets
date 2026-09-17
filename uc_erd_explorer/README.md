@@ -1,5 +1,7 @@
 # Interactive Unity Catalog ERD Viewer
 
+![Catalog ERD Explorer — a 19-second tour](docs/demo/erd-explorer-demo.gif)
+
 A Databricks App that turns Unity Catalog's `information_schema` metadata into an
 interactive, explorable entity-relationship diagram — with a built-in Genie chat for
 asking schema questions in plain English.
