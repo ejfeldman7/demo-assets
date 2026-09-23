@@ -499,7 +499,12 @@ def _query_foreign_keys(
      AND fk.constraint_name=fkc.constraint_name
     JOIN system.information_schema.table_constraints pk
       ON ref.unique_constraint_catalog=pk.constraint_catalog AND ref.unique_constraint_schema=pk.constraint_schema
-     AND ref.unique_constraint_name=pk.constraint_name AND pk.constraint_type='PRIMARY KEY'
+     AND ref.unique_constraint_name=pk.constraint_name
+     -- A FK may reference either a PRIMARY KEY or a UNIQUE constraint (both are legal
+     -- parents in SQL). Matching only PRIMARY KEY silently dropped every FK whose parent's
+     -- key is declared UNIQUE. ref.unique_constraint_name already pins the exact referenced
+     -- constraint, so widening the type filter can't fan out.
+     AND pk.constraint_type IN ('PRIMARY KEY', 'UNIQUE')
     JOIN system.information_schema.key_column_usage pkc
       ON pk.constraint_catalog=pkc.constraint_catalog AND pk.constraint_schema=pkc.constraint_schema
      AND pk.constraint_name=pkc.constraint_name AND fkc.position_in_unique_constraint=pkc.ordinal_position
@@ -732,32 +737,61 @@ def build_graph(pairs: Optional[List[Tuple[str, str]]] = None, env: str = "prod"
     fk_cols: Dict[Tuple[str, str, str], set] = {}
 
     # --- edges ---
-    # Group multi-column FKs by constraint_name into a single edge.
+    # Group multi-column FKs by constraint_name into a single edge. A declared FK on an
+    # in-scope (source) table is ALWAYS surfaced -- its column keeps the FK marker and a
+    # reference label -- even when its parent (target) table isn't in the current view.
+    # Only the drawn edge needs both endpoints present:
+    #   - target in view  -> a normal declared edge between the two cards.
+    #   - target off-view  -> no edge by default (nowhere to connect), but we record the
+    #     reference on the column and emit a lightweight "boundary" stub node + a
+    #     cross-scope edge the frontend can reveal on a toggle. Naming a declared FK's
+    #     target leaks nothing the caller can't already read from the source table's own
+    #     DDL, so this is safe in service-principal and on-behalf-of-user modes alike.
+    # Per-column reference target (drives the FK marker's label), keyed by source column.
+    fk_ref_by_col: Dict[Tuple[str, str, str, str], Dict[str, Any]] = {}
     edge_acc: Dict[str, Dict[str, Any]] = {}
+    cross_edge_acc: Dict[str, Dict[str, Any]] = {}
+    boundary_nodes: Dict[str, Dict[str, Any]] = {}
     for (fk_catalog, fk_schema, fk_table, fk_column, _ord,
          pk_catalog, pk_schema, pk_table, pk_column, constraint_name) in fks:
         source = _node_id(fk_catalog, fk_schema, fk_table)
         target = _node_id(pk_catalog, pk_schema, pk_table)
-        # Only keep edges where BOTH endpoints are in the current (allow-listed) view --
-        # this is what prevents a FK into an out-of-scope catalog from leaking anything.
-        if source not in present or target not in present:
+        # The FK's own table must be in view (the query already scopes the FK side to it);
+        # guard anyway so a stray row can't attach a marker to a card we aren't rendering.
+        if source not in present:
             continue
+        target_in_view = target in present
+        # Mark the column as an FK and remember what it points at, regardless of whether
+        # the parent is on-canvas -- this is what stops a declared FK from looking undefined.
         fk_cols.setdefault((fk_catalog, fk_schema, fk_table), set()).add(fk_column)
-        acc = edge_acc.setdefault(
-            constraint_name,
-            {
-                "id": constraint_name,
-                "source": source,
-                "target": target,
-                "fk_columns": [],
-                "pk_columns": [],
-                "constraint_name": constraint_name,
-                "inferred": False,
-            },
-        )
+        fk_ref_by_col[(fk_catalog, fk_schema, fk_table, fk_column)] = {
+            "table": target, "column": pk_column, "in_view": target_in_view,
+        }
+        if target_in_view:
+            acc = edge_acc.setdefault(
+                constraint_name,
+                {
+                    "id": constraint_name, "source": source, "target": target,
+                    "fk_columns": [], "pk_columns": [],
+                    "constraint_name": constraint_name, "inferred": False, "cross_scope": False,
+                },
+            )
+        else:
+            boundary_nodes.setdefault(target, {
+                "id": target, "catalog": pk_catalog, "schema": pk_schema, "table": pk_table,
+                "comment": None, "tags": [], "columns": [], "is_boundary": True,
+            })
+            acc = cross_edge_acc.setdefault(
+                constraint_name,
+                {
+                    "id": constraint_name, "source": source, "target": target,
+                    "fk_columns": [], "pk_columns": [],
+                    "constraint_name": constraint_name, "inferred": False, "cross_scope": True,
+                },
+            )
         acc["fk_columns"].append(fk_column)
         acc["pk_columns"].append(pk_column)
-    edges = list(edge_acc.values())
+    edges = list(edge_acc.values()) + list(cross_edge_acc.values())
 
     # Heuristic, undeclared-relationship edges -- always computed and included (tagged
     # `inferred: true`) so the frontend can toggle them on/off client-side without a
@@ -784,6 +818,9 @@ def build_graph(pairs: Optional[List[Tuple[str, str]]] = None, env: str = "prod"
                 "is_fk": is_fk,
                 "comment": comment,
                 "tags": column_tags_by_key.get((catalog, schema, table, column_name), []),
+                # {table, column, in_view} for an FK column, else None. Lets the card show
+                # what a foreign key points at, and flag when the target is off-canvas.
+                "references": fk_ref_by_col.get((catalog, schema, table, column_name)),
             }
         )
 
@@ -801,6 +838,17 @@ def build_graph(pairs: Optional[List[Tuple[str, str]]] = None, env: str = "prod"
                 "columns": cols_by_table.get((catalog, schema, table), []),
             }
         )
+    # Catalogs actually present are computed from the REAL nodes only, before appending
+    # boundary stubs -- a boundary node names an out-of-scope (possibly out-of-allow-list)
+    # table only so the frontend can show where a declared FK points; it must not widen the
+    # catalog list the picker/UI treats as "in scope".
+    result_catalogs = sorted({n["catalog"] for n in nodes})
+
+    # Boundary stubs for declared-FK targets that fall outside the current view (only when
+    # the FK side is in view). Columnless and flagged is_boundary so the frontend renders
+    # them as inert, greyed reference markers, shown only when the cross-scope toggle is on.
+    nodes.extend(sorted(boundary_nodes.values(), key=lambda n: (n["catalog"], n["schema"], n["table"])))
+
     # Stable ordering.
     nodes.sort(key=lambda n: (n["catalog"], n["schema"], n["table"]))
 
@@ -808,7 +856,7 @@ def build_graph(pairs: Optional[List[Tuple[str, str]]] = None, env: str = "prod"
         # Actual catalogs present in this result, not just the configured allow-list --
         # correct in both scoped mode (subset of ERD_CATALOGS) and unscoped mode
         # (catalogs=None), and always what the frontend needs to render its picker.
-        "catalogs": sorted({n["catalog"] for n in nodes}),
+        "catalogs": result_catalogs,
         "unscoped": catalogs is None,
         "pairs": [f"{c}.{s}" for c, s in pairs] if pairs else None,
         "view": "detail",

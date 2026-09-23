@@ -193,7 +193,10 @@ JOIN system.information_schema.key_column_usage fkc
  AND fk.constraint_name=fkc.constraint_name
 JOIN system.information_schema.table_constraints pk
   ON ref.unique_constraint_catalog=pk.constraint_catalog AND ref.unique_constraint_schema=pk.constraint_schema
- AND ref.unique_constraint_name=pk.constraint_name AND pk.constraint_type='PRIMARY KEY'
+ AND ref.unique_constraint_name=pk.constraint_name
+ -- A FK may reference a PRIMARY KEY or a UNIQUE constraint; match both (mirrors the live
+ -- query in server/graph.py). ref.unique_constraint_name pins the exact constraint.
+ AND pk.constraint_type IN ('PRIMARY KEY', 'UNIQUE')
 JOIN system.information_schema.key_column_usage pkc
   ON pk.constraint_catalog=pkc.constraint_catalog AND pk.constraint_schema=pkc.constraint_schema
  AND pk.constraint_name=pkc.constraint_name AND fkc.position_in_unique_constraint=pkc.ordinal_position
