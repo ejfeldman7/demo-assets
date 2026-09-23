@@ -128,6 +128,10 @@ function ErdCanvas() {
   // Heuristic undeclared-relationship edges are always fetched but hidden by default,
   // so first load renders identically to before this feature existed.
   const [showInferred, setShowInferred] = useState(false)
+  // Draw declared FKs whose target table is outside the current view as edges to greyed
+  // "boundary" stub nodes. Off by default (keeps the canvas to the selected tables); the
+  // FK marker + reference label on the column always show regardless of this toggle.
+  const [showCrossScope, setShowCrossScope] = useState(false)
   // "Keys only" collapses each table to just its PK/FK columns -- purely a client-side
   // view filter (the backend always returns every column, flagged is_pk/is_fk), so
   // toggling is instant and never re-queries. A table with no declared PK/FK renders as
@@ -273,8 +277,13 @@ function ErdCanvas() {
   // what "connected" means. Default (showInferred=false) matches pre-heuristic behavior
   // exactly, since the backend always returns inferred edges tagged, never omitted.
   const scopedGraphEdges = useMemo(
-    () => (graph ? graph.edges.filter((e) => showInferred || !e.inferred) : []),
-    [graph, showInferred],
+    () =>
+      graph
+        ? graph.edges.filter(
+            (e) => (showInferred || !e.inferred) && (showCrossScope && !starMode ? true : !e.cross_scope),
+          )
+        : [],
+    [graph, showInferred, showCrossScope, starMode],
   )
 
   // The column each visible edge anchors to, per node (fk_columns[0] on the source,
@@ -379,7 +388,12 @@ function ErdCanvas() {
       }
     }
 
-    const rawNodes: Node<TableNodeData | SchemaNodeData>[] = graph.nodes.map((n) => {
+    const rawNodes: Node<TableNodeData | SchemaNodeData>[] = graph.nodes
+      // Boundary stubs (out-of-view FK targets) only participate when the cross-scope
+      // toggle is on. Filtering them here keeps them out of the layout, fit, and exports
+      // by default -- the FK marker on the column carries the reference regardless.
+      .filter((n) => (showCrossScope && !starMode) || !('is_boundary' in n && n.is_boundary))
+      .map((n) => {
       // Schema-summary nodes have no columns -- pass through unchanged.
       if (!('columns' in n)) {
         return { id: n.id, type: 'schema', position: { x: 0, y: 0 }, data: n }
@@ -417,12 +431,15 @@ function ErdCanvas() {
       // Only in the detail view; schema-summary nodes have no per-column handles, so
       // those edges fall back to the SchemaNode's default centered handle (undefined).
       sourceHandle: graph.view === 'detail' ? e.fk_columns[0] : undefined,
-      targetHandle: graph.view === 'detail' ? e.pk_columns[0] : undefined,
+      // Cross-scope edges point at a columnless boundary stub, so they anchor to its
+      // default handle (undefined) rather than a per-column handle that doesn't exist.
+      targetHandle: graph.view === 'detail' && !e.cross_scope ? e.pk_columns[0] : undefined,
       // Structured join columns (not a pre-joined string) so RelationshipEdge can reflow a
       // long/composite mapping onto stacked lines, and draw crow's-foot cardinality (the
       // FK/source end is "many", the PK/target end is "one").
       data: {
         inferred: e.inferred,
+        crossScope: e.cross_scope,
         fkCols: e.fk_columns,
         pkCols: e.pk_columns,
         // Star/Galaxy: float edges to the facing card border (no per-column-handle wrap-around).
@@ -436,16 +453,18 @@ function ErdCanvas() {
       // overlap a solid one is never fully hidden underneath it.
       zIndex: e.inferred ? 1 : 0,
       style: {
+        // Declared in-view: solid grey. Inferred: red dashed. Cross-scope (declared, target
+        // off-canvas): grey dashed, so it reads as "real FK, pointing out of the view".
         stroke: e.inferred ? 'var(--db-red)' : 'var(--text-subtle)',
         strokeWidth: e.inferred ? 2 : 1.5,
-        strokeDasharray: e.inferred ? '6 4' : undefined,
+        strokeDasharray: e.inferred ? '6 4' : e.cross_scope ? '4 4' : undefined,
       },
     }))
 
     // dbxmetagen predicted-FK overlay (only when toggled on). Rendered as extra 'relationship'
     // edges tagged predicted, filtered to endpoints actually on the diagram, above the base
     // edges. Distinct violet + confidence in the hover label (see RelationshipEdge).
-    const presentIds = new Set(graph.nodes.map((n) => n.id))
+    const presentIds = new Set(rawNodes.map((n) => n.id))
     // Signatures of DECLARED edges, so a prediction that just restates an existing declared
     // FK isn't drawn as a redundant violet line over the solid one -- the overlay's value is
     // the *novel* predictions. (Declared edges are already on the diagram; inferred ones are a
@@ -473,7 +492,7 @@ function ErdCanvas() {
       : []
 
     return { rawNodes, baseEdges: [...edges, ...predictedRf] }
-  }, [graph, scopedGraphEdges, keysOnly, expandedTables, anchorColsByNode, showPredictions, predictedEdges, starMode])
+  }, [graph, scopedGraphEdges, keysOnly, expandedTables, anchorColsByNode, showPredictions, predictedEdges, starMode, showCrossScope])
 
   // --- Star layout derivation ---------------------------------------------------------
   // Client-side classification (fact/dimension/junction) drives the star view's center
@@ -591,12 +610,12 @@ function ErdCanvas() {
     [graph, layoutDir, groupBy, collapsedGroups, starMode, effectiveStarCenter, starReach, factIds],
   )
 
-  // Structural re-layout: new graph, keys-only, inferred toggle, direction, grouping
-  // toggle, or a schema collapse/expand (the last three arrive via runLayout's deps). NOT
-  // per-table column expansion.
+  // Structural re-layout: new graph, keys-only, inferred toggle, cross-scope toggle (adds/
+  // removes boundary stub nodes), direction, grouping toggle, or a schema collapse/expand
+  // (the last three arrive via runLayout's deps). NOT per-table column expansion.
   useEffect(() => {
     runLayout(true)
-  }, [graph, keysOnly, showInferred, runLayout])
+  }, [graph, keysOnly, showInferred, showCrossScope, runLayout])
 
   // Expand/collapse a single table. FLAT mode: keep every card in place and apply a local
   // vertical push -- shift only the cards below the toggled one in its lane by the exact
@@ -774,6 +793,9 @@ function ErdCanvas() {
       // schema-summary branch below and get sent to /api/graph as a bogus pair.)
       if (node.type === 'groupBox') return
       const data = node.data as TableNodeData | SchemaNodeData
+      // Boundary stubs are inert reference markers -- no columns, not part of the selected
+      // scope -- so clicking one does nothing (mirrors the group-box guard above).
+      if ('is_boundary' in data && data.is_boundary) return
       // In star mode a table click re-centers the star (overrides click-to-filter). Schema
       // nodes can't be a center, so they fall through to the expand branch below.
       if (starMode && !isSchemaNodeData(data)) {
@@ -1008,7 +1030,10 @@ function ErdCanvas() {
     : null
 
   const inferredCount = graph ? graph.edges.filter((e) => e.inferred).length : 0
-  const declaredCount = graph ? graph.edges.filter((e) => !e.inferred).length : 0
+  // Declared, both endpoints in view -- what the "Relationships" stat has always meant.
+  const declaredCount = graph ? graph.edges.filter((e) => !e.inferred && !e.cross_scope).length : 0
+  // Declared FKs whose target table is out of the current view (the cross-scope toggle).
+  const crossScopeCount = graph ? graph.edges.filter((e) => e.cross_scope).length : 0
 
   // How many tables have no declared PK/FK -- these render as header-only (no columns)
   // in "keys only" mode, so we surface the count in the hint to explain the empty cards.
@@ -1325,6 +1350,21 @@ function ErdCanvas() {
               {inferredCount > 0
                 ? `${inferredCount} likely-but-undeclared relationship${inferredCount === 1 ? '' : 's'} found by matching column names/types against primary keys -- a guess, never a real constraint.`
                 : 'No undeclared relationships detected via column name/type matching.'}
+            </div>
+          </div>
+
+          <SectionLabel>Cross-scope references</SectionLabel>
+          <div style={styles.card}>
+            <Switch
+              label="Show off-canvas FK targets"
+              checked={showCrossScope}
+              onChange={() => setShowCrossScope((v) => !v)}
+              disabled={starMode}
+            />
+            <div style={styles.hint}>
+              {crossScopeCount > 0
+                ? `${crossScopeCount} declared foreign key${crossScopeCount === 1 ? '' : 's'} point to tables outside the current selection. The key stays marked on the column either way; turn this on to draw each one to a greyed stub of its target. Add the target's schema to the selection to see it in full.`
+                : 'No declared foreign keys point outside the current selection. Declared keys to out-of-view tables would appear here.'}
             </div>
           </div>
 

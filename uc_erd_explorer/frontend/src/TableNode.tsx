@@ -137,6 +137,42 @@ export function TableNode({ id, data }: TableNodeProps) {
     updateNodeInternals(id)
   }, [id, colKey, updateNodeInternals])
 
+  // Boundary stub: a declared FK's target table that's outside the current view. Rendered
+  // as an inert, greyed, dashed card (no columns, no tags, no expand) so the relationship
+  // has something to point at without pulling the whole parent table into scope. Carries a
+  // default target handle so the cross-scope edge can anchor to it.
+  if (data.is_boundary) {
+    return (
+      <div
+        title={`${data.catalog}.${data.schema}.${data.table} — referenced by a foreign key but outside the current view. Add its schema to the selection to see it in full.`}
+        style={{
+          width: 200,
+          background: 'var(--surface-subtle)',
+          border: '1.5px dashed var(--border)',
+          borderRadius: 10,
+          padding: '9px 12px',
+          opacity: dimmed ? 0.22 : 0.9,
+          fontSize: 12,
+        }}
+      >
+        <Handle type="target" position={Position.Left} isConnectable={false} style={columnHandleStyle('#98a2b3')} />
+        <Handle type="source" position={Position.Right} isConnectable={false} style={columnHandleStyle('#98a2b3')} />
+        <div
+          onMouseEnter={(e) => revealIfClipped(e, data.table)}
+          style={{ fontWeight: 600, color: 'var(--text)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+        >
+          {data.table}
+        </div>
+        <div style={{ color: 'var(--text-subtle)', fontSize: 10, marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+          {data.catalog}.{data.schema}
+        </div>
+        <div style={{ color: 'var(--text-subtle)', fontSize: 9.5, marginTop: 4, textTransform: 'uppercase', letterSpacing: 0.4 }}>
+          ↗ referenced · not in view
+        </div>
+      </div>
+    )
+  }
+
   return (
     <div
       style={{
@@ -217,6 +253,13 @@ export function TableNode({ id, data }: TableNodeProps) {
         {displayColumns.map((col) => {
           const isKey = col.is_pk || col.is_fk
           const highlighted = highlightedCols?.has(col.name) ?? false
+          // What this FK points at (declared FKs only). When the target is off-canvas we
+          // also show a small "↗" so the key reads as "declared, but pointing out of view".
+          const ref = col.references
+          const refTitle = ref
+            ? `References ${ref.table}.${ref.column}${ref.in_view ? '' : ' — not in current view'}`
+            : undefined
+          const refOutOfView = Boolean(ref && !ref.in_view)
           return (
           <div
             key={col.name}
@@ -259,9 +302,14 @@ export function TableNode({ id, data }: TableNodeProps) {
               isConnectable={false}
               style={columnHandleStyle(colors.bar)}
             />
-            <span style={{ display: 'flex', alignItems: 'center', gap: 3, minWidth: 26 }}>
+            <span title={refTitle} style={{ display: 'flex', alignItems: 'center', gap: 3, minWidth: 26 }}>
               {col.is_pk && <KeyIcon kind="pk" />}
               {col.is_fk && <KeyIcon kind="fk" />}
+              {refOutOfView && (
+                <span aria-label="references a table outside the current view" style={{ color: 'var(--text-subtle)', fontSize: 10, fontWeight: 700 }}>
+                  ↗
+                </span>
+              )}
             </span>
             <span
               title={col.comment ?? undefined}

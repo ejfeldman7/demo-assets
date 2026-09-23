@@ -329,6 +329,65 @@ class TestSnapshotFallback:
         assert [n["table"] for n in payload["nodes"]] == ["t"]
 
 
+class TestDeclaredFkVisibility:
+    """A declared FK is always surfaced on its (in-scope) source table -- the column keeps
+    its FK marker and a reference label -- even when the parent is out of the current view.
+    An in-view target draws a normal edge; an out-of-view target draws no edge by default
+    but emits a boundary stub node plus a cross_scope edge for the frontend toggle."""
+
+    def _run(self, monkeypatch, tables, columns, fk_rows):
+        monkeypatch.setattr(graph, "get_metadata_source", lambda: "information_schema")
+        monkeypatch.setattr(graph, "get_catalogs", lambda: ["child"])
+        monkeypatch.setattr(graph, "get_metadata_location", lambda: ("child", "erd_meta"))
+        monkeypatch.setattr(graph, "get_schema_collapse_threshold", lambda: 0)  # never collapse
+        graph._CACHE.clear()
+        monkeypatch.setattr(graph, "_query_tables", lambda *a, **k: tables)
+        monkeypatch.setattr(graph, "_query_columns", lambda *a, **k: columns)
+        monkeypatch.setattr(graph, "_query_foreign_keys", lambda *a, **k: fk_rows)
+        for fn in ("_query_primary_keys", "_query_table_tags", "_query_column_tags"):
+            monkeypatch.setattr(graph, fn, lambda *a, **k: [])
+        return graph.build_graph([("child", "s")], "prod")
+
+    def test_target_out_of_view_keeps_marker_and_emits_boundary(self, monkeypatch):
+        payload = self._run(
+            monkeypatch,
+            tables=[("child", "s", "orders", None)],
+            columns=[("child", "s", "orders", "customer_id", "bigint", 1, None)],
+            fk_rows=[("child", "s", "orders", "customer_id", 1,
+                      "other", "pub", "customers", "id", "orders_customer_fk")],
+        )
+        nodes = {n["id"]: n for n in payload["nodes"]}
+        # The FK column keeps its marker and records where it points, though the parent
+        # table is out of view.
+        col = nodes["child.s.orders"]["columns"][0]
+        assert col["is_fk"] is True
+        assert col["references"] == {"table": "other.pub.customers", "column": "id", "in_view": False}
+        # A boundary stub node stands in for the out-of-view target: columnless, flagged.
+        boundary = nodes["other.pub.customers"]
+        assert boundary["is_boundary"] is True and boundary["columns"] == []
+        # The only edge is cross_scope (toggle-gated on the frontend), not a normal edge.
+        assert len(payload["edges"]) == 1
+        assert payload["edges"][0]["cross_scope"] is True
+        # The out-of-view catalog must NOT widen the reported catalog list.
+        assert payload["catalogs"] == ["child"]
+
+    def test_target_in_view_draws_normal_edge_no_boundary(self, monkeypatch):
+        payload = self._run(
+            monkeypatch,
+            tables=[("child", "s", "orders", None), ("child", "s", "customers", None)],
+            columns=[("child", "s", "orders", "customer_id", "bigint", 1, None),
+                     ("child", "s", "customers", "id", "bigint", 1, None)],
+            fk_rows=[("child", "s", "orders", "customer_id", 1,
+                      "child", "s", "customers", "id", "orders_customer_fk")],
+        )
+        nodes = {n["id"]: n for n in payload["nodes"]}
+        assert not any(n.get("is_boundary") for n in payload["nodes"])
+        col = nodes["child.s.orders"]["columns"][0]
+        assert col["references"] == {"table": "child.s.customers", "column": "id", "in_view": True}
+        assert len(payload["edges"]) == 1
+        assert payload["edges"][0]["cross_scope"] is False
+
+
 class TestSnapshotVsLiveQuerySql:
     """The source switch must produce snapshot-table SQL in snapshot mode and
     information_schema SQL otherwise. We capture the built statement via a stubbed

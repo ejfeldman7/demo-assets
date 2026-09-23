@@ -3,6 +3,15 @@ export interface TagValue {
   value: string
 }
 
+// What a foreign-key column points at. `in_view` is false when the referenced (parent)
+// table isn't in the current selection, so the card can still show the declared FK and
+// flag that its target is off-canvas. Null on non-FK columns.
+export interface ColumnRef {
+  table: string
+  column: string
+  in_view: boolean
+}
+
 export interface ColumnMeta {
   name: string
   type: string
@@ -11,6 +20,9 @@ export interface ColumnMeta {
   // Unity Catalog COMMENT / tags -- null/empty when the deployment's catalog has none.
   comment: string | null
   tags: TagValue[]
+  // Present (non-null) for a declared FK column: where it points and whether that target
+  // is currently in view. Absent/null for non-FK columns.
+  references?: ColumnRef | null
 }
 
 export interface TableNodeData {
@@ -21,6 +33,10 @@ export interface TableNodeData {
   comment: string | null
   tags: TagValue[]
   columns: ColumnMeta[]
+  // True for a lightweight stub node standing in for a declared FK's target table that
+  // is outside the current view. Columnless; rendered greyed and inert, shown only when
+  // the cross-scope-references toggle is on.
+  is_boundary?: boolean
 }
 
 // A collapsed schema summary node -- what /api/graph returns per (catalog, schema)
@@ -44,6 +60,9 @@ export interface GraphEdge {
   // True for a heuristic, undeclared-relationship guess (see server/graph.py
   // infer_relationships) -- never equivalent to a real constraint. Hidden by default.
   inferred: boolean
+  // True for a declared FK whose target table is out of the current view: drawn to a
+  // boundary stub node, and shown only when the cross-scope-references toggle is on.
+  cross_scope?: boolean
   // Present only in the schema_summary view: how many table-level FKs were rolled up
   // into this one schema-to-schema edge.
   relationship_count?: number

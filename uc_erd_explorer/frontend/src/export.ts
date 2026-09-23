@@ -24,19 +24,26 @@ export interface ExportScope {
  * Narrow a graph down to an active click-to-filter selection (a specific table's
  * neighbors/connected component) before handing it to any of the text export formats
  * below -- so "export while a table is selected" produces just that subset, not the
- * whole catalog/schema-scoped graph with the selection ignored. `scope: null` (no
- * active selection) returns `graph` unchanged.
+ * whole catalog/schema-scoped graph with the selection ignored.
+ *
+ * Boundary stub nodes (out-of-view FK targets) and their cross-scope edges are always
+ * dropped here: they're on-canvas reference markers, not part of the data model, so they
+ * must never appear as empty tables in the Markdown / JSON / YAML / ER-Studio exports.
+ * (Image export takes the live `displayNodes` instead of routing through here, so a
+ * WYSIWYG screenshot still includes any stubs the user has toggled on.)
  */
 export function scopeGraph(graph: GraphResponse, scope: ExportScope | null): GraphResponse {
-  if (!scope) return graph
   // graph.nodes is typed as a union of two array types (TableNodeData[] | SchemaNodeData[])
   // rather than an array of a union -- .filter() can't narrow that back cleanly, but
   // every element still has an `id` regardless of which shape it is.
-  const nodes = (graph.nodes as Array<{ id: string }>).filter((n) => scope.nodeIds.has(n.id))
+  const modelNodes = (graph.nodes as Array<{ id: string; is_boundary?: boolean }>).filter(
+    (n) => !n.is_boundary && (!scope || scope.nodeIds.has(n.id)),
+  )
+  const modelEdges = graph.edges.filter((e) => !e.cross_scope && (!scope || scope.edgeIds.has(e.id)))
   return {
     ...graph,
-    nodes: nodes as GraphResponse['nodes'],
-    edges: graph.edges.filter((e) => scope.edgeIds.has(e.id)),
+    nodes: modelNodes as GraphResponse['nodes'],
+    edges: modelEdges,
   }
 }
 
