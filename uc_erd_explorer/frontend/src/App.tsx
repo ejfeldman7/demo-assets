@@ -6,10 +6,12 @@ import ReactFlow, {
   MiniMap,
   Panel,
   ReactFlowProvider,
+  applyNodeChanges,
   useReactFlow,
   type Edge,
   type Node,
   type NodeMouseHandler,
+  type OnNodesChange,
 } from 'reactflow'
 import 'reactflow/dist/style.css'
 
@@ -165,6 +167,10 @@ function ErdCanvas() {
   // One-shot flag: skip the next fit-view (set when a baseNodes change came from an
   // expand/collapse push rather than a fresh layout, so toggling doesn't re-zoom).
   const skipFitRef = useRef(false)
+  // True once the user has dragged a table to a manual position in the flat (ELK) view.
+  // Drives the "Reset arrangement" button; cleared whenever a fresh auto-layout lands
+  // (any structural re-layout or an explicit reset re-runs ELK and replaces positions).
+  const [hasManualLayout, setHasManualLayout] = useState(false)
 
   // Load the catalog/schema tree whenever the Prod/Test environment changes, to
   // populate the picker with that environment's actual (possibly _ts-suffixed) catalogs.
@@ -523,6 +529,11 @@ function ErdCanvas() {
   const layoutGenRef = useRef(0)
   const runLayout = useCallback(
     (fit: boolean) => {
+      // A fresh auto-layout replaces every position, so any manual drag arrangement is
+      // discarded here (structural re-layouts + the explicit reset both flow through this).
+      // The flat-mode expand/collapse push does NOT call runLayout, so column toggles keep
+      // a hand-arranged canvas intact.
+      setHasManualLayout(false)
       const nodes = rawNodesRef.current
       if (nodes.length === 0) {
         laidOutRef.current = []
@@ -744,6 +755,18 @@ function ErdCanvas() {
     })
   }, [baseEdges, baseNodes, visibleSet, selectedId, activeEdgeSet, tracePath, pathEdgeIds])
 
+  // Node changes from React Flow. We render a fully-derived `nodes` prop, so we apply ONLY
+  // position changes (from dragging) back into baseNodes -- selection/dimensions are owned by
+  // our own state and derived in displayNodes, so those changes are ignored. Each applied drag
+  // sets skipFitRef so the fit-on-baseNodes effect doesn't yank the viewport mid/after a drag.
+  const onNodesChange: OnNodesChange = useCallback((changes) => {
+    const posChanges = changes.filter((c) => c.type === 'position' && c.position)
+    if (posChanges.length === 0) return
+    skipFitRef.current = true
+    setHasManualLayout(true)
+    setBaseNodes((nodes) => applyNodeChanges(posChanges, nodes) as typeof nodes)
+  }, [])
+
   const onNodeClick: NodeMouseHandler = useCallback(
     (_, node) => {
       // Group boxes collapse via their own header button; a click anywhere else on the box
@@ -839,6 +862,13 @@ function ErdCanvas() {
   // export until a schema is expanded, and an image of two big summary boxes isn't
   // useful as a "schema doc" export either.
   const canExport = graph !== null && graph.view === 'detail' && displayNodes.length > 0
+
+  // Node dragging is offered only in the flat (LR/TB) layout. Star/Galaxy are radial layouts
+  // where a stray card breaks the ring, and in grouped mode the schema group-boxes are sized
+  // by ELK to bound their tables -- a dragged-out card wouldn't take its box with it. In both
+  // cases we leave the canvas read-only (v1 scope).
+  const groupingActive = graph?.view === 'detail' && groupBy !== 'none'
+  const canDrag = !starMode && !groupingActive
 
   // The active click-to-filter selection, translated into what the export functions
   // need (node ids + the specific edge ids connecting them) -- null when nothing's
@@ -1149,6 +1179,20 @@ function ErdCanvas() {
                 </button>
               )
             })}
+            {canDrag && (
+              <button
+                onClick={() => runLayout(true)}
+                disabled={!hasManualLayout}
+                title={
+                  hasManualLayout
+                    ? 'Re-run the automatic layout and discard your manual arrangement'
+                    : 'Drag table cards to arrange them, then reset here'
+                }
+                style={{ ...styles.resetBtn, marginTop: 6, opacity: hasManualLayout ? 1 : 0.5, cursor: hasManualLayout ? 'pointer' : 'default' }}
+              >
+                ↺ Reset arrangement
+              </button>
+            )}
             <button
               onClick={selectStar}
               disabled={!starAvailable}
@@ -1183,7 +1227,9 @@ function ErdCanvas() {
             {!starMode && (
               <div style={styles.hint}>
                 Auto-arranged with ELK. Left → right suits these wide cards; top → bottom stacks
-                them. Star centers one table with its direct FK neighbors — best on a
+                them.{' '}
+                {canDrag && 'Drag any table to reposition it, then Reset arrangement to re-run the auto-layout. '}
+                Star centers one table with its direct FK neighbors — best on a
                 fact/dimension (star) schema. Tip: click a table first to center Star on it.
               </div>
             )}
@@ -1335,6 +1381,9 @@ function ErdCanvas() {
             edges={displayEdges}
             nodeTypes={nodeTypes}
             edgeTypes={edgeTypes}
+            onNodesChange={onNodesChange}
+            nodesDraggable={canDrag}
+            nodesConnectable={false}
             onNodeClick={onNodeClick}
             onPaneClick={() => {
               // Clicking empty canvas clears focus AND any traced path (in trace mode this
