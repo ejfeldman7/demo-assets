@@ -58,13 +58,21 @@ app.add_middleware(GZipMiddleware, minimum_size=1024)
 async def _log_request_timing(request: Request, call_next):
     """Log method/path/status/duration for API calls -- the app previously had no timing
     data at all, so "it's slow" could only be diagnosed by guessing. Static asset fetches
-    are skipped to keep the log signal-heavy."""
+    are skipped to keep the log signal-heavy.
+
+    The timing log lives in a finally block so a handler that RAISES still emits a line --
+    an unhandled 500 is exactly the case you most want timing/status for, and without this
+    it was the one request that logged nothing here."""
     start = time.perf_counter()
-    response = await call_next(request)
-    if request.url.path.startswith("/api"):
-        elapsed_ms = (time.perf_counter() - start) * 1000
-        logger.info("request %s %s -> %d %.0fms", request.method, request.url.path, response.status_code, elapsed_ms)
-    return response
+    status = 500  # assume failure until a response is produced; overwritten on success
+    try:
+        response = await call_next(request)
+        status = response.status_code
+        return response
+    finally:
+        if request.url.path.startswith("/api"):
+            elapsed_ms = (time.perf_counter() - start) * 1000
+            logger.info("request %s %s -> %d %.0fms", request.method, request.url.path, status, elapsed_ms)
 
 
 @app.get("/api/health")

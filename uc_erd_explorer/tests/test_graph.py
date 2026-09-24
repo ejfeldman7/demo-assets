@@ -456,3 +456,34 @@ class TestBuildSchemaSummary:
         assert {(t["catalog"], t["schema"], t["table"]) for t in payload["table_index"]} == {
             ("c", "s1", "orders"), ("c", "s1", "customers"), ("c", "s2", "shipments"),
         }
+
+
+class TestParsePairs:
+    """Shared catalog.schema parser for /api/graph and /api/audit: parse+strip, reject a
+    malformed pair, and cap the count so a crafted request can't build a giant IN clause."""
+
+    def test_none_or_empty_returns_none(self):
+        from server.routes.graph import parse_pairs
+        assert parse_pairs(None) is None
+        assert parse_pairs("") is None
+
+    def test_parses_and_strips_whitespace_and_blanks(self):
+        from server.routes.graph import parse_pairs
+        assert parse_pairs("c1.s1, c2.s2 ,") == [("c1", "s1"), ("c2", "s2")]
+
+    def test_malformed_pair_rejected(self):
+        import pytest
+        from fastapi import HTTPException
+        from server.routes.graph import parse_pairs
+        with pytest.raises(HTTPException) as ei:
+            parse_pairs("no_dot_here")
+        assert ei.value.status_code == 400
+
+    def test_count_capped(self):
+        import pytest
+        from fastapi import HTTPException
+        from server.routes.graph import parse_pairs, _MAX_PAIRS
+        many = ",".join(f"c.s{i}" for i in range(_MAX_PAIRS + 1))
+        with pytest.raises(HTTPException) as ei:
+            parse_pairs(many)
+        assert ei.value.status_code == 400

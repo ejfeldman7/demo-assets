@@ -11,26 +11,9 @@ from ..config import get_catalogs
 from ..graph import build_graph, _resolve_catalogs
 from ..integrations import detect_dbxmetagen, fetch_fk_predictions
 from ..ratelimit import graph_rate_limit
-from .graph import _ENV_QUERY, _capture_user
+from .graph import _ENV_QUERY, _capture_user, parse_pairs
 
 router = APIRouter(tags=["insights"], dependencies=[Depends(_capture_user)])
-
-
-def _parse_pairs(pairs: Optional[str]):
-    """Parse the same comma-separated catalog.schema selection /api/graph accepts, so the
-    audit runs over exactly the scope the user is looking at."""
-    if not pairs:
-        return None
-    parsed = []
-    for pair in pairs.split(","):
-        pair = pair.strip()
-        if not pair:
-            continue
-        if "." not in pair:
-            raise HTTPException(status_code=400, detail=f"Invalid catalog.schema pair: '{pair}'")
-        catalog, schema = pair.split(".", 1)
-        parsed.append((catalog.strip(), schema.strip()))
-    return parsed
 
 
 @router.get("/audit", dependencies=[Depends(graph_rate_limit)])
@@ -40,7 +23,7 @@ async def get_audit(
 ):
     """Deterministic schema-health audit over the current graph scope. Builds (or reuses the
     cached) graph, then runs pure rule checks on it -- no extra queries, no LLM, no writes."""
-    parsed = _parse_pairs(pairs)
+    parsed = parse_pairs(pairs)
     try:
         # build_graph is cached and does the warehouse I/O; run it off the event loop (carrying
         # the OBO identity via the copied context, same as /api/graph). audit_graph is pure.
