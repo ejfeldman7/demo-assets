@@ -44,6 +44,31 @@ _ENV_QUERY = Query(
     "deployment -- see /api/config's test_available.",
 )
 
+# Upper bound on how many catalog.schema pairs one request may select. Each pair becomes a
+# tuple in a SQL IN clause, so an uncapped list lets a crafted request build an unboundedly
+# large query. The tree picker never selects anywhere near this many at once.
+_MAX_PAIRS = 200
+
+
+def parse_pairs(pairs: Optional[str]):
+    """Parse the comma-separated catalog.schema selection shared by /api/graph and
+    /api/audit into (catalog, schema) tuples. Returns None when nothing is selected.
+    Rejects a malformed pair (400) and caps the count at _MAX_PAIRS (400)."""
+    if not pairs:
+        return None
+    parsed = []
+    for pair in pairs.split(","):
+        pair = pair.strip()
+        if not pair:
+            continue
+        if "." not in pair:
+            raise HTTPException(status_code=400, detail=f"Invalid catalog.schema pair: '{pair}'")
+        catalog, schema = pair.split(".", 1)
+        parsed.append((catalog.strip(), schema.strip()))
+    if len(parsed) > _MAX_PAIRS:
+        raise HTTPException(status_code=400, detail=f"Too many catalog.schema pairs (max {_MAX_PAIRS}).")
+    return parsed
+
 
 @router.get("/graph", dependencies=[Depends(graph_rate_limit)])
 async def get_graph(
@@ -58,17 +83,7 @@ async def get_graph(
 ):
     """Return {nodes, edges} for the deployment's configured catalog allow-list,
     optionally narrowed to specific catalog.schema pairs."""
-    parsed = None
-    if pairs:
-        parsed = []
-        for pair in pairs.split(","):
-            pair = pair.strip()
-            if not pair:
-                continue
-            if "." not in pair:
-                raise HTTPException(status_code=400, detail=f"Invalid catalog.schema pair: '{pair}'")
-            catalog, schema = pair.split(".", 1)
-            parsed.append((catalog.strip(), schema.strip()))
+    parsed = parse_pairs(pairs)
     try:
         # build_graph does blocking, potentially slow warehouse I/O -- run it off the
         # event loop so one slow load doesn't stall every other concurrent request (this

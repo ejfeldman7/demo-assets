@@ -129,9 +129,11 @@ function ErdCanvas() {
   // so first load renders identically to before this feature existed.
   const [showInferred, setShowInferred] = useState(false)
   // Draw declared FKs whose target table is outside the current view as edges to greyed
-  // "boundary" stub nodes. Off by default (keeps the canvas to the selected tables); the
-  // FK marker + reference label on the column always show regardless of this toggle.
-  const [showCrossScope, setShowCrossScope] = useState(false)
+  // "boundary" stub nodes. ON by default (so a declared FK is never invisible just because
+  // its parent is out of scope); the user can hide the stubs via the toggle. The FK marker
+  // + reference label on the column always show regardless. Inverted sense ("hide") so the
+  // default-on control reads naturally as a checkbox.
+  const [hideCrossScope, setHideCrossScope] = useState(false)
   // "Keys only" collapses each table to just its PK/FK columns -- purely a client-side
   // view filter (the backend always returns every column, flagged is_pk/is_fk), so
   // toggling is instant and never re-queries. A table with no declared PK/FK renders as
@@ -280,10 +282,10 @@ function ErdCanvas() {
     () =>
       graph
         ? graph.edges.filter(
-            (e) => (showInferred || !e.inferred) && (showCrossScope && !starMode ? true : !e.cross_scope),
+            (e) => (showInferred || !e.inferred) && (!hideCrossScope || !e.cross_scope),
           )
         : [],
-    [graph, showInferred, showCrossScope, starMode],
+    [graph, showInferred, hideCrossScope],
   )
 
   // The column each visible edge anchors to, per node (fk_columns[0] on the source,
@@ -389,10 +391,11 @@ function ErdCanvas() {
     }
 
     const rawNodes: Node<TableNodeData | SchemaNodeData>[] = graph.nodes
-      // Boundary stubs (out-of-view FK targets) only participate when the cross-scope
-      // toggle is on. Filtering them here keeps them out of the layout, fit, and exports
-      // by default -- the FK marker on the column carries the reference regardless.
-      .filter((n) => (showCrossScope && !starMode) || !('is_boundary' in n && n.is_boundary))
+      // Boundary stubs (out-of-view FK targets) participate unless the user hides them.
+      // Shown in every layout (flat, star, galaxy): in Star focus they surface as ring
+      // neighbors of the centered table; in Galaxy they join the connected component.
+      // The FK marker on the column carries the reference regardless of this filter.
+      .filter((n) => !hideCrossScope || !('is_boundary' in n && n.is_boundary))
       .map((n) => {
       // Schema-summary nodes have no columns -- pass through unchanged.
       if (!('columns' in n)) {
@@ -492,7 +495,7 @@ function ErdCanvas() {
       : []
 
     return { rawNodes, baseEdges: [...edges, ...predictedRf] }
-  }, [graph, scopedGraphEdges, keysOnly, expandedTables, anchorColsByNode, showPredictions, predictedEdges, starMode, showCrossScope])
+  }, [graph, scopedGraphEdges, keysOnly, expandedTables, anchorColsByNode, showPredictions, predictedEdges, starMode, hideCrossScope])
 
   // --- Star layout derivation ---------------------------------------------------------
   // Client-side classification (fact/dimension/junction) drives the star view's center
@@ -615,7 +618,7 @@ function ErdCanvas() {
   // (the last three arrive via runLayout's deps). NOT per-table column expansion.
   useEffect(() => {
     runLayout(true)
-  }, [graph, keysOnly, showInferred, showCrossScope, runLayout])
+  }, [graph, keysOnly, showInferred, hideCrossScope, runLayout])
 
   // Expand/collapse a single table. FLAT mode: keep every card in place and apply a local
   // vertical push -- shift only the cards below the toggled one in its lane by the exact
@@ -1356,15 +1359,14 @@ function ErdCanvas() {
           <SectionLabel>Cross-scope references</SectionLabel>
           <div style={styles.card}>
             <Switch
-              label="Show off-canvas FK targets"
-              checked={showCrossScope}
-              onChange={() => setShowCrossScope((v) => !v)}
-              disabled={starMode}
+              label="Hide off-canvas FK targets"
+              checked={hideCrossScope}
+              onChange={() => setHideCrossScope((v) => !v)}
             />
             <div style={styles.hint}>
               {crossScopeCount > 0
-                ? `${crossScopeCount} declared foreign key${crossScopeCount === 1 ? '' : 's'} point to tables outside the current selection. The key stays marked on the column either way; turn this on to draw each one to a greyed stub of its target. Add the target's schema to the selection to see it in full.`
-                : 'No declared foreign keys point outside the current selection. Declared keys to out-of-view tables would appear here.'}
+                ? `${crossScopeCount} declared foreign key${crossScopeCount === 1 ? '' : 's'} point to tables outside the current selection. They're drawn to greyed stubs of their targets by default (in Star view, on the centered table's ring); turn this on to hide the stubs. The key stays marked on the column either way. Add the target's schema to the selection to see it in full.`
+                : 'No declared foreign keys point outside the current selection. Declared keys to out-of-view tables would show as greyed stubs here.'}
             </div>
           </div>
 
