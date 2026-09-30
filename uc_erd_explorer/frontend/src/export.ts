@@ -3,10 +3,13 @@ import { toPng, toSvg } from 'html-to-image'
 import { zipSync, strToU8 } from 'fflate'
 import { getNodesBounds, getViewportForBounds, type Node } from 'reactflow'
 import type { ColumnMeta, GraphEdge, GraphResponse, TableNodeData } from './types'
-import { buildDdl } from './erstudio/ddlBuilder'
-import { buildMetadataCsv } from './erstudio/metadataCsv'
-import { buildUnsupportedTypesDoc } from './erstudio/unsupportedTypesDoc'
-import type { Dialect } from './erstudio/typeMapping'
+import { buildDdl } from './erstudio/ddlBuilder.ts'
+import { buildMetadataCsv } from './erstudio/metadataCsv.ts'
+import { buildUnsupportedTypesDoc } from './erstudio/unsupportedTypesDoc.ts'
+import type { Dialect } from './erstudio/typeMapping.ts'
+import type { ExportScope } from './graphScope.ts'
+export { scopeGraph } from './graphScope.ts'
+export type { ExportScope }
 
 function download(href: string, filename: string) {
   const link = document.createElement('a')
@@ -15,37 +18,6 @@ function download(href: string, filename: string) {
   link.click()
 }
 
-export interface ExportScope {
-  nodeIds: Set<string>
-  edgeIds: Set<string>
-}
-
-/**
- * Narrow a graph down to an active click-to-filter selection (a specific table's
- * neighbors/connected component) before handing it to any of the text export formats
- * below -- so "export while a table is selected" produces just that subset, not the
- * whole catalog/schema-scoped graph with the selection ignored.
- *
- * Boundary stub nodes (out-of-view FK targets) and their cross-scope edges are always
- * dropped here: they're on-canvas reference markers, not part of the data model, so they
- * must never appear as empty tables in the Markdown / JSON / YAML / ER-Studio exports.
- * (Image export takes the live `displayNodes` instead of routing through here, so a
- * WYSIWYG screenshot still includes any stubs the user has toggled on.)
- */
-export function scopeGraph(graph: GraphResponse, scope: ExportScope | null): GraphResponse {
-  // graph.nodes is typed as a union of two array types (TableNodeData[] | SchemaNodeData[])
-  // rather than an array of a union -- .filter() can't narrow that back cleanly, but
-  // every element still has an `id` regardless of which shape it is.
-  const modelNodes = (graph.nodes as Array<{ id: string; is_boundary?: boolean }>).filter(
-    (n) => !n.is_boundary && (!scope || scope.nodeIds.has(n.id)),
-  )
-  const modelEdges = graph.edges.filter((e) => !e.cross_scope && (!scope || scope.edgeIds.has(e.id)))
-  return {
-    ...graph,
-    nodes: modelNodes as GraphResponse['nodes'],
-    edges: modelEdges,
-  }
-}
 
 /**
  * Export the current canvas -- fit to the bounds of the exported nodes, not the whole

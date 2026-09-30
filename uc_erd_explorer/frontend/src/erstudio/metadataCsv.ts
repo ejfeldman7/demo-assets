@@ -9,6 +9,7 @@ const HEADER = [
   'uc_tags',
   'is_primary_key',
   'is_foreign_key',
+  'declared_fk_target',
   'is_inferred_relationship',
   'inferred_relationship_target',
   'source_system',
@@ -48,6 +49,10 @@ export function buildMetadataCsv(graph: GraphResponse): string {
   for (const node of nodes) {
     for (const col of node.columns) {
       const inferredTarget = inferredBySourceColumn.get(`${node.id}.${col.name}`)
+      // col.references is set by the backend for every declared FK column -- it records
+      // the target table.column regardless of whether that target is in-scope, so this
+      // is non-empty even for cross-catalog FKs whose target is a boundary stub.
+      const declaredFkTarget = col.is_fk && col.references ? col.references.table : ''
       rows.push([
         node.catalog,
         node.schema,
@@ -57,6 +62,7 @@ export function buildMetadataCsv(graph: GraphResponse): string {
         col.tags.map((t) => (t.value && t.value !== 'true' ? `${t.name}:${t.value}` : t.name)).join('; '),
         String(col.is_pk),
         String(col.is_fk),
+        declaredFkTarget,
         String(Boolean(inferredTarget)),
         inferredTarget ?? '',
         `${node.catalog}.${node.schema}.${node.table}`,
