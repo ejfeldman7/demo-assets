@@ -1,5 +1,5 @@
 import type { GraphResponse, TableNodeData } from '../types'
-import { mapColumnType, type Dialect } from './typeMapping'
+import { mapColumnType, type Dialect } from './typeMapping.ts'
 
 export interface UnsupportedTypeEntry {
   table: string // fully-qualified catalog.schema.table
@@ -102,11 +102,23 @@ export function buildDdl(graph: GraphResponse, dialect: Dialect): DdlResult {
     )
     for (const edge of declaredEdges) {
       const source = nodeById.get(edge.source)
-      const target = nodeById.get(edge.target)
-      if (!source || !target) continue // endpoint outside the current export scope
+      if (!source) continue // FK source not in scope -- shouldn't happen but guard it
+      // The target may be a cross-catalog boundary stub (not in nodeById). Node IDs are
+      // "catalog.schema.table" -- UC names never contain dots, so this split is unambiguous.
+      const targetNode = nodeById.get(edge.target)
+      let targetCatalog: string, targetSchema: string, targetTable: string
+      if (targetNode) {
+        targetCatalog = targetNode.catalog
+        targetSchema = targetNode.schema
+        targetTable = targetNode.table
+      } else {
+        const parts = edge.target.split('.')
+        if (parts.length !== 3) continue
+        ;[targetCatalog, targetSchema, targetTable] = parts
+      }
       const sourceQualified = qualifiedTable(dialect, source.catalog, source.schema, source.table)
-      const targetQualified = qualifiedTable(dialect, target.catalog, target.schema, target.table)
-      const fkName = quoteIdent(dialect, edge.constraint_name ?? `${source.table}_${target.table}_fk`)
+      const targetQualified = qualifiedTable(dialect, targetCatalog, targetSchema, targetTable)
+      const fkName = quoteIdent(dialect, edge.constraint_name ?? `${source.table}_${targetTable}_fk`)
       const fkCols = edge.fk_columns.map((c) => quoteIdent(dialect, c)).join(', ')
       const pkCols = edge.pk_columns.map((c) => quoteIdent(dialect, c)).join(', ')
       lines.push(

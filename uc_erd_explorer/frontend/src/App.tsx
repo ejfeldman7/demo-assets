@@ -41,11 +41,10 @@ import { DbxmetagenNote } from './DbxmetagenNote'
 import { GroupBoxNode } from './GroupBox'
 import type { GroupBox } from './elkLayout'
 import type { TableEntry } from './search'
-// Only the ExportScope type is imported eagerly (types are erased at build time, so this
-// pulls no code). The export implementation -- which drags in html-to-image, js-yaml and
-// fflate (~hundreds of KB) -- is dynamically imported inside the export handlers, so it's
-// off the initial bundle and only fetched the first time someone actually exports.
-import type { ExportScope } from './export'
+// ExportScope is imported from graphScope (no heavy deps) so it remains zero-cost at
+// load time. The export implementation -- which drags in html-to-image, js-yaml and
+// fflate (~hundreds of KB) -- is dynamically imported inside the export handlers.
+import type { ExportScope } from './graphScope'
 import { buildCatalogColorMap, lookupCatalogColor } from './catalogColors'
 import type { Dialect } from './erstudio/typeMapping'
 import type {
@@ -921,7 +920,7 @@ function ErdCanvas() {
     async (format: 'md' | 'json' | 'yaml') => {
       if (!canExport || !graph) return
       const m = await import('./export')
-      const scoped = m.scopeGraph(graph, exportScope)
+      const scoped = m.scopeGraph(graph, exportScope, { keepDeclaredCrossScope: true })
       if (format === 'md') m.exportGraphAsMarkdown(scoped, 'erd-schema-docs')
       else if (format === 'json') m.exportGraphAsJson(scoped, 'erd-schema-docs')
       else m.exportGraphAsYaml(scoped, 'erd-schema-docs')
@@ -932,7 +931,7 @@ function ErdCanvas() {
   const handleExportErStudio = useCallback(async () => {
     if (!canExport || !graph) return
     const m = await import('./export')
-    const scoped = m.scopeGraph(graph, exportScope)
+    const scoped = m.scopeGraph(graph, exportScope, { keepDeclaredCrossScope: true })
     m.exportGraphAsErStudioZip(scoped, erStudioDialect, 'erd-erstudio-export')
   }, [canExport, graph, exportScope, erStudioDialect])
 
