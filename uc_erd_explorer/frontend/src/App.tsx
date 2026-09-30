@@ -920,7 +920,7 @@ function ErdCanvas() {
     async (format: 'md' | 'json' | 'yaml') => {
       if (!canExport || !graph) return
       const m = await import('./export')
-      const scoped = m.scopeGraph(graph, exportScope)
+      const scoped = m.scopeGraph(graph, exportScope, { keepDeclaredCrossScope: true })
       if (format === 'md') m.exportGraphAsMarkdown(scoped, 'erd-schema-docs')
       else if (format === 'json') m.exportGraphAsJson(scoped, 'erd-schema-docs')
       else m.exportGraphAsYaml(scoped, 'erd-schema-docs')

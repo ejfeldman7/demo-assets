@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { buildDdl } from './ddlBuilder.ts'
 import { buildMetadataCsv } from './metadataCsv.ts'
 import { scopeGraph } from '../graphScope.ts'
+import { graphToMarkdown, graphToExportData } from '../exportDocs.ts'
 import type { GraphResponse, TableNodeData, GraphEdge } from '../types.ts'
 
 // ---------------------------------------------------------------------------
@@ -180,5 +181,61 @@ describe('buildMetadataCsv declared_fk_target', () => {
     const headerLine = lines[0].split(',')
     const fkTargetIdx = headerLine.indexOf('declared_fk_target')
     assert.equal(cols[fkTargetIdx], '')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// graphToMarkdown -- cross-catalog FK rendering
+// ---------------------------------------------------------------------------
+
+describe('graphToMarkdown cross-catalog FKs', () => {
+  it('includes cross-scope declared FK in relationships section with † marker', () => {
+    const src = node('cat_a', 's', 'fact', { pk: 'id' })
+    const e1 = edge('cat_a', 's', 'fact', 'cat_b', 's', 'dim', { cross_scope: true, name: 'fact_dim_fk' })
+    const md = graphToMarkdown(graph([src], [e1]))
+    assert.ok(md.includes('cat_a.s.fact'), 'source not in relationships')
+    assert.ok(md.includes('cat_b.s.dim'), 'target not in relationships')
+    assert.ok(md.includes(' †'), 'cross-scope marker † missing')
+    assert.ok(md.includes('no entry in the Tables section'), 'footnote missing')
+  })
+
+  it('does not add † or footnote for same-catalog FK', () => {
+    const src = node('cat', 's', 'orders', { pk: 'id' })
+    const tgt = node('cat', 's', 'customers', { pk: 'id' })
+    const e1 = edge('cat', 's', 'orders', 'cat', 's', 'customers')
+    const md = graphToMarkdown(graph([src, tgt], [e1]))
+    assert.ok(!md.includes(' †'), 'unexpected † marker for same-catalog FK')
+    assert.ok(!md.includes('no entry in the Tables section'), 'unexpected footnote')
+  })
+
+  it('counts cross-scope declared FKs in the Relationships header', () => {
+    const src = node('cat_a', 's', 'fact', { pk: 'id' })
+    const e1 = edge('cat_a', 's', 'fact', 'cat_b', 's', 'dim1', { cross_scope: true })
+    const e2 = edge('cat_a', 's', 'fact', 'cat_b', 's', 'dim2', { cross_scope: true })
+    const md = graphToMarkdown(graph([src], [e1, e2]))
+    assert.ok(md.includes('## Relationships (2)'), 'relationship count wrong')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// graphToExportData -- cross_scope field in JSON/YAML relationships
+// ---------------------------------------------------------------------------
+
+describe('graphToExportData cross-catalog FKs', () => {
+  it('includes cross_scope: true on cross-catalog relationships', () => {
+    const src = node('cat_a', 's', 'fact', { pk: 'id' })
+    const e1 = edge('cat_a', 's', 'fact', 'cat_b', 's', 'dim', { cross_scope: true })
+    const data = graphToExportData(graph([src], [e1]))
+    assert.equal(data.relationships.length, 1)
+    assert.equal(data.relationships[0].cross_scope, true)
+  })
+
+  it('omits cross_scope for same-catalog FK (keeps output clean)', () => {
+    const src = node('cat', 's', 'orders', { pk: 'id' })
+    const tgt = node('cat', 's', 'customers', { pk: 'id' })
+    const e1 = edge('cat', 's', 'orders', 'cat', 's', 'customers')
+    const data = graphToExportData(graph([src, tgt], [e1]))
+    assert.equal(data.relationships.length, 1)
+    assert.ok(!('cross_scope' in data.relationships[0]), 'cross_scope should be absent for same-catalog FK')
   })
 })
